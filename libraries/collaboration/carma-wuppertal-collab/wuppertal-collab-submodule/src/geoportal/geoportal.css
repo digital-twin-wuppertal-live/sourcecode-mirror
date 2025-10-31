@@ -1,0 +1,6 @@
+/* Hide content on small screens */
+@media screen and (max-width: 640px) {
+  .hide-on-small-screens {
+    display: none;
+  }
+}
