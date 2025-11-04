@@ -1,4 +1,4 @@
-import { useContext, useState } from "react";
+import { useContext, useEffect, useState } from "react";
 import { ResponsiveInfoBox, MODES } from "./ResponsiveInfoBox";
 import { TopicMapStylingContext } from "react-cismap/contexts/TopicMapStylingContextProvider";
 import {
@@ -6,6 +6,7 @@ import {
   FeatureCollectionDispatchContext,
 } from "react-cismap/contexts/FeatureCollectionContextProvider";
 import { ResponsiveTopicMapContext } from "react-cismap/contexts/ResponsiveTopicMapContextProvider";
+import { LightBoxDispatchContext } from "react-cismap/contexts/LightBoxContextProvider";
 import Color from "color";
 import parseHtml from "html-react-parser";
 import Button from "react-bootstrap/Button";
@@ -36,6 +37,7 @@ interface InfoBoxProps {
   noCurrentFeatureTitle?: any;
   noCurrentFeatureContent?: any;
   isCollapsible?: any;
+  collapsible?: boolean;
   hideNavigator?: any;
   handleResponsiveDesign?: any;
   infoStyle?: any;
@@ -47,6 +49,14 @@ interface InfoBoxProps {
   infoBoxBottomResMargin?: number;
   bigMobileIconsInsteadOfCollapsing?: boolean;
 }
+
+type LightboxDispatch = {
+  setPhotoUrls: (urls: string[]) => void;
+  setIndex: (i: number) => void;
+  setTitle: (t: string) => void;
+  setCaptions: (t: string[]) => void;
+  setVisible: (v: boolean) => void;
+};
 
 export const InfoBox = ({
   currentFeature,
@@ -70,6 +80,7 @@ export const InfoBox = ({
   noCurrentFeatureTitle,
   noCurrentFeatureContent,
   isCollapsible = true,
+  collapsible = true,
   hideNavigator = false,
   handleResponsiveDesign = true,
   infoStyle = {},
@@ -104,6 +115,24 @@ export const InfoBox = ({
   const { additionalStylingInfo } = useContext<typeof TopicMapStylingContext>(
     TopicMapStylingContext
   );
+  const lightBoxDispatchContext = useContext(
+    LightBoxDispatchContext
+  ) as LightboxDispatch;
+
+  useEffect(() => {
+    const fotoCaptions =
+      currentFeature?.properties?.info?.fotoCaptions ||
+      currentFeature?.properties?.fotoCaptions;
+
+    if (
+      currentFeature &&
+      fotoCaptions &&
+      fotoCaptions.length > 0 &&
+      lightBoxDispatchContext?.setCaptions
+    ) {
+      lightBoxDispatchContext.setCaptions(fotoCaptions);
+    }
+  }, [currentFeature]);
 
   // Determine the actual collapsed state
   const isCollapsed =
@@ -576,7 +605,7 @@ export const InfoBox = ({
       header={llVis}
       collapsedInfoBox={isCollapsed}
       setCollapsedInfoBox={setIsCollapsed}
-      isCollapsible={isCollapsible}
+      isCollapsible={collapsible}
       handleResponsiveDesign={handleResponsiveDesign}
       infoStyle={infoStyle}
       secondaryInfoBoxElements={finalSecondaryElements}
