@@ -121,7 +121,6 @@ const LandParcelChooser = ({
       flur: selectedFlur.flur,
       ...selectedFlur.flurstuecke[flurstueckLabel],
     });
-
     setTimeout(() => {
       dispatch(setHasFittedBounds(false));
     }, 800);

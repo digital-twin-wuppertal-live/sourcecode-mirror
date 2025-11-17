@@ -1,12 +1,13 @@
 import type { Layer } from "@carma/types";
-import { FontAwesomeLikeIcon } from "@carma-appframeworks/portals";
+import { FontAwesomeLikeIcon } from "./FontAwesomeLikeIcon";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { useEffect, useState } from "react";
 import { faLayerGroup, faMap } from "@fortawesome/free-solid-svg-icons";
 import { iconColorMap, iconMap } from "./iconMapping";
 
 const ICON_PREFIX =
-  "https://www.wuppertal.de/geoportal/geoportal_icon_legends/";
+  import.meta.env.VITE_WUPP_ASSET_BASEURL +
+  "/geoportal/geoportal_icon_legends/";
 
 interface LayerIconProps {
   layer: Layer;
@@ -18,7 +19,7 @@ interface LayerIconProps {
 
 const isUrl = (str: string | undefined): boolean => {
   if (!str) return false;
-  return str.startsWith('http://') || str.startsWith('https://');
+  return str.startsWith("http://") || str.startsWith("https://");
 };
 
 export const LayerIcon = ({

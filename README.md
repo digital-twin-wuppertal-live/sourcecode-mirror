@@ -32,8 +32,8 @@ Zu jeder Anwendung gehören die Bibliotheken, von denen sie abhängt, und die Ko
 
 ## Stand
 
-- carma: `0e219bb55d52711dfddc3ca3ca68962410ba37c9`
-- carma-wuppertal-collab: `c30fd44b9e135dc9b4503eb1846e1075bd6a8dae`
+- carma: `9d7890a69973018856a4a80e054a105864645b32`
+- carma-wuppertal-collab: `53c69f0062c61c2b2dc90f450647aeef83293a7d`
 
 Jede Live-Auslieferung einer der Anwendungen legt hier einen Commit mit dem gesamten Code an und setzt ein Tag `<anwendung>/v<version>`. Wird dieselbe Version noch einmal ausgeliefert, bekommt das neue Tag einen Zusatz wie `-2`. Werden alle Anwendungen auf einmal ausgeliefert, gibt es einen gemeinsamen Commit mit dem Tag `allProjects/v<datum>-<uhrzeit>` (UTC), auf das dann jede Anwendung in `LIVE.json` verweist. `main` zeigt den Stand der letzten Auslieferung, gleich welcher Anwendung. Für eine Anwendung, die länger nicht ausgeliefert wurde, kann der Code auf `main` deshalb neuer sein als das, was live läuft; den ausgelieferten Stand enthält ihr Tag. Welche Version welcher Anwendung live ist, steht in `LIVE.json`.
 
