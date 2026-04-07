@@ -1,13 +1,27 @@
+// TODO: This hook uses Leaflet-specific naming ("getLeafletMap", "getLeafletZoom",
+// "LeafletLikeMap") but is also consumed by LibreMap (MapLibre), which wraps its
+// map instance in a Leaflet-shaped adapter. The framework switcher context similarly
+// labels the 2D slot "leaflet" regardless of the actual engine.
+//
+// Refactor plan:
+// 1. Rename the interface to engine-agnostic names (e.g., "Map2D", "get2DMap",
+//    "get2DZoom") in this hook and in UseMapHashRoutingOptions.
+// 2. Update MapFrameworkSwitcherContext to use "2d" / "3d" (or "maplibre" / "cesium")
+//    instead of "leaflet" / "cesium".
+// 3. Update all consumers (LibreMap, GeoportalMap, floodingmap, etc.).
+// 4. Keep the actual adapter pattern (MapLibre -> simple {setView, getCenter, ...})
+//    since the hash-routing logic only needs center + zoom.
+
 import { useCallback, useEffect, useRef } from "react";
 import {
+  HASH_CLEAR_KEY_SET,
   useHashState,
   type HashChangeEvent,
 } from "@carma-providers/hash-state";
-
-import { cesiumClearParamKeys } from "@carma-mapping/engines/cesium";
 import { useMapFrameworkSwitcherContext } from "@carma-mapping/components";
 import { isMapCenterZoomEquivalent } from "@carma/geo/utils";
 import { Degrees } from "@carma/units/types";
+import { useRegisterDefaultMapHashClearKeySets } from "./useRegisterDefaultMapHashClearKeySets";
 
 export type LatLngZoom = { lat: number; lng: number; zoom: number };
 export type CesiumSceneChangeEvent = { hashParams: Record<string, string> };
@@ -30,18 +44,22 @@ type LeafletLikeMap = {
 export interface UseMapHashRoutingOptions {
   getLeafletMap?: () => LeafletLikeMap | null | undefined;
   getLeafletZoom?: () => number;
-  cesiumClearKeys?: string[];
+  additionalClearKeys?: string[];
   labels?: Labels;
   pixelTolerance?: number; // px
+  isHashWriteEnabled?: () => boolean;
 }
 
 export function useMapHashRouting({
   getLeafletMap,
   getLeafletZoom,
-  cesiumClearKeys = cesiumClearParamKeys,
+  additionalClearKeys,
   labels,
   pixelTolerance,
+  isHashWriteEnabled,
 }: UseMapHashRoutingOptions) {
+  useRegisterDefaultMapHashClearKeySets();
+  const resolvedAdditionalClearKeys = additionalClearKeys ?? [];
   const { updateHash, registerOnPopState, getHashValues } = useHashState();
   const { getIsLeaflet, getIsCesium, getIsTransitioning, activeFramework } =
     useMapFrameworkSwitcherContext();
@@ -58,6 +76,12 @@ export function useMapHashRouting({
   const handleTopicMapLocationChange = useCallback(
     ({ lat, lng, zoom }: LatLngZoom) => {
       console.debug("[Routing][hash]", lat, lng, zoom);
+      if (isHashWriteEnabled && !isHashWriteEnabled()) {
+        console.debug(
+          "[Routing][hash] (Leaflet) suppress push: hash writes disabled by guard"
+        );
+        return;
+      }
       if (!getIsLeaflet() || getIsTransitioning()) {
         console.debug(
           "[Routing][hash] (Leaflet) suppress push: not in Leaflet mode or transitioning"
@@ -136,7 +160,11 @@ export function useMapHashRouting({
       updateHash(
         { lat, lng, zoom },
         {
-          clearKeys: cesiumClearKeys,
+          clearKeySetIds: [
+            HASH_CLEAR_KEY_SET.SCENE_VIEW_STATE,
+            HASH_CLEAR_KEY_SET.LAUNCH_MODE,
+          ],
+          clearKeys: resolvedAdditionalClearKeys,
           label: labels?.topicMapLocation ?? "Map:2D:location",
           replace: false,
         }
@@ -147,14 +175,18 @@ export function useMapHashRouting({
       getIsTransitioning,
       updateHash,
       getHashValues,
-      cesiumClearKeys,
+      resolvedAdditionalClearKeys,
       labels?.topicMapLocation,
       pixelTolerance,
+      isHashWriteEnabled,
     ]
   );
 
   const handleCesiumSceneChange = useCallback(
     (e: CesiumSceneChangeEvent) => {
+      if (isHashWriteEnabled && !isHashWriteEnabled()) {
+        return;
+      }
       if (!getIsCesium() || getIsTransitioning()) return;
       updateHash(e.hashParams, {
         clearKeys: ["zoom"],
@@ -162,7 +194,13 @@ export function useMapHashRouting({
         replace: true, // don't push to history until cesium handled history navigation
       });
     },
-    [getIsCesium, updateHash, labels?.cesiumScene, getIsTransitioning]
+    [
+      getIsCesium,
+      updateHash,
+      labels?.cesiumScene,
+      getIsTransitioning,
+      isHashWriteEnabled,
+    ]
   );
 
   const prevIsModeLeafletLikeRef = useRef<boolean>(getIsLeaflet());
@@ -171,9 +209,17 @@ export function useMapHashRouting({
     const isLeafletLike = getIsLeaflet();
     // Only update hash when transitioning TO Leaflet AND not currently transitioning
     if (!wasLeafletLike && isLeafletLike && !getIsTransitioning()) {
+      if (isHashWriteEnabled && !isHashWriteEnabled()) {
+        prevIsModeLeafletLikeRef.current = isLeafletLike;
+        return;
+      }
       // Replace current entry to clear 3D-specific state
       updateHash(undefined, {
-        clearKeys: cesiumClearKeys,
+        clearKeySetIds: [
+          HASH_CLEAR_KEY_SET.SCENE_VIEW_STATE,
+          HASH_CLEAR_KEY_SET.LAUNCH_MODE,
+        ],
+        clearKeys: resolvedAdditionalClearKeys,
         label: labels?.clearCesium ?? "Map:2D:clearCesium",
         replace: true,
       });
@@ -187,7 +233,11 @@ export function useMapHashRouting({
         const center = map.getCenter();
         const zoom = getLeafletZoom();
         updateHash(
-          { lat: center.lat, lng: center.lng, zoom },
+          {
+            lat: center.lat,
+            lng: center.lng,
+            zoom,
+          },
           { label: labels?.writeLeafletLike ?? "Map:2D:writeLocation" }
         );
       }
@@ -199,9 +249,10 @@ export function useMapHashRouting({
     updateHash,
     getLeafletMap,
     getLeafletZoom,
-    cesiumClearKeys,
+    resolvedAdditionalClearKeys,
     labels?.clearCesium,
     labels?.writeLeafletLike,
+    isHashWriteEnabled,
   ]);
 
   // Trigger hash update when framework switch completes (debounced)
@@ -217,13 +268,6 @@ export function useMapHashRouting({
 
     // Debounce hash update by 200ms to ensure map has settled
     frameworkSwitchTimerRef.current = setTimeout(() => {
-      console.log(
-        "[Routing][hash] Framework switch complete, triggering hash update",
-        {
-          activeFramework,
-        }
-      );
-
       if (getIsLeaflet()) {
         const map = getLeafletMap?.();
         if (
@@ -270,54 +314,27 @@ export function useMapHashRouting({
       const fallbackZoom = getLeafletZoom?.();
       const zoom = zoomFromHash ?? fallbackZoom;
 
-      console.warn("[Routing][hash] POPSTATE ZOOM DEBUG:", {
-        zoomFromHash,
-        fallbackZoom,
-        finalZoom: zoom,
-        hashValues: e.values,
-        source: e.source,
-      });
-
       if (lat == null || lng == null || zoom == null) return;
       const map = getLeafletMap?.();
       if (!map) return;
       navMoveInProgressRef.current = true;
       popstateTargetRef.current = { lat, lng, zoom };
-      console.debug("[Routing][hash] popstate begin -> restore leaflet view", {
-        lat,
-        lng,
-        zoom,
-      });
       const scheduleClear = (evt: string) => {
         if (typeof map.once === "function") {
           map.once(evt, () => {
             setTimeout(() => {
               navMoveInProgressRef.current = false;
-              console.debug(
-                "[Routing][hash] popstate end -> resume leaflet writes",
-                { via: evt }
-              );
             }, 0);
           });
         }
       };
       scheduleClear("moveend");
       scheduleClear("zoomend");
-      console.warn("[Routing][hash] CALLING map.setView", {
-        lat,
-        lng,
-        zoom,
-        stack: new Error().stack,
-      });
       if (typeof map.setView === "function") {
         map.setView({ lat, lng }, zoom);
       } else if (typeof map.panTo === "function") {
         map.panTo({ lat, lng });
         if (typeof map.setZoom === "function") {
-          console.warn("[Routing][hash] CALLING map.setZoom", {
-            zoom,
-            stack: new Error().stack,
-          });
           map.setZoom(zoom);
         }
       }

@@ -7,6 +7,7 @@ import { useLoadCapabilities } from "../hooks/useLoadCapabilities";
 
 import {
   faBook,
+  faCubes,
   faList,
   faMap,
   faMapPin,
@@ -33,6 +34,7 @@ import {
 } from "@carma-providers/feature-flag";
 
 import { flattenLayer, wmsLayerToGenericItem } from "../helper/layerHelper";
+import { isCurrentlyFeatured } from "../helper/dateHelper";
 import LayerTabs from "./LayerTabs";
 import { SidebarItem } from "./SidebarItems";
 
@@ -47,12 +49,24 @@ import {
   addReplaceLayers,
   setSelectedLayer,
   getAllLayers,
+  setAllLayers,
 } from "../slices/mapLayers";
 import { useDispatch, useSelector } from "react-redux";
 import type { Store } from "redux";
 import { getTriggerRefetch, setTriggerRefetch } from "../slices/ui";
+import { useMapFrameworkSwitcherContext } from "@carma-mapping/components";
 
 const { Search } = Input;
+
+const elements = [
+  { icon: faStar, text: "Favoriten", id: "favorites" },
+  { icon: faList, text: "Entdecken", id: "discover", disabledIn3D: true },
+  { icon: faBook, text: "Teilzwillinge", id: "partialTwins" },
+  { icon: faMap, text: "Kartenebenen", id: "mapLayers", disabledIn3D: true },
+  { icon: faMapPin, text: "Sensoren", id: "sensors", disabledIn3D: true },
+  { icon: faCubes, text: "Objekte", id: "objects" },
+  { icon: faSearch, text: "Suchergebnisse", id: "searchResults" },
+];
 
 type LayerCategories = {
   Title: string;
@@ -110,6 +124,7 @@ export const NewLibModal = ({
   store,
   unauthorizedCallback,
 }: LibModalProps) => {
+  const { isCesium } = useMapFrameworkSwitcherContext();
   const [sidebarElements, setSidebarElements] = useState<
     {
       icon: IconDefinition;
@@ -117,14 +132,7 @@ export const NewLibModal = ({
       id: string;
       disabled?: boolean;
     }[]
-  >([
-    { icon: faStar, text: "Favoriten", id: "favorites" },
-    { icon: faList, text: "Entdecken", id: "discover" },
-    { icon: faBook, text: "Teilzwillinge", id: "partialTwins" },
-    { icon: faMap, text: "Kartenebenen", id: "mapLayers" },
-    { icon: faMapPin, text: "Sensoren", id: "sensors" },
-    { icon: faSearch, text: "Suchergebnisse", id: "searchResults" },
-  ]);
+  >(elements);
   const [preview, setPreview] = useState(false);
   const [layers, setLayers] = useState<any[]>([]);
   const allLayers = useSelector(getAllLayers);
@@ -191,6 +199,46 @@ export const NewLibModal = ({
     }
   }, [open, triggerRefetch, jwt]);
 
+  useEffect(() => {
+    const updatedElements = elements.map((element) => {
+      const currentElement = sidebarElements.find((e) => e.id === element.id);
+      const wasDisabledForOtherReasons =
+        currentElement?.disabled && !element.disabledIn3D;
+      return {
+        ...element,
+        disabled:
+          wasDisabledForOtherReasons || (element.disabledIn3D && isCesium),
+      };
+    });
+    setSidebarElements(updatedElements);
+
+    const currentElement = updatedElements[selectedNavItemIndex];
+    if (currentElement?.disabled) {
+      const firstValidIndex = updatedElements.findIndex((element) => {
+        if (element.disabled) return false;
+        const categoryData = filteredCategories.find(
+          (cat) => cat.id === element.id
+        );
+        if (!categoryData) return false;
+        const hasItems = categoryData.categories.some(
+          (subCat) => subCat.layers?.length > 0
+        );
+        return hasItems;
+      });
+
+      if (firstValidIndex !== -1) {
+        setSelectedNavItemIndex(firstValidIndex);
+      } else {
+        const firstNonDisabled = updatedElements.findIndex(
+          (element) => !element.disabled
+        );
+        if (firstNonDisabled !== -1) {
+          setSelectedNavItemIndex(firstNonDisabled);
+        }
+      }
+    }
+  }, [isCesium]);
+
   const getNumOfCustomLayers = () => {
     return customCategories.reduce((acc, category) => {
       return acc + category.layers.length;
@@ -205,17 +253,25 @@ export const NewLibModal = ({
       const copiedCategories = JSON.parse(JSON.stringify(allCategories));
 
       const categoriesWithResults = copiedCategories.map((category) => {
+        const sidebarElement = sidebarElements.find(
+          (element) => element.id === category.id
+        );
+        const isCategoryDisabled = sidebarElement?.disabled;
+
         category.categories.map((tmp) => {
           const newLayers: any[] = [];
-          results.forEach((result) => {
-            const resultItem = result.item;
 
-            if (tmp.id === resultItem.serviceName && tmp.id) {
-              newLayers.push({
-                ...resultItem,
-              });
-            }
-          });
+          if (!isCategoryDisabled) {
+            results.forEach((result) => {
+              const resultItem = result.item;
+
+              if (tmp.id === resultItem.serviceName && tmp.id) {
+                newLayers.push({
+                  ...resultItem,
+                });
+              }
+            });
+          }
 
           tmp.layers = newLayers;
 
@@ -345,6 +401,7 @@ export const NewLibModal = ({
           subCats.forEach((subCat) => {
             if (subCat.id === subCategory.id) {
               newSubCat = subCat;
+              newSubCat.Title = subCategory.Title;
               if (newSubCat) {
                 if (Array.isArray(item)) {
                   newSubCat.layers.unshift(...item);
@@ -356,6 +413,32 @@ export const NewLibModal = ({
                     newSubCat?.layers.findIndex((l) => l.id === layer.id) ===
                     index
                 );
+
+                // Rearrange layers based on insertAfterId property
+                const layersWithInsertAfterId = newSubCat.layers.filter(
+                  (layer) => (layer as any).insertAfterId
+                );
+
+                if (layersWithInsertAfterId.length > 0) {
+                  // Remove layers with insertAfterId from their current positions
+                  newSubCat.layers = newSubCat.layers.filter(
+                    (layer) => !(layer as any).insertAfterId
+                  );
+
+                  layersWithInsertAfterId.forEach((layer) => {
+                    const insertAfterId = (layer as any).insertAfterId;
+                    const targetIndex = newSubCat!.layers.findIndex(
+                      (l) => l.id === insertAfterId
+                    );
+
+                    if (targetIndex !== -1) {
+                      newSubCat.layers.splice(targetIndex + 1, 0, layer);
+                    } else {
+                      // If id doesnt exist append to the end
+                      newSubCat.layers.push(layer);
+                    }
+                  });
+                }
               }
             }
           });
@@ -397,6 +480,8 @@ export const NewLibModal = ({
     getDataFromJson,
     activeLayers,
     updateActiveLayer,
+    setAdditionalLayers,
+    setSidebarElements,
   });
 
   const { loadingAdditionalConfig } = useAdditionalConfig({
@@ -469,7 +554,11 @@ export const NewLibModal = ({
   }, [discoverItems]);
 
   useEffect(() => {
-    if (getNumOfCustomLayers() === 0 && selectedNavItemIndex === 0) {
+    if (
+      getNumOfCustomLayers() === 0 &&
+      selectedNavItemIndex === 0 &&
+      !isCesium
+    ) {
       setSelectedNavItemIndex(3);
     }
 
@@ -555,21 +644,136 @@ export const NewLibModal = ({
       );
     });
 
+    const featuredLayers = allLayers
+      .flatMap((category) =>
+        category.layers.filter((layer) =>
+          layer.keywords?.some(
+            (keyword: string) =>
+              keyword.includes("carmaconf://featuredUntil") ||
+              keyword.includes("carmaconf://featuredFrom")
+          )
+        )
+      )
+      .filter((layer) => {
+        const featuredFrom = layer.keywords
+          ?.find((keyword: string) =>
+            keyword.includes("carmaconf://featuredFrom")
+          )
+          ?.split(":")[2];
+        const featuredUntil = layer.keywords
+          ?.find((keyword: string) =>
+            keyword.includes("carmaconf://featuredUntil")
+          )
+          ?.split(":")[2];
+        return isCurrentlyFeatured(featuredFrom, featuredUntil);
+      });
+
     setAllCategories((prev) => {
-      if (prev.find((item) => item.id === "mapLayers")) {
-        prev.splice(
-          prev.findIndex((item) => item.id === "mapLayers"),
-          1
-        );
+      const newCategories = [...prev];
+      const currentMapLayers = newCategories.find(
+        (item) => item.id === "mapLayers"
+      )?.categories;
+
+      const mergedCategories = JSON.parse(JSON.stringify(allLayers));
+      if (currentMapLayers) {
+        currentMapLayers.forEach((currentCategory) => {
+          const mergedCategoryIndex = mergedCategories.findIndex(
+            (cat) => cat.id === currentCategory.id
+          );
+
+          if (mergedCategoryIndex !== -1) {
+            // Category exists in allLayers, check for additional layers
+            const mergedCategory = mergedCategories[mergedCategoryIndex];
+
+            currentCategory.layers.forEach((currentLayer) => {
+              // Check if this layer exists in the merged category
+              const layerExists = mergedCategory.layers.some(
+                (layer) => layer.id === currentLayer.id
+              );
+
+              if (!layerExists) {
+                mergedCategory.layers.push(currentLayer);
+              }
+            });
+
+            const layersWithInsertAfterId = mergedCategory.layers.filter(
+              (layer) => layer.insertAfterId
+            );
+
+            if (layersWithInsertAfterId.length > 0) {
+              // Remove layers with insertAfterId from their current positions
+              mergedCategory.layers = mergedCategory.layers.filter(
+                (layer) => !layer.insertAfterId
+              );
+
+              layersWithInsertAfterId.forEach((layer) => {
+                const insertAfterId = layer.insertAfterId;
+                const targetIndex = mergedCategory.layers.findIndex(
+                  (l) => l.id === insertAfterId
+                );
+
+                if (targetIndex !== -1) {
+                  mergedCategory.layers.splice(targetIndex + 1, 0, layer);
+                } else {
+                  // If id doesn't exist append to the end
+                  mergedCategory.layers.push(layer);
+                }
+              });
+            }
+          } else {
+            // Category doesn't exist in allLayers, add the entire category
+            if (currentCategory.id === "featured") {
+              mergedCategories.unshift(currentCategory);
+            } else {
+              mergedCategories.push(currentCategory);
+            }
+          }
+        });
       }
-      return [
-        ...prev,
-        {
+
+      const mapLayersIndex = newCategories.findIndex(
+        (item) => item.id === "mapLayers"
+      );
+
+      if (mapLayersIndex !== -1) {
+        newCategories[mapLayersIndex] = {
           id: "mapLayers",
-          categories: JSON.parse(JSON.stringify(allLayers)),
-        },
-      ];
+          categories: mergedCategories,
+        };
+      } else {
+        newCategories.push({
+          id: "mapLayers",
+          categories: mergedCategories,
+        });
+      }
+
+      return newCategories;
     });
+
+    if (featuredLayers.length > 0) {
+      const featuredLayersWithServiceName = featuredLayers.map((layer) => ({
+        ...layer,
+        serviceName: "featured",
+        path: "Neu",
+        originalPath: layer.path,
+      }));
+      setAllLayers((prev) => {
+        return [
+          {
+            id: "featured",
+            Title: "Neu",
+            layers: featuredLayersWithServiceName,
+          },
+          ...prev,
+        ];
+      });
+      addItemToCategory(
+        "mapLayers",
+        { id: "featured", Title: "Neu" },
+        // @ts-ignore
+        featuredLayersWithServiceName
+      );
+    }
 
     if (searchValue) {
       search(debouncedSearchTerm);
@@ -877,7 +1081,9 @@ export const NewLibModal = ({
                   addFavorite={addFavorite}
                   removeFavorite={removeFavorite}
                   setPreview={setPreview}
-                  isSearchCategory={selectedNavItemIndex === 5}
+                  isSearchCategory={
+                    sidebarElements[selectedNavItemIndex].id === "searchResults"
+                  }
                   loadingData={loadingData}
                   currentCategoryIndex={selectedNavItemIndex}
                   discoverProps={discoverProps}

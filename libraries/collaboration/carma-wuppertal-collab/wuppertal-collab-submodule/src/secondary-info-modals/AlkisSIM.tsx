@@ -1,0 +1,1111 @@
+import { useState } from "react";
+import {
+  faBuilding,
+  faLandmark,
+  faSquare,
+  faLink,
+  faShoppingCart,
+  faPlusSquare,
+} from "@fortawesome/free-solid-svg-icons";
+import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
+import { Modal, Accordion } from "react-bootstrap";
+import Panel from "react-cismap/commons/Panel";
+import { genericSecondaryInfoFooterFactory } from "../commons";
+import {
+  buildLiegenschaftskarteUrl,
+  buildAbkAuszugUrl,
+  buildBuchauszugUrl,
+  buildBaulastenUrl,
+} from "./helper/alkis";
+import {
+  createLayerSelectors,
+  useCarmaMapAPIActions,
+  useCarmaMapAPISelector,
+} from "@carma-mapping/carma-map-api";
+
+interface FeatureType {
+  properties?: any;
+  targetProperties?: any;
+  carmaInfo?: {
+    sourceLayer?: string;
+    propertyTarget?: string;
+    [key: string]: any;
+  };
+  [key: string]: any;
+}
+
+type AlkisType = "building" | "landparcel";
+
+interface GebaeudeProperties {
+  fid: number;
+  id?: string;
+  gebaeudefunktion?: number;
+  geb_fkt?: string;
+  geb_typ?: string;
+  og_geschosse?: number;
+  ug_geschosse?: number;
+  strname?: string;
+  strschl?: string;
+  hausnr?: number;
+  hnr?: string;
+  adressen?: string;
+  adr_zusatz?: string;
+  anz_adress?: number;
+  ursprung?: string;
+  oeffentl?: string;
+  flaeche?: number;
+  bounds?: string;
+  baudenkmal?: boolean;
+  baujahr?: number;
+  baudenkmal_nr?: string;
+  baudenkmalnummer?: string;
+  baudenkmal_vid?: string;
+  baudenkmal_eintragung?: string;
+  gemarkung?: string;
+  gemarkungsnummer?: number;
+}
+
+interface Buchung {
+  buchungsart: string;
+  grundbuchbezirk: string;
+  grundbuchblattnummer: string;
+  amtsgericht?: string;
+  buchungsblattbezirk?: string;
+}
+
+interface FlurstueckProperties {
+  fid: number;
+  flurstueck_kz_voll?: string;
+  gemarkungsnummer?: number;
+  flurnummer?: number;
+  zaehler?: number;
+  nenner?: number;
+  nutzungen?: string;
+  adresse?: string;
+  weitere_adr?: string; // JSON array of additional addresses
+  flur_flst_nr?: string;
+  flaeche_m2?: number;
+  zeitpunktderentstehung?: string;
+  bounds?: string;
+  buchungen?: string;
+  baulast_status?: number; // 1: begünstigt, 2: belastet, 3: belastet/begünstigt
+}
+
+// Gemarkung mapping (can be extended)
+const GEMARKUNGEN: Record<number, string> = {
+  3001: "Barmen",
+  3485: "Beyenburg",
+  3279: "Cronenberg",
+  3278: "Dönberg",
+  3135: "Elberfeld",
+  3486: "Langerfeld",
+  3487: "Nächstebreck",
+  3267: "Ronsdorf",
+  3276: "Schöller",
+  3277: "Vohwinkel",
+};
+
+function getGemarkungName(nummer?: number): string {
+  if (!nummer) return "";
+  return GEMARKUNGEN[nummer] || "";
+}
+
+function determineAlkisType(feature: FeatureType): AlkisType {
+  const sourceLayer =
+    feature?.carmaInfo?.sourceLayer ||
+    feature?.properties?.carmaInfo?.sourceLayer;
+
+  if (
+    sourceLayer === "landparcel" ||
+    sourceLayer === "landparcel_point" ||
+    sourceLayer === "landparcel_arrows" ||
+    sourceLayer === "landparcel_arrows_tips"
+  ) {
+    return "landparcel";
+  }
+
+  if (sourceLayer === "building" || sourceLayer === "adresses") {
+    return "building";
+  }
+
+  // Fallback: check for specific properties
+  const props = feature?.targetProperties || feature?.properties || feature;
+  if (props?.flurstueck_kz_voll || props?.flurnummer !== undefined) {
+    return "landparcel";
+  }
+  if (props?.geb_fkt || props?.gebaeudefunktion !== undefined) {
+    return "building";
+  }
+
+  return "building";
+}
+
+function getProperties(feature: FeatureType): any {
+  // If targetProperties exists, use those (case when user clicked via number/arrow)
+  if (feature?.targetProperties) {
+    return { ...feature.targetProperties, ...feature.properties };
+  }
+  return feature?.properties || feature;
+}
+
+function formatDate(dateStr?: string): string {
+  if (!dateStr) return "";
+  // Handle format like "19790101  " or "18000101"
+  const cleaned = dateStr.trim();
+  if (cleaned.length >= 8) {
+    const year = cleaned.substring(0, 4);
+    const month = cleaned.substring(4, 6);
+    const day = cleaned.substring(6, 8);
+    return `${day}.${month}.${year}`;
+  }
+  return cleaned;
+}
+
+function parseNutzungen(
+  nutzungenStr?: string
+): Array<{ typ: string; funktion?: string; percentage: number }> {
+  if (!nutzungenStr) return [];
+  try {
+    const parsed = JSON.parse(nutzungenStr);
+    // Group by funktion and sum percentages
+    const grouped: Record<string, number> = {};
+    parsed.forEach(
+      (n: { typ: string; funktion?: string; percentage: number }) => {
+        const key = n.funktion || n.typ.replace("AX_", "");
+        grouped[key] = (grouped[key] || 0) + n.percentage;
+      }
+    );
+    return Object.entries(grouped)
+      .map(([funktion, percentage]) => ({
+        typ: "",
+        funktion,
+        percentage,
+      }))
+      .sort((a, b) => b.percentage - a.percentage);
+  } catch {
+    return [];
+  }
+}
+
+// Helper to parse buchungen and group by Grundbuchbezirk, then by Buchungsart
+function parseBuchungen(buchungenStr?: string): {
+  grouped: Record<string, Record<string, string[]>>;
+  bezirkDisplayNames: Record<string, string>; // key -> "Name (nummer)" or "Name (nummer) - Amtsgericht X"
+  bezirkNames: string[];
+  totalCount: number;
+  // For single buchung case
+  firstBuchung?: { bezirk: string; blattnummer: string; buchungsart: string };
+} {
+  if (!buchungenStr)
+    return {
+      grouped: {},
+      bezirkDisplayNames: {},
+      bezirkNames: [],
+      totalCount: 0,
+    };
+  try {
+    const parsed: Buchung[] = JSON.parse(buchungenStr);
+    // Group by Bezirk -> Buchungsart -> Blattnummern
+    const grouped: Record<string, Record<string, string[]>> = {};
+    const bezirkDisplayNames: Record<string, string> = {};
+
+    parsed.forEach((b) => {
+      const bezirkNummer = b.grundbuchbezirk;
+      // Use buchungsblattbezirk if available (for non-Wuppertal), otherwise try gemarkung mapping
+      const bezirkNameFromData = b.buchungsblattbezirk;
+      const resolvedName =
+        bezirkNameFromData || getGemarkungName(Number(bezirkNummer));
+      const bezirkName = resolvedName || bezirkNummer;
+      // Use bezirkName as key for grouping
+      if (!grouped[bezirkName]) {
+        grouped[bezirkName] = {};
+        // Build display name: "Name (nummer)" or "Name (nummer) - Amtsgericht X" for non-Wuppertal
+        let displayName = resolvedName
+          ? `${resolvedName} (${bezirkNummer})`
+          : bezirkNummer;
+        // Add Amtsgericht info if present (only for non-Wuppertal cases)
+        if (b.amtsgericht) {
+          displayName += ` - Amtsgericht ${b.amtsgericht}`;
+        }
+        bezirkDisplayNames[bezirkName] = displayName;
+      }
+      if (!grouped[bezirkName][b.buchungsart]) {
+        grouped[bezirkName][b.buchungsart] = [];
+      }
+      // Remove leading zeros from blattnummer
+      const blattnummer = b.grundbuchblattnummer.replace(/^0+/, "") || "0";
+      grouped[bezirkName][b.buchungsart].push(blattnummer);
+    });
+
+    // Sort blattnummern numerically within each buchungsart
+    Object.values(grouped).forEach((buchungsarten) => {
+      Object.keys(buchungsarten).forEach((art) => {
+        buchungsarten[art].sort((a, b) => Number(a) - Number(b));
+      });
+    });
+
+    const bezirkNames = Object.keys(grouped);
+
+    // For single buchung case, extract first entry
+    let firstBuchung:
+      | { bezirk: string; blattnummer: string; buchungsart: string }
+      | undefined;
+    if (parsed.length === 1) {
+      const bezirk = bezirkNames[0];
+      const buchungsart = Object.keys(grouped[bezirk])[0];
+      firstBuchung = {
+        bezirk: bezirkDisplayNames[bezirk],
+        blattnummer: grouped[bezirk][buchungsart][0],
+        buchungsart,
+      };
+    }
+
+    return {
+      grouped,
+      bezirkDisplayNames,
+      bezirkNames,
+      totalCount: parsed.length,
+      firstBuchung,
+    };
+  } catch {
+    return {
+      grouped: {},
+      bezirkDisplayNames: {},
+      bezirkNames: [],
+      totalCount: 0,
+    };
+  }
+}
+
+// Helper to parse addresses from "strschl_hausnr" format
+// Returns array of { streetName, hausnr } in order, first entry is main address
+function parseAdressen(
+  adressen?: string,
+  strschlList?: string,
+  strnameList?: string
+): { streetName: string; hausnr: string }[] {
+  if (!adressen) return [];
+
+  // Build mapping from strschl to strname
+  const strschlToName: Record<string, string> = {};
+  if (strschlList && strnameList) {
+    const codes = strschlList.split(",");
+    const names = strnameList.split(",");
+    codes.forEach((code, idx) => {
+      strschlToName[code.trim()] = names[idx]?.trim() || code.trim();
+    });
+  }
+
+  const adressenParts = adressen.split(",");
+  return adressenParts
+    .map((a) => {
+      const parts = a.split("_");
+      const strschl = parts[0] || "";
+      const hausnr = parts[1] || "";
+      if (strschl && hausnr) {
+        const streetName = strschlToName[strschl] || strschl;
+        return { streetName, hausnr };
+      }
+      return null;
+    })
+    .filter((a): a is { streetName: string; hausnr: string } => a !== null);
+}
+
+// Building Component
+const GebaeudeInfo = ({ props }: { props: GebaeudeProperties }) => {
+  const gemarkungName = getGemarkungName(props.gemarkungsnummer);
+
+  const baudenkmalLayerID = "wuppPlanung:baudenkmale";
+  const { addLayerById } = useCarmaMapAPIActions();
+  const containsBaudenkmalLayer = useCarmaMapAPISelector(
+    createLayerSelectors.hasLayerById(baudenkmalLayerID)
+  );
+
+  // Parse all addresses - first entry is main address, rest are weitere adressen
+  const allAddresses = parseAdressen(
+    props.adressen,
+    props.strschl,
+    props.strname
+  );
+
+  // First address is main, rest are weitere
+  const mainAddress = allAddresses[0];
+  const weitereAdressen = allAddresses.slice(1);
+
+  // Group weitere adressen by street name
+  const weitereGrouped: Record<string, string[]> = {};
+  weitereAdressen.forEach((addr) => {
+    if (!weitereGrouped[addr.streetName]) {
+      weitereGrouped[addr.streetName] = [];
+    }
+    weitereGrouped[addr.streetName].push(addr.hausnr);
+  });
+  const weitereStreets = Object.keys(weitereGrouped);
+
+  return (
+    <>
+      <div style={{ fontSize: "115%", padding: "10px", paddingTop: "0px" }}>
+        <table>
+          <tbody>
+            <tr>
+              <td
+                style={{
+                  whiteSpace: "nowrap",
+                  paddingRight: "15px",
+                  verticalAlign: "top",
+                }}
+              >
+                <b>Gemarkung:</b>
+              </td>
+              <td>
+                {gemarkungName}{" "}
+                {props.gemarkungsnummer ? `(${props.gemarkungsnummer})` : ""}
+              </td>
+            </tr>
+            <tr>
+              <td
+                style={{
+                  whiteSpace: "nowrap",
+                  paddingRight: "15px",
+                  verticalAlign: "top",
+                }}
+              >
+                <b>Adresse:</b>
+              </td>
+              <td>
+                {mainAddress
+                  ? `${mainAddress.streetName} ${mainAddress.hausnr}`
+                  : "-"}
+              </td>
+            </tr>
+            {weitereStreets.length > 0 && (
+              <tr>
+                <td style={{ verticalAlign: "top", paddingRight: "15px" }}>
+                  <b>Weitere Adressen:</b>
+                </td>
+                <td>
+                  {weitereStreets.map((streetName, idx) => (
+                    <div key={idx}>
+                      {streetName} {weitereGrouped[streetName].join(", ")}
+                    </div>
+                  ))}
+                </td>
+              </tr>
+            )}
+            <tr>
+              <td style={{ verticalAlign: "top", paddingRight: "15px" }}>
+                <b>Gebäudetyp:</b>
+              </td>
+              <td>{props.geb_typ?.trim() || "-"}</td>
+            </tr>
+            <tr>
+              <td style={{ verticalAlign: "top", paddingRight: "15px" }}>
+                <b>Funktion:</b>
+              </td>
+              <td>{props.geb_fkt || "-"}</td>
+            </tr>
+            <tr>
+              <td
+                style={{
+                  whiteSpace: "nowrap",
+                  paddingRight: "15px",
+                  verticalAlign: "top",
+                }}
+              >
+                <b>Anzahl der Geschosse:</b>
+              </td>
+              <td>
+                {props.og_geschosse && props.ug_geschosse
+                  ? `${props.og_geschosse} (zusätzlich ${
+                      props.ug_geschosse
+                    } unterirdische${
+                      props.ug_geschosse === 1 ? "s" : ""
+                    } Geschoss${props.ug_geschosse === 1 ? "" : "e"})`
+                  : props.og_geschosse
+                  ? props.og_geschosse
+                  : props.ug_geschosse
+                  ? `${props.ug_geschosse} (unterirdisch)`
+                  : "-"}
+              </td>
+            </tr>
+            <tr>
+              <td style={{ verticalAlign: "top", paddingRight: "15px" }}>
+                <b>Grundfläche:</b>
+              </td>
+              <td>
+                {props.flaeche
+                  ? `${props.flaeche.toLocaleString("de-DE")} m²`
+                  : "-"}
+              </td>
+            </tr>
+          </tbody>
+        </table>
+        {props.oeffentl === "1" && (
+          <div style={{ marginTop: 10 }}>
+            <FontAwesomeIcon
+              icon={faLandmark}
+              style={{ marginRight: 8, color: "#666" }}
+            />
+            Öffentliches Gebäude
+          </div>
+        )}
+      </div>
+
+      {/* {props.baujahr && props.baujahr !== 9999 && (
+        <Accordion style={{ marginBottom: 6 }} defaultActiveKey={"1"}>
+          <Panel
+            header="Gebäudedatei der Statistikstelle"
+            eventKey="1"
+            bsStyle="warning"
+          >
+            <table>
+              <tbody>
+                <tr>
+                  <td style={{ width: "140px" }}>
+                    <b>Baujahr:</b>
+                  </td>
+                  <td>{props.baujahr}</td>
+                </tr>
+              </tbody>
+            </table>
+          </Panel>
+        </Accordion>
+      )} */}
+
+      {props.baudenkmal && (
+        <Accordion style={{ marginBottom: 6 }} defaultActiveKey={"2"}>
+          <Panel header="Denkmalliste" eventKey="2" bsStyle="success">
+            <img
+              src="https://tiles.cismet.de/alkis/assets/baudenkmale.svg"
+              alt="Baudenkmal"
+              style={{
+                float: "right",
+                width: 50,
+                height: 50,
+                marginLeft: 10,
+              }}
+            />
+            <div style={{ marginBottom: 10 }}>
+              Dieses Gebäude ist ein eingetragenes Baudenkmal
+              {(props.baudenkmalnummer || props.baudenkmal_nr) &&
+                ` (Nr. ${props.baudenkmalnummer || props.baudenkmal_nr})`}
+              .
+            </div>
+            {props.baudenkmal_eintragung && (
+              <div>
+                <b>Eintragungsdatum:</b> {props.baudenkmal_eintragung}
+              </div>
+            )}
+            <div style={{ marginBottom: 10 }}>
+              <FontAwesomeIcon icon={faPlusSquare} style={{ marginRight: 8 }} />
+              {containsBaudenkmalLayer ? (
+                <span>
+                  Kartenebene "Baudenkmäler" befindet sich in der Karte
+                </span>
+              ) : (
+                <a
+                  href="#"
+                  onClick={(e) => {
+                    e.preventDefault();
+                    try {
+                      addLayerById(baudenkmalLayerID);
+                    } catch (e) {
+                      console.error("Error adding layer", e);
+                    }
+                  }}
+                >
+                  Kartenebene "Baudenkmäler" laden
+                </a>
+              )}
+            </div>
+            {props.baudenkmal_vid && (
+              <div style={{ marginTop: 10 }}>
+                <FontAwesomeIcon
+                  icon={faLink}
+                  style={{ marginRight: 8, color: "#666" }}
+                />
+                <a
+                  href={`https://www.wuppertal.de/denkmalliste-online/Detail/Show/${props.baudenkmal_vid}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  style={{ color: "#337ab7" }}
+                >
+                  weitere Informationen zum Baudenkmal einsehen
+                </a>
+              </div>
+            )}
+          </Panel>
+        </Accordion>
+      )}
+    </>
+  );
+};
+
+// Land Parcel Component
+const FlurstueckInfo = ({ props }: { props: FlurstueckProperties }) => {
+  const gemarkungName = getGemarkungName(props.gemarkungsnummer);
+  const nutzungen = parseNutzungen(props.nutzungen);
+  const buchungen = parseBuchungen(props.buchungen);
+  const hasBaulast =
+    props.baulast_status !== undefined && props.baulast_status > 0;
+  const hasBuchungen = buchungen.totalCount > 0;
+  const hasMultipleBuchungen = buchungen.totalCount > 1;
+
+  const [buchungenOpen, setBuchungenOpen] = useState(false);
+
+  const baulastLayerID = "wuppPlanung:baul";
+  const { addLayerById } = useCarmaMapAPIActions();
+  const containsBaulastLayer = useCarmaMapAPISelector(
+    createLayerSelectors.hasLayerById(baulastLayerID)
+  );
+
+  // Get baulast description based on status
+  const getBaulastText = () => {
+    switch (props.baulast_status) {
+      case 1:
+        return "Dieses Flurstück wird durch Baulasten begünstigt.";
+      case 2:
+        return "Dieses Flurstück wird durch Baulasten belastet.";
+      case 3:
+        return "Dieses Flurstück wird durch Baulasten belastet und begünstigt.";
+      default:
+        return "";
+    }
+  };
+
+  // Build form URLs with prefilled Flurstück data
+  const formParams = {
+    gemarkungName,
+    gemarkungsnummer: props.gemarkungsnummer,
+    flurnummer: props.flurnummer,
+    zaehler: props.zaehler,
+    nenner: props.nenner,
+  };
+  const liegenschaftskarteUrl = buildLiegenschaftskarteUrl(formParams);
+  const abkAuszugUrl = buildAbkAuszugUrl(formParams);
+  const buchauszugUrl = buildBuchauszugUrl(formParams);
+  const baulastenUrl = buildBaulastenUrl(formParams);
+
+  return (
+    <>
+      <div style={{ fontSize: "115%", padding: "10px", paddingTop: "0px" }}>
+        <table>
+          <tbody>
+            <tr>
+              <td style={{ whiteSpace: "nowrap", paddingRight: "15px" }}>
+                <b>Gemarkung:</b>
+              </td>
+              <td>
+                {gemarkungName}{" "}
+                {props.gemarkungsnummer ? `(${props.gemarkungsnummer})` : ""}
+              </td>
+            </tr>
+            <tr>
+              <td style={{ whiteSpace: "nowrap", paddingRight: "15px" }}>
+                <b>Flur:</b>
+              </td>
+              <td>{props.flurnummer}</td>
+            </tr>
+            <tr>
+              <td style={{ whiteSpace: "nowrap", paddingRight: "15px" }}>
+                <b>Flurstück:</b>
+              </td>
+              <td>
+                {props.zaehler}
+                {props.nenner ? `/${props.nenner}` : ""}
+              </td>
+            </tr>
+            {(() => {
+              let weitereAdressen: string[] = [];
+              if (props.weitere_adr) {
+                try {
+                  weitereAdressen = JSON.parse(props.weitere_adr);
+                } catch {
+                  // ignore parse errors
+                }
+              }
+              // Strip "u. a." or "u.a." from main address if weitere_adr exists
+              const mainAddress =
+                weitereAdressen.length > 0
+                  ? (props.adresse || "").replace(/\s*u\.\s*a\.\s*$/, "").trim()
+                  : props.adresse;
+              return (
+                <>
+                  <tr>
+                    <td style={{ whiteSpace: "nowrap", paddingRight: "15px" }}>
+                      <b>Lage:</b>
+                    </td>
+                    <td>{mainAddress || "-"}</td>
+                  </tr>
+                  {weitereAdressen.map((addr, idx) => (
+                    <tr key={`weitere-${idx}`}>
+                      <td></td>
+                      <td>{addr}</td>
+                    </tr>
+                  ))}
+                </>
+              );
+            })()}
+            <tr>
+              <td style={{ whiteSpace: "nowrap", paddingRight: "15px" }}>
+                <b>Amtliche Fläche:</b>
+              </td>
+              <td>
+                {props.flaeche_m2
+                  ? `${(props.flaeche_m2 >= 0.5
+                      ? Math.round(props.flaeche_m2)
+                      : props.flaeche_m2
+                    ).toLocaleString("de-DE")} m²`
+                  : "-"}
+              </td>
+            </tr>
+
+            {hasBuchungen &&
+              !hasMultipleBuchungen &&
+              buchungen.firstBuchung && (
+                <>
+                  <tr>
+                    <td style={{ whiteSpace: "nowrap", paddingRight: "15px" }}>
+                      <b>Grundbuchbezirk:</b>
+                    </td>
+                    <td>{buchungen.firstBuchung.bezirk}</td>
+                  </tr>
+                  <tr>
+                    <td style={{ whiteSpace: "nowrap", paddingRight: "15px" }}>
+                      <b>Grundbuchblatt:</b>
+                    </td>
+                    <td>{buchungen.firstBuchung.blattnummer}</td>
+                  </tr>
+                  <tr>
+                    <td style={{ whiteSpace: "nowrap", paddingRight: "15px" }}>
+                      <b>Buchungsart:</b>
+                    </td>
+                    <td>{buchungen.firstBuchung.buchungsart}</td>
+                  </tr>
+                </>
+              )}
+            {hasMultipleBuchungen && (
+              <>
+                <tr>
+                  <td style={{ whiteSpace: "nowrap", paddingRight: "15px" }}>
+                    <b>
+                      {buchungen.bezirkNames.length > 1
+                        ? "Grundbuchbezirke:"
+                        : "Grundbuchbezirk:"}
+                    </b>
+                  </td>
+                  <td>
+                    {buchungen.bezirkNames
+                      .map((name) => buchungen.bezirkDisplayNames[name])
+                      .join(", ")}
+                  </td>
+                </tr>
+                <tr>
+                  <td style={{ whiteSpace: "nowrap", paddingRight: "15px" }}>
+                    <b>Grundbuchblätter:</b>
+                  </td>
+                  <td>
+                    <a
+                      href="#grundbuchblaetter"
+                      onClick={(e) => {
+                        e.preventDefault();
+                        setBuchungenOpen(true);
+                        setTimeout(() => {
+                          document
+                            .getElementById("grundbuchblaetter-panel")
+                            ?.scrollIntoView({ behavior: "smooth" });
+                        }, 100);
+                      }}
+                    >
+                      {buchungen.totalCount} (klicken Sie hier, um die
+                      vollständige Liste anzuzeigen)
+                    </a>
+                  </td>
+                </tr>
+              </>
+            )}
+          </tbody>
+        </table>
+      </div>
+
+      {hasMultipleBuchungen && (
+        <Accordion
+          style={{ marginBottom: 6 }}
+          activeKey={buchungenOpen ? "grundbuch" : undefined}
+          onSelect={() => setBuchungenOpen(!buchungenOpen)}
+          id="grundbuchblaetter-panel"
+        >
+          <Panel
+            header="Grundbuchblätter"
+            eventKey="grundbuch"
+            bsStyle="default"
+          >
+            {buchungen.bezirkNames.map((bezirkName) => (
+              <div key={bezirkName} style={{ marginBottom: 15 }}>
+                <b>{buchungen.bezirkDisplayNames[bezirkName]}</b>
+                {Object.entries(buchungen.grouped[bezirkName]).map(
+                  ([buchungsart, blattnummern]) => (
+                    <div
+                      key={buchungsart}
+                      style={{ marginLeft: 10, marginTop: 5 }}
+                    >
+                      <i>{buchungsart}</i>
+                      <ul style={{ margin: "3px 0 0 0", paddingLeft: 20 }}>
+                        {blattnummern.map((blatt) => (
+                          <li key={blatt}>{blatt}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )
+                )}
+              </div>
+            ))}
+          </Panel>
+        </Accordion>
+      )}
+
+      {nutzungen.length > 0 && (
+        <Accordion style={{ marginBottom: 6 }} defaultActiveKey={"0"}>
+          <Panel header="Tatsächliche Nutzung" eventKey="0" bsStyle="info">
+            <table style={{ width: "100%" }}>
+              <tbody>
+                {nutzungen.map((n, idx) => {
+                  return (
+                    <tr key={idx}>
+                      <td style={{ width: "100%" }}>
+                        <div
+                          style={{
+                            display: "flex",
+                            alignItems: "center",
+                            gap: 10,
+                          }}
+                        >
+                          <div
+                            style={{
+                              flex: 1,
+                              backgroundColor: "#e0e0e0",
+                              minHeight: 20,
+                              borderRadius: 2,
+                              position: "relative",
+                              display: "flex",
+                              alignItems: "center",
+                              justifyContent: "center",
+                              padding: "2px 6px",
+                            }}
+                          >
+                            <div
+                              style={{
+                                position: "absolute",
+                                left: 0,
+                                top: 0,
+                                bottom: 0,
+                                width: `${n.percentage}%`,
+                                backgroundColor: "#666",
+                                borderRadius: 2,
+                              }}
+                            />
+                            <span
+                              style={{
+                                position: "relative",
+                                fontSize: "11px",
+                                color: n.percentage > 50 ? "#fff" : "#333",
+                                textAlign: "center",
+                                lineHeight: 1.3,
+                              }}
+                            >
+                              {n.funktion}
+                            </span>
+                          </div>
+                          <span
+                            style={{
+                              whiteSpace: "nowrap",
+                              minWidth: 50,
+                              textAlign: "right",
+                            }}
+                          >
+                            {n.percentage.toLocaleString()}%
+                          </span>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </Panel>
+        </Accordion>
+      )}
+
+      <Accordion style={{ marginBottom: 6 }} defaultActiveKey={"1"}>
+        <Panel
+          header="Bestellformulare Katasterauszüge"
+          eventKey="1"
+          bsStyle="warning"
+        >
+          <table style={{ marginBottom: 10, borderCollapse: "collapse" }}>
+            <thead>
+              <tr>
+                <th
+                  style={{
+                    textAlign: "left",
+                    paddingBottom: 8,
+                    paddingRight: 20,
+                  }}
+                >
+                  Produktbeschreibung
+                </th>
+                <th
+                  style={{
+                    textAlign: "center",
+                    paddingBottom: 8,
+                    paddingRight: 20,
+                  }}
+                >
+                  Zur Bestellung
+                </th>
+                <th style={{ textAlign: "left", paddingBottom: 8 }}>
+                  Hinweise
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td style={{ paddingRight: 20 }}>Liegenschaftskarte</td>
+                <td style={{ paddingRight: 20, textAlign: "center" }}>
+                  <a
+                    href={liegenschaftskarteUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >
+                    <FontAwesomeIcon icon={faShoppingCart} />
+                  </a>
+                </td>
+                <td style={{ fontSize: "11px" }}>1</td>
+              </tr>
+              <tr>
+                <td style={{ paddingRight: 20 }}>Amtliche Basiskarte</td>
+                <td style={{ paddingRight: 20, textAlign: "center" }}>
+                  <a
+                    href={abkAuszugUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >
+                    <FontAwesomeIcon icon={faShoppingCart} />
+                  </a>
+                </td>
+                <td style={{ fontSize: "11px" }}>1</td>
+              </tr>
+              <tr>
+                <td style={{ paddingRight: 20 }}>Liegenschaftsbuch</td>
+                <td style={{ paddingRight: 20, textAlign: "center" }}>
+                  <a
+                    href={buchauszugUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >
+                    <FontAwesomeIcon icon={faShoppingCart} />
+                  </a>
+                </td>
+                <td style={{ fontSize: "11px" }}>1, 2</td>
+              </tr>
+            </tbody>
+          </table>
+          <hr style={{ margin: "10px 0" }} />
+          <div style={{ fontSize: "11px" }}>
+            1: Dokument-Download abends/Wochenende verzögert
+            (ALKIS-Aktualisierung)
+          </div>
+          <div style={{ fontSize: "11px" }}>
+            2: Datenschutzprüfung des berechtigten Interesses erforderlich
+          </div>
+
+          <div style={{ marginTop: 10 }}>
+            <b>Gebühren je Dokument:</b>
+            <br />
+            15,00 € als PDF-Download | 25,00 € als Ausdruck
+          </div>
+          <div style={{ marginTop: 10 }}>
+            <b>Zahlungsarten:</b> PayPal, Kreditkarte, SEPA Lastschrift
+          </div>
+        </Panel>
+      </Accordion>
+
+      {hasBaulast && (
+        <Accordion style={{ marginBottom: 6 }} defaultActiveKey={"2"}>
+          <Panel header="Baulastnachweis" eventKey="2" bsStyle="success">
+            <div style={{ marginBottom: 10 }}>{getBaulastText()}</div>
+            <div style={{ marginBottom: 10 }}>
+              <FontAwesomeIcon icon={faPlusSquare} style={{ marginRight: 8 }} />
+              {containsBaulastLayer ? (
+                <span>
+                  Kartenebene "Baulastnachweis" befindet sich in der Karte
+                </span>
+              ) : (
+                <a
+                  href="#"
+                  onClick={(e) => {
+                    e.preventDefault();
+                    try {
+                      addLayerById(baulastLayerID);
+                    } catch (e) {
+                      console.error("Error adding layer", e);
+                    }
+                  }}
+                >
+                  Kartenebene "Baulastnachweis" laden
+                </a>
+              )}
+            </div>
+            <table style={{ marginBottom: 10, borderCollapse: "collapse" }}>
+              <thead>
+                <tr>
+                  <th
+                    style={{
+                      textAlign: "left",
+                      paddingBottom: 8,
+                      paddingRight: 20,
+                    }}
+                  >
+                    Produktbeschreibung
+                  </th>
+                  <th
+                    style={{
+                      textAlign: "center",
+                      paddingBottom: 8,
+                      paddingRight: 20,
+                    }}
+                  >
+                    Zur Bestellung
+                  </th>
+                  <th style={{ textAlign: "left", paddingBottom: 8 }}>
+                    Hinweise
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td style={{ paddingRight: 20 }}>Baulastbescheinigung</td>
+                  <td style={{ paddingRight: 20, textAlign: "center" }}>
+                    <a
+                      href={baulastenUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >
+                      <FontAwesomeIcon icon={faShoppingCart} />
+                    </a>
+                  </td>
+                  <td style={{ fontSize: "11px" }}>1, 2</td>
+                </tr>
+              </tbody>
+            </table>
+            <hr style={{ margin: "10px 0" }} />
+            <div style={{ fontSize: "11px" }}>
+              1: Dokument-Download abends/Wochenende verzögert
+              (ALKIS-Aktualisierung)
+            </div>
+            <div style={{ fontSize: "11px" }}>
+              2: Datenschutzprüfung des berechtigten Interesses erforderlich
+            </div>
+
+            <div style={{ marginTop: 10 }}>
+              <b>Gebühren:</b>
+              <ul style={{ margin: "5px 0", paddingLeft: 20 }}>
+                <li>Wenn Baulasten vorhanden sind: je Grundstück 50 – 75 €</li>
+                <li>Wenn keine Baulasten vorhanden sind: je Grundstück 30 €</li>
+              </ul>
+            </div>
+            <div style={{ marginTop: 10 }}>
+              <b>Zahlungsarten:</b> PayPal, Kreditkarte, SEPA Lastschrift
+            </div>
+          </Panel>
+        </Accordion>
+      )}
+    </>
+  );
+};
+
+const SecondaryInfoModal = ({
+  feature = {},
+  setOpen = () => {},
+  versionString = "???",
+  Footer = genericSecondaryInfoFooterFactory({
+    skipTeilzwilling: false,
+    isTopicMap: false,
+  }),
+}: {
+  feature?: FeatureType;
+  setOpen?: (open: boolean) => void;
+  versionString?: string;
+  Footer?: React.ComponentType<any>;
+}) => {
+  const close = () => {
+    setOpen(false);
+  };
+
+  const alkisType = determineAlkisType(feature);
+  const props = getProperties(feature);
+
+  let title: string;
+  let icon: any;
+
+  if (alkisType === "landparcel") {
+    title = `Flurstück ${props.gemarkungsnummer || ""} - ${
+      props.flurnummer || ""
+    } - ${props.zaehler || ""}${props.nenner ? `/${props.nenner}` : ""}`;
+    icon = faSquare;
+  } else {
+    const allAddresses = parseAdressen(
+      props.adressen,
+      props.strschl,
+      props.strname
+    );
+    const mainAddr = allAddresses[0];
+    const address = mainAddr
+      ? `${mainAddr.streetName} ${mainAddr.hausnr}`
+      : `${props.strname || ""} ${props.hausnr || ""}`.trim();
+    const suffix = allAddresses.length > 1 ? " (u. a.)" : "";
+    title = `Gebäude ${address}${suffix}`;
+    icon = faBuilding;
+  }
+
+  return (
+    <Modal
+      style={{
+        zIndex: 2900000000,
+      }}
+      height="100%"
+      size="lg"
+      show={true}
+      onHide={close}
+      keyboard={false}
+      dialogClassName="modal-dialog-scrollable"
+    >
+      <Modal.Header>
+        <Modal.Title>
+          <div>
+            <FontAwesomeIcon icon={icon} />
+            {` Datenblatt: ${title}`}
+          </div>
+          <div style={{ fontSize: "70%", color: "#666", fontWeight: "normal" }}>
+            Registervorschau aus abgeleiteten Daten - ohne Gewähr - kein
+            amtlicher Auszug
+          </div>
+        </Modal.Title>
+      </Modal.Header>
+      <Modal.Body id="myMenu" key={"alkis.secondaryInfo"}>
+        <div style={{ width: "100%", minHeight: 250 }}>
+          {alkisType === "landparcel" ? (
+            <FlurstueckInfo props={props as FlurstueckProperties} />
+          ) : (
+            <GebaeudeInfo props={props as GebaeudeProperties} />
+          )}
+        </div>
+      </Modal.Body>
+      <Modal.Footer>
+        <Footer close={close} version={versionString} />
+      </Modal.Footer>
+    </Modal>
+  );
+};
+
+export default SecondaryInfoModal;

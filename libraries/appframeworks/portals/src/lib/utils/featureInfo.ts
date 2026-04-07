@@ -1,5 +1,5 @@
 import type { FeatureInfo, FeatureInfoProperties } from "@carma/types";
-import { sandboxedEvalExternal } from "../components/SandboxedEvalProvider";
+import { sandboxedEvalExternal } from "@carma-commons/sandbox-eval";
 
 /**
  * @deprecated Use `objectToInfo` instead.
@@ -36,7 +36,7 @@ export const objectToFeature = async (jsonOutput: any, code: string) => {
 
   const properties = {
     ...baseInfo,
-    wmsProps: jsonOutput,
+    sourceProps: jsonOutput,
   };
 
   return { properties };
@@ -88,7 +88,7 @@ export const functionToFeature = async (output: any, code: string) => {
 
     const properties = {
       ...baseInfo,
-      wmsProps: output,
+      sourceProps: output,
     };
 
     return { properties };
@@ -147,6 +147,7 @@ export const createUrl = ({
 
 export const createVectorFeature = async (mapping, selectedVectorFeature) => {
   let feature: any = undefined;
+
   let properties = selectedVectorFeature.properties;
   properties = {
     ...properties,
@@ -176,6 +177,7 @@ export const createVectorFeature = async (mapping, selectedVectorFeature) => {
     const genericLinks = featureProperties.properties.genericLinks || [];
 
     feature = {
+      sourceFeature: selectedVectorFeature,
       properties: {
         ...featureProperties.properties,
         genericLinks: genericLinks,
@@ -184,6 +186,7 @@ export const createVectorFeature = async (mapping, selectedVectorFeature) => {
       geometry: selectedVectorFeature.geometry,
     };
   }
+
   return feature;
 };
 

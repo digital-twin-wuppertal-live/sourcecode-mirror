@@ -1,50 +1,56 @@
-import { useCallback } from "react";
+import { useCallback, useRef } from "react";
+import type { MutableRefObject } from "react";
 
-import { type Scene, type Viewer } from "cesium";
+import type { Scene } from "@carma/cesium";
 
 import { cesiumCameraForceOblique } from "../utils/cesiumCameraForceOblique";
+import type { CameraForceObliqueOptions } from "../utils/cesiumCameraForceOblique";
 import { sceneHasTweens } from "../utils/sceneHasTweens";
-
-const viewerPreUpdateHandlers = new WeakMap<Viewer, (scene: Scene) => void>();
+const scenePreUpdateHandlers = new WeakMap<Scene, (scene: Scene) => void>();
 
 export function useCesiumCameraForceOblique(
-  viewerRef: React.MutableRefObject<Viewer | null>,
-  fixedPitch: number,
-  fixedHeight: number,
-  shouldSuspendRef: React.MutableRefObject<boolean>
+  sceneRef: MutableRefObject<Scene | null>,
+  options: CameraForceObliqueOptions,
+  shouldSuspendRef: MutableRefObject<boolean>,
+  checkExternalAnimations?: (scene: Scene) => boolean
 ) {
-  const enableCameraForceOblique = useCallback(() => {
-    if (!viewerRef.current) return;
+  // Use ref to avoid stale closure - callback can change when isTransitioning changes
+  const checkExternalAnimationsRef = useRef(checkExternalAnimations);
+  checkExternalAnimationsRef.current = checkExternalAnimations;
 
-    const viewer = viewerRef.current;
+  const enableCameraForceOblique = useCallback(() => {
+    if (!sceneRef.current) return;
+    const scene = sceneRef.current;
 
     const onPreupdate = () => {
-      !sceneHasTweens(viewer) &&
-        cesiumCameraForceOblique(
-          viewer,
-          fixedPitch,
-          fixedHeight,
-          shouldSuspendRef
-        );
+      if (shouldSuspendRef.current) return;
+      const isAnimating =
+        sceneHasTweens(scene) || checkExternalAnimationsRef.current?.(scene);
+      if (!isAnimating) {
+        cesiumCameraForceOblique(scene, options);
+      }
     };
 
-    if (!viewerPreUpdateHandlers.has(viewer)) {
-      viewer.scene.preUpdate.addEventListener(onPreupdate);
-      viewerPreUpdateHandlers.set(viewer, onPreupdate);
+    if (!scenePreUpdateHandlers.has(scene)) {
+      scene.preUpdate.addEventListener(onPreupdate);
+      scenePreUpdateHandlers.set(scene, onPreupdate);
     }
-  }, [viewerRef, shouldSuspendRef, fixedPitch, fixedHeight]);
+  }, [sceneRef, shouldSuspendRef, options]);
 
   const disableCameraForceOblique = useCallback(() => {
-    if (!viewerRef.current) return;
+    if (!sceneRef.current) return;
+    const scene = sceneRef.current;
 
-    const viewer = viewerRef.current;
-
-    if (viewerPreUpdateHandlers.has(viewer)) {
-      const handlerToRemove = viewerPreUpdateHandlers.get(viewer);
-      viewer.scene.preUpdate.removeEventListener(handlerToRemove!);
-      viewerPreUpdateHandlers.delete(viewer);
+    if (scenePreUpdateHandlers.has(scene)) {
+      const handlerToRemove = scenePreUpdateHandlers.get(scene);
+      scene.preUpdate.removeEventListener(handlerToRemove!);
+      scenePreUpdateHandlers.delete(scene);
     }
-  }, [viewerRef]);
+  }, [sceneRef]);
 
-  return { enableCameraForceOblique, disableCameraForceOblique };
+  return {
+    enableCameraForceOblique,
+    disableCameraForceOblique,
+    options,
+  };
 }

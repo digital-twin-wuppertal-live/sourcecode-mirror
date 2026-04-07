@@ -1,13 +1,6 @@
 import { distance } from "@turf/turf";
-import {
-  DEFAULT_LEAFLET_TILESIZE,
-  DEFAULT_MERCATOR_LATITUDE_RAD,
-  DEFAULT_ZOOM_LEVEL,
-  DEFAULT_PIXEL_TOLERANCE,
-} from "./constants/web-map";
 
-import type { Degrees, Meters, Radians } from "@carma/units/types";
-
+import { LatLng } from "@carma/geo/types";
 import {
   brandedRatio,
   brandedAbs,
@@ -16,26 +9,138 @@ import {
   isZoom,
   isZoomClose,
 } from "@carma/units/helpers";
+import type { Degrees, Meters, Radians } from "@carma/units/types";
 
-import { LatLng } from "@carma/geo/types";
-import { getPixelResolutionFromZoomAtLatitudeRad } from "./mercator";
+import {
+  DEFAULT_LEAFLET_TILESIZE,
+  DEFAULT_MERCATOR_LATITUDE_RAD,
+  DEFAULT_ZOOM_LEVEL,
+  DEFAULT_PIXEL_TOLERANCE,
+} from "./constants/web-map";
+import {
+  getPixelResolutionFromZoomAtLatitudeRad,
+  getZoomFromPixelResolutionAtLatitudeRad,
+} from "./mercator";
+const MIN_TAN_HALF_FOV = 1e-6;
+
+const readCenterRadiusPx = (
+  viewportWidthPx: number,
+  viewportHeightPx: number
+): number | null => {
+  if (
+    !Number.isFinite(viewportWidthPx) ||
+    viewportWidthPx <= 0 ||
+    !Number.isFinite(viewportHeightPx) ||
+    viewportHeightPx <= 0
+  ) {
+    return null;
+  }
+
+  const centerRadiusPx = Math.max(viewportWidthPx, viewportHeightPx) * 0.5;
+  return Number.isFinite(centerRadiusPx) && centerRadiusPx > 0
+    ? centerRadiusPx
+    : null;
+};
+
+const readTanHalfFov = (fovVerticalRad: number): number | null => {
+  if (!Number.isFinite(fovVerticalRad)) {
+    return null;
+  }
+
+  const tanHalfFov = Math.tan(fovVerticalRad * 0.5);
+  return Number.isFinite(tanHalfFov) && Math.abs(tanHalfFov) >= MIN_TAN_HALF_FOV
+    ? tanHalfFov
+    : null;
+};
 
 // Meters per pixel at zoom/latitude (latitude in degrees)
-export function metersPerPixel(zoom: number, latitudeDeg?: Degrees): Meters {
-  return metersPerPixelAtLatitudeRad(zoom, degToRad(latitudeDeg));
+export function metersPerPixel(
+  zoom: number,
+  latitudeDeg?: Degrees,
+  options?: { tileSize?: number }
+): Meters {
+  return metersPerPixelAtLatitudeRad(zoom, degToRad(latitudeDeg), options);
 }
 
 // Meters per pixel at zoom/latitude (latitude in degrees)
 export function metersPerPixelAtLatitudeRad(
   zoom: number,
-  latitudeRad?: Radians
+  latitudeRad?: Radians,
+  { tileSize = DEFAULT_LEAFLET_TILESIZE }: { tileSize?: number } = {}
 ): Meters {
   return getPixelResolutionFromZoomAtLatitudeRad(
     zoom,
     latitudeRad ?? DEFAULT_MERCATOR_LATITUDE_RAD,
     {
-      tileSize: DEFAULT_LEAFLET_TILESIZE,
+      tileSize,
     }
+  );
+}
+
+export function distanceFromMercatorZoomAtLatitudeDeg(
+  zoom: number,
+  latitudeDeg: Degrees,
+  {
+    fovVerticalRad,
+    viewportWidthPx,
+    viewportHeightPx,
+  }: {
+    fovVerticalRad: Radians;
+    viewportWidthPx: number;
+    viewportHeightPx: number;
+  }
+): Meters | null {
+  const centerRadiusPx = readCenterRadiusPx(viewportWidthPx, viewportHeightPx);
+  const tanHalfFov = readTanHalfFov(fovVerticalRad);
+  if (centerRadiusPx === null || tanHalfFov === null) {
+    return null;
+  }
+
+  const metersPerCssPixel = metersPerPixel(zoom, latitudeDeg);
+  if (!Number.isFinite(metersPerCssPixel) || metersPerCssPixel <= 0) {
+    return null;
+  }
+
+  return ((metersPerCssPixel * centerRadiusPx) /
+    Math.abs(tanHalfFov)) as Meters;
+}
+
+export function mercatorZoomFromDistanceAtLatitudeDeg(
+  distance: Meters,
+  latitudeDeg: Degrees,
+  {
+    fovVerticalRad,
+    tileSize = DEFAULT_LEAFLET_TILESIZE,
+    viewportWidthPx,
+    viewportHeightPx,
+  }: {
+    fovVerticalRad: Radians;
+    tileSize?: number;
+    viewportWidthPx: number;
+    viewportHeightPx: number;
+  }
+): number | null {
+  const centerRadiusPx = readCenterRadiusPx(viewportWidthPx, viewportHeightPx);
+  const tanHalfFov = readTanHalfFov(fovVerticalRad);
+  if (
+    centerRadiusPx === null ||
+    tanHalfFov === null ||
+    !Number.isFinite(distance) ||
+    distance <= 0
+  ) {
+    return null;
+  }
+
+  const groundRadiusM = distance * Math.abs(tanHalfFov);
+  const metersPerCssPixel = groundRadiusM / centerRadiusPx;
+  if (!Number.isFinite(metersPerCssPixel) || metersPerCssPixel <= 0) {
+    return null;
+  }
+
+  return getZoomFromPixelResolutionAtLatitudeRad(
+    metersPerCssPixel as Meters,
+    degToRad(latitudeDeg),
+    { tileSize }
   );
 }
 

@@ -9,12 +9,14 @@ import {
 } from "../../store/slices/mapping";
 import { useContext } from "react";
 import { TopicMapContext } from "react-cismap/contexts/TopicMapContextProvider";
+import { useMapFrameworkSwitcherContext } from "@carma-mapping/components";
 
 interface OpacitySliderProps {
   isBackgroundLayer?: boolean;
   isVisible?: boolean;
   opacity: number;
   id: string;
+  disabled?: boolean;
 }
 
 const formatter: NonNullable<SliderSingleProps["tooltip"]>["formatter"] = (
@@ -26,9 +28,11 @@ const OpacitySlider = ({
   opacity,
   isVisible,
   id,
+  disabled,
 }: OpacitySliderProps) => {
   const dispatch = useDispatch();
   const { routedMapRef } = useContext<typeof TopicMapContext>(TopicMapContext);
+  const { isCesium } = useMapFrameworkSwitcherContext();
 
   return (
     <Slider
@@ -39,7 +43,7 @@ const OpacitySlider = ({
         routedMapRef?.leafletMap?.leafletElement.dragging.disable();
       }}
       step={0.1}
-      disabled={!isVisible}
+      disabled={!isVisible || isCesium || disabled}
       onChange={(value) => {
         if (isBackgroundLayer) {
           dispatch(changeBackgroundOpacity({ opacity: value }));

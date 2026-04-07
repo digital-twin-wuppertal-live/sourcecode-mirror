@@ -10,8 +10,15 @@ import LuftmessstationenStory, {
 import VorhabenkarteStory, {
   SecondaryInfo as Vorhabenkarte,
 } from "./_vorhabenkarte-sim.stories";
+import AlkisStory, { SecondaryInfo as Alkis } from "./_alkis-sim.stories";
+import BodenfeuchteStory, {
+  SecondaryInfo as Bodenfeuchte,
+} from "./_bodenfeuchte-sim.stories";
+import BaudenkmaleStory, {
+  SecondaryInfo as Baudenkmale,
+} from "./_baudenkmale-sim.stories";
 import SIMComponentDictionary from ".";
-
+import { PI_VALUES } from "@carma/math";
 
 const meta: Meta = {
   title: "SecondaryInfo Modals",
@@ -30,10 +37,23 @@ export const SIMDictionaryKeys = () => {
           <li key={key}>{key}</li>
         ))}
       </pre>
+      <br></br>
+      <br></br>
+      <br></br>
+      <br></br>
+      <h3>Test @carma imports</h3>
+
+      <pre>
+        {'import {PI_VALUES} from "@carma/math";'}
+        <br />
+        <br />
+        # Example:
+        <br />
+        -pi: {PI_VALUES.MINUS_PI}
+      </pre>
     </div>
   );
 };
-
 
 XAndRide.argTypes = XAndRideStory.argTypes;
 export { XAndRide };
@@ -44,9 +64,17 @@ export { Ebikes };
 EMob.argTypes = EMobStory.argTypes;
 export { EMob };
 
-Luftmessstationen.argTypes =
-  LuftmessstationenStory.argTypes;
+Luftmessstationen.argTypes = LuftmessstationenStory.argTypes;
 export { Luftmessstationen };
 
 Vorhabenkarte.argTypes = VorhabenkarteStory.argTypes;
 export { Vorhabenkarte };
+
+Alkis.argTypes = AlkisStory.argTypes;
+export { Alkis };
+
+Bodenfeuchte.argTypes = BodenfeuchteStory.argTypes;
+export { Bodenfeuchte };
+
+Baudenkmale.argTypes = BaudenkmaleStory.argTypes;
+export { Baudenkmale };

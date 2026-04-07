@@ -1,6 +1,9 @@
 import { OBLIQUE_PREVIEW_QUALITY } from "./constants";
+import { Easing } from "@carma-commons/math";
+import { UnitRgba } from "@carma-commons/utils";
 import type { Converter } from "proj4/dist/lib/core";
 
+import type { Matrix3RowMajor } from "@carma/math";
 import type { Radians } from "@carma/types";
 
 export type ExteriorPosition = {
@@ -51,7 +54,7 @@ export type ObliqueImageRecordMap = Map<string, ObliqueImageRecord>;
 export type AnimationConfig = {
   delay?: number; // in ms, useful for synchronizing independedent animations
   duration?: number; // in ms, also max value for dynamic duration
-  easingFunction?: EasingFunction.Callback;
+  easingFunction?: Easing;
 };
 
 export type ObliqueAnimationsConfig = {
@@ -65,7 +68,7 @@ export type ObliqueAnimationsConfig = {
 };
 
 export type ObliqueFootprintsStyle = {
-  outlineColor?: Color;
+  outlineColor?: UnitRgba;
   outlineWidth?: number;
   outlineOpacity?: number;
 };
@@ -82,10 +85,12 @@ export interface ObliqueDataProviderConfig {
   crs: string;
   previewPath: string;
   previewQualityLevel?: OBLIQUE_PREVIEW_QUALITY;
+  downloadQualityLevel?: OBLIQUE_PREVIEW_QUALITY;
   fixedPitch?: number;
   fixedHeight?: number;
   minFov?: Radians;
   maxFov?: Radians;
+  restoreFovOnLeave?: Radians;
   headingOffset?: number;
   animations?: ObliqueAnimationsConfig;
   footprintsStyle?: ObliqueFootprintsStyle;

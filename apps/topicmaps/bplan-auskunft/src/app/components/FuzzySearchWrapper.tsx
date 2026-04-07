@@ -1,11 +1,6 @@
-import {
-  SelectionMetaData,
-  useSelection,
-  useSelectionTopicMap,
-} from "@carma-appframeworks/portals";
+import { SelectionMetaData, useSelection } from "@carma-appframeworks/portals";
 import { LibFuzzySearch } from "@carma-mapping/fuzzy-search";
 import { type SearchResultItem } from "@carma/types";
-
 import { ResponsiveTopicMapContext } from "react-cismap/contexts/ResponsiveTopicMapContextProvider";
 import { useContext } from "react";
 import { ENDPOINT, isAreaType } from "@carma-commons/resources";
@@ -21,6 +16,7 @@ import { faSearch } from "@fortawesome/free-solid-svg-icons";
 import type { UnknownAction } from "redux";
 import { getBoundingBoxForLeafletMap } from "@carma-mapping/utils";
 import proj4 from "proj4";
+
 interface FuzzySearchProps {
   setFeatures: (hit) => void;
   setSelectedIndex: (idx) => void;
@@ -41,7 +37,6 @@ const FuzzySearchWrapper = ({
   >(ResponsiveTopicMapContext);
 
   const { setSelection } = useSelection();
-  useSelectionTopicMap();
 
   const onGazetteerSelection = (selection: SearchResultItem | null) => {
     if (!selection) {
@@ -139,6 +134,7 @@ const FuzzySearchWrapper = ({
       }
     }, 100);
   };
+
   const searchIcon = (
     <FontAwesomeIcon
       icon={faSearch}

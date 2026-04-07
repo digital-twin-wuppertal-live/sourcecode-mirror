@@ -6,7 +6,7 @@ export const featureFlagConfig: FeatureFlagConfig = {
     alias: "dev",
   },
   featureFlagObliqueMode: {
-    default: false,
+    default: true,
     alias: "oblq",
   },
   isObliqueUiEval: {
@@ -37,9 +37,5 @@ export const featureFlagConfig: FeatureFlagConfig = {
   featureFlagTracking: {
     default: true,
     alias: "tracking",
-  },
-  featureFlagBugaBridge: {
-    default: false,
-    alias: "buga-bruecke",
   },
 };

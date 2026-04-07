@@ -1,4 +1,3 @@
-import { featuresFilter } from "@carma-appframeworks/belis";
 import { createSlice } from "@reduxjs/toolkit";
 
 export const MODES = {
@@ -13,9 +12,10 @@ const featureCollectionSlice = createSlice({
     features: [] as any,
     selectedFeature: null as any,
     mode: MODES.OBJECTS,
-    filter: featuresFilter,
     done: true,
     inFocusMode: false,
+    featureLoading: false,
+    featureDataVersion: 0,
   },
   reducers: {
     setFeatureCollection: (state, action) => {
@@ -29,14 +29,17 @@ const featureCollectionSlice = createSlice({
       }));
       state.selectedFeature = action.payload;
     },
-    setFilter: (state, action) => {
-      state.filter = action.payload;
-    },
     setDone: (state, action) => {
       state.done = action.payload;
     },
     setFocusModeActive: (state, action) => {
       state.inFocusMode = action.payload;
+    },
+    setFeatureLoading: (state, action) => {
+      state.featureLoading = action.payload;
+    },
+    incrementFeatureDataVersion: (state) => {
+      state.featureDataVersion += 1;
     },
   },
 });
@@ -46,9 +49,10 @@ export default featureCollectionSlice;
 export const {
   setFeatureCollection,
   setSelectedFeature,
-  setFilter,
   setDone,
   setFocusModeActive,
+  setFeatureLoading,
+  incrementFeatureDataVersion,
 } = featureCollectionSlice.actions;
 
 export const getFeatureCollection = (state) => {
@@ -59,6 +63,9 @@ export const getSelectedFeature = (state) => {
   return state.featureCollection.selectedFeature;
 };
 
-export const getFilter = (state) => state.featureCollection.filter;
 export const getDone = (state) => state.featureCollection.done;
 export const isInFocusMode = (state) => state.featureCollection.inFocusMode;
+export const getFeatureLoading = (state) =>
+  state.featureCollection.featureLoading;
+export const getFeatureDataVersion = (state) =>
+  state.featureCollection.featureDataVersion;

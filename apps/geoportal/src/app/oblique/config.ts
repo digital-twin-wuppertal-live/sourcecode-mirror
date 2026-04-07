@@ -1,4 +1,5 @@
-import { Color, EasingFunction } from "cesium";
+import { Easing } from "@carma-commons/math";
+import { COLORS } from "@carma-commons/utils";
 import {
   OBLIQUE_2024_ORIENTATIONS_CRS,
   OBLIQUE_2024_PREVIEW_PATH,
@@ -11,13 +12,16 @@ import { degToRad } from "@carma-commons/units/helpers";
 import { OBLIQUE_PREVIEW_QUALITY } from "./constants";
 import { ObliqueDataProviderConfig } from "./types";
 import { CardinalDirectionEnum } from "./utils/orientationUtils";
+import { DEFAULT_CAMERA_FOV_DEG } from "../config/app.config";
 export const OBLIQUE_CONFIG: ObliqueDataProviderConfig = {
   fixedPitch: degToRad(-45 as Degrees), // Pitch in radians
   fixedHeight: 900, // Height in meters
   minFov: degToRad(10 as Degrees), // Minimum field of view in radians
   maxFov: degToRad(120 as Degrees), // Maximum field of view in radians
+  restoreFovOnLeave: degToRad(DEFAULT_CAMERA_FOV_DEG as Degrees),
   headingOffset: degToRad(-34.3 as Degrees), // Heading offset in radians
   previewQualityLevel: OBLIQUE_PREVIEW_QUALITY.LEVEL_3,
+  downloadQualityLevel: OBLIQUE_PREVIEW_QUALITY.LEVEL_1,
   previewPath: OBLIQUE_2024_PREVIEW_PATH,
   crs: OBLIQUE_2024_ORIENTATIONS_CRS,
   exteriorOrientationsURI: OBLIQUE_2024_EXT_ORI_UTM32_URI,
@@ -25,25 +29,25 @@ export const OBLIQUE_CONFIG: ObliqueDataProviderConfig = {
   animations: {
     flyToExteriorOrientation: {
       duration: 800,
-      easingFunction: EasingFunction.QUADRATIC_IN,
+      easingFunction: Easing.QUADRATIC_IN,
     },
     flyToNextImage: {
       delay: 0,
       duration: 100,
-      easingFunction: EasingFunction.LINEAR_NONE,
+      easingFunction: Easing.LINEAR_NONE,
     },
     flyToRotatedImage: {
       duration: 1800,
-      easingFunction: EasingFunction.CUBIC_IN_OUT,
+      easingFunction: Easing.CUBIC_IN_OUT,
     },
     outlineFadeOut: {
       delay: 500,
       duration: 300,
-      easingFunction: EasingFunction.QUADRATIC_IN_OUT,
+      easingFunction: Easing.QUADRATIC_IN_OUT,
     },
   },
   footprintsStyle: {
-    outlineColor: Color.WHITE,
+    outlineColor: COLORS.WHITE,
     outlineWidth: 8,
     outlineOpacity: 0.85,
   },

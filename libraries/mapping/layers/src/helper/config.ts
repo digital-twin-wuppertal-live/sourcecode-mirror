@@ -298,7 +298,7 @@ export const topicMapsConfig: Config = {
       ],
       type: "link",
       thumbnail:
-        "https://images.unsplash.com/photo-1618901882511-e7adb73a1ee0?q=80&w=2664&auto=format&fit=crop&ixlib=rb-4.0.3&ixid=M3wxMjA3fDB8MHxwaG90by1wYWdlfHx8fGVufDB8fHx8fA%3D%3D",
+        "https://geoportal-files.cismet.de/1769010615099-1618901882511-e7adb73a1ee0.jpg",
 
       url: "https://digital-twin-wuppertal-live.github.io/stadtplan/#/",
       keywords: [
@@ -352,7 +352,7 @@ export const topicMapsConfig: Config = {
       ],
       type: "link",
       thumbnail:
-        "https://images.unsplash.com/photo-1558617320-e695f0d420de?q=80&w=2070&auto=format&fit=crop&ixlib=rb-4.0.3&ixid=M3wxMjA3fDB8MHxwaG90by1wYWdlfHx8fGVufDB8fHx8fA%3D%3D",
+        "https://geoportal-files.cismet.de/1769010650178-1558617320-e695f0d420de.jpg",
       url: "https://digital-twin-wuppertal-live.github.io/baederkarte/",
       serviceName: "wuppTopicMaps",
     },
@@ -374,7 +374,7 @@ export const topicMapsConfig: Config = {
       ],
       type: "link",
       thumbnail:
-        "https://images.unsplash.com/photo-1567746455504-cb3213f8f5b8?q=80&w=2670&auto=format&fit=crop&ixlib=rb-4.0.3&ixid=M3wxMjA3fDB8MHxwaG90by1wYWdlfHx8fGVufDB8fHx8fA%3D%3D",
+        "https://geoportal-files.cismet.de/1769010862996-1567746455504-cb3213f8f5b8.jpg",
 
       url: "https://digital-twin-wuppertal-live.github.io/kita-finder/",
       keywords: [
@@ -463,59 +463,6 @@ export const topicMapsConfig: Config = {
       serviceName: "wuppTopicMaps",
     },
     {
-      id: "wuppTopicMaps_emobi",
-      path: "TopicMaps Wuppertal",
-      name: "wuppTopicMaps_emobi",
-      title: "E-Auto-Ladestationskarte",
-      description: `Beschreibung: Die E-Auto-Ladestationskarte Wuppertal ist eine im Auftrag der Stadt Wuppertal von der Firma cismet GmbH, Saarbrücken, betriebene interaktive Internet-Kartenanwendung, die dem Nutzer einen Überblick über die öffentlich zugänglichen Ladestationen für Elektro-Automobile im Wuppertaler Stadtgebiet verschafft.`,
-      tags: [
-        "TopicMaps",
-        "Verkehr",
-        "Umwelt",
-        "E-Auto-Ladestationen",
-        "Elektro-Auto",
-        "Elektromobilität",
-        "E-Mobilität",
-        "EmoTal",
-      ],
-      type: "link",
-      thumbnail:
-        "https://www.wuppertal.de/geoportal/emobil/autos/fotos/fertighauswelt.jpg",
-
-      url: "https://digital-twin-wuppertal-live.github.io/elektromobilitaet/",
-      keywords: [
-        "carmaConf://opendata:https://offenedaten-wuppertal.de/dataset/ladestationen-e-autos-wuppertal/resource/46973470-98c9-4ba1-9b69-94358b9b22cb",
-      ],
-      serviceName: "wuppTopicMaps",
-    },
-    {
-      id: "wuppTopicMaps_ebike",
-      path: "TopicMaps Wuppertal",
-      name: "wuppTopicMaps_ebike",
-      title: "E-Fahrrad-Karte",
-      description: `Beschreibung: Die E-Fahrrad-Karte Wuppertal ist eine im Auftrag der Stadt Wuppertal von der Firma cismet GmbH, Saarbrücken, betriebene interaktive Internet-Kartenanwendung, die dem Nutzer einen Überblick über die öffentlich zugänglichen Lade- und Verleihstationen für Elektro-Fahrräder im Wuppertaler Stadtgebiet verschafft.`,
-      tags: [
-        "TopicMaps",
-        "Verkehr",
-        "Umwelt",
-        "Elektromobilität",
-        "E-Mobilität",
-        "E-Bike",
-        "Pedelec",
-        " E-Fahrrad-Ladestationen",
-        "E-Fahrrad-Verleih",
-        "EmoTal",
-      ],
-      type: "link",
-      thumbnail:
-        "https://www.wuppertal.de/geoportal/emobil/raeder/fotos/akku_bauhaus_lichtscheid.jpg",
-      keywords: [
-        "carmaConf://opendata:https://offenedaten-wuppertal.de/dataset/ladestationen-e-fahrr%C3%A4der-wuppertal/resource/93189702-44da-438c-a04c-7cd00465fcb0",
-      ],
-      url: "https://digital-twin-wuppertal-live.github.io/ebikes/",
-      serviceName: "wuppTopicMaps",
-    },
-    {
       id: "wuppTopicMaps_luftMess",
       path: "TopicMaps Wuppertal",
       name: "wuppTopicMaps_luftMess",
@@ -562,9 +509,9 @@ export const topicMapsConfig: Config = {
       ],
       type: "link",
       thumbnail:
-        "https://images.unsplash.com/photo-1580993777851-40514758f716?q=80&w=2669&auto=format&fit=crop&ixlib=rb-4.0.3&ixid=M3wxMjA3fDB8MHxwaG90by1wYWdlfHx8fGVufDB8fHx8fA%3D%3D",
+        "https://geoportal-files.cismet.de/1769010875988-1580993777851-40514758f716.jpg",
       keywords: [
-        "carmaConf://opendata:https://offenedaten-wuppertal.de/dataset/hochwassersimulationen-nrw/resource/2bd13c11-6ae4-4c92-a3c5-3d2897d8ab79",
+        "carmaConf://opendata:https://offenedaten-wuppertal.de/dataset/hochwassergefahrenkarte-wuppertal/resource/2bd13c11-6ae4-4c92-a3c5-3d2897d8ab79",
       ],
       url: "https://digital-twin-wuppertal-live.github.io/floodingmap/",
       serviceName: "wuppTopicMaps",
@@ -588,7 +535,7 @@ export const topicMapsConfig: Config = {
       ],
       type: "link",
       thumbnail:
-        "https://images.unsplash.com/photo-1527766833261-b09c3163a791?q=80&w=2670&auto=format&fit=crop&ixlib=rb-4.0.3&ixid=M3wxMjA3fDB8MHxwaG90by1wYWdlfHx8fGVufDB8fHx8fA%3D%3D",
+        "https://geoportal-files.cismet.de/1769010841464-1527766833261-b09c3163a791.jpg",
       keywords: [
         "carmaConf://opendata:https://offenedaten-wuppertal.de/dataset/starkregensimulation-wuppertal-sri-10-version-21-102022/resource/2707b0d7-4601-4b36-926e",
       ],
@@ -637,7 +584,7 @@ export const topicMapsConfig: Config = {
       ],
       type: "link",
       thumbnail:
-        "https://images.unsplash.com/photo-1548337138-e87d889cc369?q=80&w=2096&auto=format&fit=crop&ixlib=rb-4.0.3&ixid=M3wxMjA3fDB8MHxwaG90by1wYWdlfHx8fGVufDB8fHx8fA%3D%3D",
+        "https://geoportal-files.cismet.de/1769010820993-1548337138-e87d889cc369.jpg",
       keywords: [
         "carmaConf://opendata:https://offenedaten-wuppertal.de/dataset/klimaorte-wuppertal/resource/18dd4a9c-a007-480b-bbde-77ece763e408",
       ],
@@ -692,6 +639,31 @@ export const topicMapsConfig: Config = {
         "carmaConf://opendata:https://offenedaten-wuppertal.de/dataset/wohnlagen-wuppertal/resource/610da804-fb6f-4be8-9cfd-5349c13c733f",
       ],
       url: "https://digital-twin-wuppertal-live.github.io/generic-topicmap/#/Wohnlagenkarte_Wuppertal",
+      serviceName: "wuppTopicMaps",
+    },
+    {
+      id: "wuppTopicMaps_wc",
+      path: "TopicMaps Wuppertal",
+      name: "wuppGenericTopicMaps_wc",
+      title: "WC-Karte",
+      description: `Beschreibung: Die WC-Karte Wuppertal bietet einen Überblick über ausgewählte öffentlich zugängliche Toiletten im Stadtgebiet. Die Erfassung erfolgt fortlaufend; ein Anspruch auf Vollständigkeit besteht nicht.`,
+      tags: [
+        "Generic TopicMaps",
+        "Infrastruktur",
+        "Barrierefreiheit",
+        "sanitäre Anlage",
+        "WC-Anlage",
+        "rollstuhlgerechtes WC",
+        "behindertengerechtes WC",
+        "Wickeltisch",
+        "Klo",
+        "Pissoir",
+      ],
+      type: "link",
+      thumbnail:
+        "https://wupp-digitaltwin-assets.cismet.de/v2/geoportal/thumbnails/wc_anlagen.png",
+      keywords: [],
+      url: "https://digital-twin-wuppertal-live.github.io/generic-topicmap/#/wc_karte_wuppertal",
       serviceName: "wuppTopicMaps",
     },
   ],
@@ -1685,7 +1657,6 @@ export const baseConfig = {
           790674.1752103989, 6660065.764058432, 795253.2309361077,
           6662991.869047475,
         ],
-        icon: "planung/Festsetzungstext",
       },
       {
         name: "lpnord_festsetzung",
@@ -1693,7 +1664,6 @@ export const baseConfig = {
           786460.5840261785, 6664637.653812743, 788750.111889033,
           6666100.706307263,
         ],
-        icon: "planung/LPlan_Nord_Festsetzungskarte",
       },
       {
         name: "lpnord_entwicklung",
@@ -1701,7 +1671,6 @@ export const baseConfig = {
           786460.5840261785, 6664637.653812743, 788750.111889033,
           6666100.706307263,
         ],
-        icon: "planung/LPlan_Nord_Entwicklungskarte",
       },
       {
         name: "lpost_festsetzung",
@@ -1709,7 +1678,6 @@ export const baseConfig = {
           799296.0331352534, 6665023.421939869, 801585.5609981079,
           6666486.474434387,
         ],
-        icon: "planung/LPlan_Ost_Festsetzungskarte",
       },
       {
         name: "lpost_entwicklung",
@@ -1717,7 +1685,6 @@ export const baseConfig = {
           799296.0331352534, 6665023.421939869, 801585.5609981079,
           6666486.474434387,
         ],
-        icon: "planung/LPlan_Ost_Entwicklungskarte",
       },
       {
         name: "lpgelpe_festsetzung",
@@ -1725,7 +1692,6 @@ export const baseConfig = {
           798245.0239963323, 6661616.002538341, 799389.7879277592,
           6662347.528785604,
         ],
-        icon: "planung/LPlan_Gelpe_Festsetzungskarte",
       },
       {
         name: "lpgelpe_entwicklung",
@@ -1733,7 +1699,6 @@ export const baseConfig = {
           798245.0239963323, 6661616.002538341, 799389.7879277592,
           6662347.528785604,
         ],
-        icon: "planung/LPlan_Gelpe_Entwicklungskarte",
       },
       {
         name: "lpwest_festsetzung",
@@ -1741,7 +1706,6 @@ export const baseConfig = {
           792702.14511709, 6659814.95505937, 794991.6729799444,
           6661278.007553893,
         ],
-        icon: "planung/LPlan_West_Festsetzungskarte",
       },
       {
         name: "lpwest_entwicklung",
@@ -1749,7 +1713,6 @@ export const baseConfig = {
           792702.14511709, 6659814.95505937, 794991.6729799444,
           6661278.007553893,
         ],
-        icon: "planung/LPlan_West_Entwicklungskarte",
       },
       {
         name: "baudenkmale",

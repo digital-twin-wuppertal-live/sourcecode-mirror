@@ -1,69 +1,98 @@
+import { Easing } from "@carma-commons/math";
 import { clampToToleranceRange } from "@carma-commons/utils";
 import {
   Cartesian3,
-  Math as CesiumMath,
-  type Viewer,
-  EasingFunction,
-  defined,
   Cartographic,
-} from "cesium";
+  CesiumMath,
+  defined,
+  type Scene,
+} from "@carma/cesium";
+export const OBLIQUE_PITCH_TOLERANCE = CesiumMath.toRadians(10);
+export const OBLIQUE_HEIGHT_TOLERANCE = 150.0;
 
-const PITCH_TOLERANCE_THRESHOLD = CesiumMath.toRadians(10);
-const HEIGHT_TOLERANCE_THRESHOLD = 150.0;
+export interface CameraForceObliqueOptions {
+  fixedPitch: number;
+  fixedHeight: number;
+  pitchTolerance?: number;
+  heightTolerance?: number;
+}
 
-interface CameraObliqueAnimationState {
+export const isInRange = (
+  value: number,
+  target: number,
+  tolerance: number
+): boolean => Math.abs(value - target) <= tolerance;
+
+export const testCameraObliqueCompliant = (
+  camera: { pitch: number; positionCartographic?: { height: number } | null },
+  options: CameraForceObliqueOptions
+): boolean => {
+  const {
+    fixedPitch,
+    fixedHeight,
+    pitchTolerance = OBLIQUE_PITCH_TOLERANCE,
+    heightTolerance = OBLIQUE_HEIGHT_TOLERANCE,
+  } = options;
+  const height = camera.positionCartographic?.height ?? 0;
+  return (
+    isInRange(camera.pitch, fixedPitch, pitchTolerance) &&
+    isInRange(height, fixedHeight, heightTolerance)
+  );
+};
+
+export const isCameraObliqueCompliant = testCameraObliqueCompliant;
+
+let animState: {
   startHeight: number;
   targetHeight: number;
   duration: number;
   startTime: number;
-}
-
-const cameraObliqueCorrectionStateMap = new WeakMap<
-  Viewer,
-  CameraObliqueAnimationState
->();
+} | null = null;
 
 export const cesiumCameraForceOblique = (
-  viewer: Viewer,
-  fixedPitch: number,
-  fixedHeight: number,
-  shouldSuspendRef: React.MutableRefObject<boolean>
+  scene: Scene,
+  options: CameraForceObliqueOptions
 ) => {
-  if (
-    !viewer ||
-    !viewer.scene ||
-    !viewer.scene.globe ||
-    !viewer.camera ||
-    shouldSuspendRef.current
-  ) {
+  if (!scene || !scene.globe || !scene.camera) {
     return;
   }
-  const currentPosition = viewer.camera.position;
+  const {
+    fixedPitch,
+    fixedHeight,
+    pitchTolerance = OBLIQUE_PITCH_TOLERANCE,
+    heightTolerance = OBLIQUE_HEIGHT_TOLERANCE,
+  } = options;
+  const currentPosition = scene.camera.position;
   const currentCartographic = Cartographic.fromCartesian(currentPosition);
   if (!currentCartographic || !defined(currentCartographic)) {
-    console.warn("Invalid current cartographic position");
     return;
   }
 
-  const currentPitch = viewer.camera.pitch;
+  const currentPitch = scene.camera.pitch;
   const currentHeight = currentCartographic.height;
+
+  // Bail out early if height is invalid (can happen before scene is fully initialized)
+  if (!Number.isFinite(currentHeight)) {
+    console.warn("Invalid height, skipping camera correction", currentHeight);
+    return;
+  }
 
   const [targetPitch, pitchNeedsCorrection] = clampToToleranceRange(
     currentPitch,
     fixedPitch,
-    PITCH_TOLERANCE_THRESHOLD
+    pitchTolerance
   );
 
   const [targetHeight, heightNeedsCorrection] = clampToToleranceRange(
     currentHeight,
     fixedHeight,
-    HEIGHT_TOLERANCE_THRESHOLD
+    heightTolerance
   );
 
   // Only apply corrections if needed
   if (heightNeedsCorrection || pitchNeedsCorrection) {
     const now = performance.now();
-    let anim = cameraObliqueCorrectionStateMap.get(viewer);
+    let anim = animState;
 
     const dynamicDuration = Math.min(
       Math.sqrt(Math.abs(currentHeight - targetHeight)) * 60,
@@ -77,32 +106,51 @@ export const cesiumCameraForceOblique = (
         duration: dynamicDuration, // ms
         startTime: now,
       };
-      cameraObliqueCorrectionStateMap.set(viewer, anim);
+      animState = anim;
     }
     const elapsed = now - anim.startTime;
     const t = Math.min(1, elapsed / anim.duration);
-    const easedT = EasingFunction.CUBIC_IN_OUT(t);
+    const easedT = Easing.CUBIC_IN_OUT(t);
     const nextHeight =
       anim.startHeight + (anim.targetHeight - anim.startHeight) * easedT;
     // Move along the camera's view direction (zoom ray) using trigonometry
-    const cameraDir = viewer.camera.direction;
-    const cameraPos = viewer.camera.position;
-    const pitchCos = Math.cos(viewer.camera.pitch);
-    if (Math.abs(pitchCos) > 1e-3) {
+    const cameraDir = scene.camera.direction;
+    const cameraPos = scene.camera.position;
+    const pitchSin = Math.sin(scene.camera.pitch);
+    if (Math.abs(pitchSin) > 1e-3) {
       try {
-        let zoomTravelDistance = (currentHeight - nextHeight) / pitchCos;
-        if (isNaN(zoomTravelDistance) || !Number.isFinite(zoomTravelDistance)) {
+        let zoomTravelDistance = (currentHeight - nextHeight) / pitchSin;
+
+        if (
+          isNaN(zoomTravelDistance) ||
+          !Number.isFinite(zoomTravelDistance) ||
+          isNaN(nextHeight)
+        ) {
           console.warn(
             "Invalid travel distance calculated, resetting to 0",
             zoomTravelDistance,
             currentHeight,
             nextHeight,
-            pitchCos
+            pitchSin
           );
+          if (isNaN(nextHeight)) {
+            // If nextHeight is NaN, something upstream is wrong (likely targetHeight/fixedHeight)
+            // We can't do anything meaningful.
+            animState = null;
+            return;
+          }
+          // Fallback for other calculation errors
           zoomTravelDistance = 0;
+        } else {
+          // Negate because sin(-pitch) is negative, but we want positive movement along the forward vector to go down
+          zoomTravelDistance = -zoomTravelDistance;
         }
-        // Clamp travel distance to avoid huge jumps
-        zoomTravelDistance = CesiumMath.clamp(zoomTravelDistance, -100, 100);
+
+        // warn to track possible positioning errors;
+        if (Math.abs(zoomTravelDistance) > 50000) {
+          console.warn("Travel distance too large", zoomTravelDistance);
+        }
+
         const newPos = Cartesian3.add(
           cameraPos,
           Cartesian3.multiplyByScalar(
@@ -112,12 +160,12 @@ export const cesiumCameraForceOblique = (
           ),
           new Cartesian3()
         );
-        viewer.camera.position = newPos;
+        scene.camera.position = newPos;
         defined(newPos) &&
-          viewer.camera.setView({
+          scene.camera.setView({
             destination: newPos,
             orientation: {
-              heading: viewer.camera.heading,
+              heading: scene.camera.heading,
               pitch: targetPitch,
               roll: 0,
             },
@@ -127,10 +175,10 @@ export const cesiumCameraForceOblique = (
       }
     }
     if (t === 1) {
-      cameraObliqueCorrectionStateMap.delete(viewer);
+      animState = null;
     }
     return;
   }
   // Always clear the state if no correction is needed
-  cameraObliqueCorrectionStateMap.delete(viewer);
+  animState = null;
 };

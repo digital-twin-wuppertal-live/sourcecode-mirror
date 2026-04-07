@@ -20,7 +20,7 @@ import isEqual from "lodash/isEqual";
 
 import { serviceOptions } from "@carma-commons/resources";
 import { BackgroundLayer, Item, Layer } from "@carma/types";
-import { extractCarmaConfig, updateUrl } from "@carma-commons/utils";
+import { extractCarmaConfig } from "@carma-commons/utils";
 
 import { parseDescription } from "../helper/layerHelper";
 import { Fragment, useState } from "react";
@@ -33,6 +33,7 @@ import { LayerButton, LayerIcon } from "@carma-mapping/components";
 
 import { useAuth } from "@carma-providers/auth";
 import type { ActiveLayers } from "./NewLibModal";
+import LegendDisplay from "./LegendDisplay";
 
 interface InfoCardProps {
   isFavorite: boolean;
@@ -115,14 +116,18 @@ const InfoCard = ({
 
   const { jwt, userGroups } = useAuth();
 
-  const allowPublishing = userGroups.includes("_Geoportal_Publizieren");
+  const allowPublishing =
+    userGroups.includes("_Geoportal_Publizieren") && !!jwt;
+
+  const carmaConf = extractCarmaConfig(layer.keywords);
+  const vectorLegend = layer.vectorLegend || carmaConf?.vectorLegend;
+  const vectorStyle = layer.vectorStyle || carmaConf?.vectorStyle;
 
   const legends =
-    layer.vectorStyle && layer.vectorLegend
-      ? [{ OnlineResource: layer.vectorLegend }]
+    vectorStyle && vectorLegend
+      ? [{ OnlineResource: vectorLegend }]
       : (layer as unknown as any).props?.Style?.[0]?.LegendURL; // TODO: fix type
   const parsedDescriptions = parseDescription(description);
-  const carmaConf = extractCarmaConfig(layer.keywords);
   const isVectorLayer = carmaConf?.vectorStyle;
   const canFavoriteItem =
     layer.type !== "collection" ||
@@ -246,6 +251,7 @@ const InfoCard = ({
     <div
       className="w-full h-full sm:h-[400px] px-6 pt-6 pb-2 shadow-sm hover:!shadow-lg rounded-lg bg-blue-50 col-span-full max-w-full overflow-x-auto"
       style={{ maxWidth: "100vw" }}
+      data-test-id="card-layer-detailed-info"
     >
       {contextHolder}
       <div className="flex h-full flex-col justify-between">
@@ -265,7 +271,7 @@ const InfoCard = ({
               </h3>
             )}
             <div className="flex flex-wrap items-center gap-4">
-              {layer.type === "layer" && (
+              {(layer.type === "layer" || layer.type === "object") && (
                 <Button
                   onClick={handleAddClick}
                   icon={
@@ -484,10 +490,15 @@ const InfoCard = ({
                                     return {
                                       title: l.title,
                                       opacity: l.opacity,
+                                      id: l.id,
                                     };
                                   }),
                                 activeLayers.map((l) => {
-                                  return { title: l.title, opacity: l.opacity };
+                                  return {
+                                    title: l.title,
+                                    opacity: l.opacity,
+                                    id: l.id,
+                                  };
                                 })
                               )
                             }
@@ -513,7 +524,6 @@ const InfoCard = ({
                               {layer.backgroundLayer && (
                                 <LayerButton
                                   key={layer.id}
-                                  layer={layer.backgroundLayer}
                                   classNames={["px-3"]}
                                   useShadow={false}
                                 >
@@ -531,7 +541,6 @@ const InfoCard = ({
                               {layer.layers.map((layer) => (
                                 <LayerButton
                                   key={layer.id}
-                                  layer={layer}
                                   classNames={["px-3"]}
                                   useShadow={false}
                                 >
@@ -554,7 +563,6 @@ const InfoCard = ({
                             activeLayers.map((layer) => (
                               <LayerButton
                                 key={layer.id}
-                                layer={layer}
                                 classNames={["px-3"]}
                                 useShadow={false}
                               >
@@ -707,11 +715,10 @@ const InfoCard = ({
                 <h5 className="font-semibold text-lg">Legende</h5>
                 <div className="h-full overflow-auto">
                   {legends?.map((legend, i) => (
-                    <img
+                    <LegendDisplay
                       key={`legend_${i}`}
-                      src={updateUrl(legend.OnlineResource)}
-                      alt="Legende"
-                      className="h-fit"
+                      url={legend.OnlineResource}
+                      updateUrl
                     />
                   ))}
                 </div>

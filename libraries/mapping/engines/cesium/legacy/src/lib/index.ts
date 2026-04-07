@@ -5,7 +5,7 @@ export * from "./index.d";
 
 export * from "./slices/cesium";
 
-export { type CesiumContextType } from "./CesiumContext";
+export { CesiumContext, type CesiumContextType } from "./CesiumContext";
 export { CesiumContextProvider } from "./CesiumContextProvider";
 export { CustomCesiumWidget } from "./CustomCesiumWidget";
 export {
@@ -15,8 +15,8 @@ export {
 
 export {
   CustomViewer,
-  type InitialCameraView,
   type CameraLimiterOptions,
+  type InitialCameraView,
 } from "./CustomViewer";
 export { DEFAULT_VIEWER_CONSTRUCTOR_OPTIONS } from "./viewerDefaults";
 
@@ -24,7 +24,6 @@ export { ByGeojsonClassifier } from "./components/ByGeojsonClassifier";
 export { ByTilesetClassifier } from "./components/ByTilesetClassifier";
 
 export { Compass } from "./components/controls/Compass";
-export { HomeControl } from "./components/controls/HomeControl";
 export { MarkerContainer } from "./components/MarkerContainer";
 export { PitchingCompass } from "./components/controls/PitchingCompass";
 export { SceneStyleToggle } from "./components/controls/SceneStyleToggle";
@@ -34,9 +33,12 @@ export {
   useCesiumContextOptional,
 } from "./hooks/useCesiumContext";
 export { useCesiumCameraForceOblique } from "./hooks/useCameraForceOblique";
-export { useHomeControl } from "./hooks/useHomeControl";
-export { useCesiumInitialCameraFromSearchParams } from "./hooks/useCesiumInitialCameraFromSearchParams";
+export {
+  useCesiumModelManager,
+  type UseCesiumModelManagerOptions,
+} from "./hooks/useCesiumModelManager";
 export { useFovWheelZoom } from "./hooks/useFovWheelZoom";
+export { useGeometryInstanceOpacityAnimation } from "./hooks/useGeometryInstanceOpacityAnimation";
 export { useSceneStyles } from "./hooks/useSceneStyles";
 export { useZoomControls } from "./hooks/useZoomControls";
 

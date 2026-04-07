@@ -20,7 +20,6 @@ export type LayerInfo = {
   description: string;
   inhalt: string;
   eignung: string;
-  url: string;
 };
 
 export type LayerMap = {
@@ -117,6 +116,7 @@ export interface MappingState extends LayerState {
   paleOpacityValue: number;
   showLeftScrollButton: boolean;
   showRightScrollButton: boolean;
+  activeInteractionLayerID: string | null;
   showFullscreenButton: boolean;
   showLocatorButton: boolean;
   showMeasurementButton: boolean;
@@ -125,6 +125,7 @@ export interface MappingState extends LayerState {
   startDrawing: boolean;
   clickFromInfoView: boolean;
   libreMapRef: any;
+  maplibreMaps?: any;
   configSelection?: SelectionItem;
   layersIdle: boolean;
 }
@@ -141,4 +142,18 @@ export interface FeatureInfoState {
   nothingFoundIDs: string[];
   loading: boolean;
   completedVectorLayers: string[];
+  triggerSelectionById: string | null;
+}
+
+export interface SelectedObject {
+  geometry?: Geometry;
+  id: string;
+  properties: {
+    restored: boolean;
+    collectionId: string;
+    layerId: string;
+    additionalInfo?: string;
+    subtitle?: string;
+    title: string;
+  };
 }

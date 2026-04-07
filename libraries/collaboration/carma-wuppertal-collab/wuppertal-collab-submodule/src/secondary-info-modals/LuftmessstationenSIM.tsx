@@ -1,5 +1,5 @@
 import React, { type ComponentType } from "react";
-import type { ChartOptions } from "chart.js";
+
 import SecondaryInfoPanelSection from "react-cismap/topicmaps/SecondaryInfoPanelSection";
 import SecondaryInfo from "react-cismap/topicmaps/SecondaryInfo";
 import { opendataLinkSections } from "../luftmessstationen/OpendataLinkSections";
@@ -15,6 +15,7 @@ import Color from "color";
 import Icon from "react-cismap/commons/Icon";
 
 import { Bar } from "react-chartjs-2";
+import type { ChartOptions } from "chart.js";
 import "chart.js/auto";
 import { genericSecondaryInfoFooterFactory } from "../commons";
 import { updateUrl } from "../commons/imageUrlManipulation";

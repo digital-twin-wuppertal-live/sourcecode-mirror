@@ -15,6 +15,7 @@ import EmptyAEVInfo from "./infos/EmptyAEVInfo";
 import EmptyHNInfo from "./infos/EmptyHNInfo";
 import { useDispatch, useSelector } from "react-redux";
 import {
+  getHauptnutzungenData,
   loadHauptnutzungen,
   searchForHauptnutzungen,
 } from "../../store/slices/hauptnutzungen";
@@ -59,6 +60,11 @@ import {
 import CustomScaleControl from "./CustomScaleControl";
 import { ResponsiveTopicMapContext } from "react-cismap/contexts/ResponsiveTopicMapContextProvider";
 import { TAILWIND_CLASSNAMES_FULLSCREEN_FIXED } from "@carma-commons/utils";
+import {
+  useSelectionTopicMap,
+  useUrlFeatureSelection,
+} from "@carma-appframeworks/portals";
+import { FeatureCollectionDispatchContext } from "react-cismap/contexts/FeatureCollectionContextProvider";
 
 const { ScaleControl } = TransitiveReactLeaflet;
 
@@ -78,12 +84,73 @@ const Map = () => {
   let aevVisible = searchParams.get("aevVisible") !== null;
   const dispatch = useDispatch();
   const aevFeatures = useSelector(getData);
+  const hnFeatures = useSelector(getHauptnutzungenData);
   const wrapperRef = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState<number>(0);
   const { routedMapRef } = useContext<typeof TopicMapContext>(TopicMapContext);
+  const ifUrlHookedSelected = useRef(false);
   const { responsiveState } = useContext<typeof ResponsiveTopicMapContext>(
     ResponsiveTopicMapContext
   );
+  const { setAllFeatures } = useContext<
+    typeof FeatureCollectionDispatchContext
+  >(FeatureCollectionDispatchContext);
+
+  useSelectionTopicMap();
+  useUrlFeatureSelection({
+    manualCallback: (features, objectId) => {
+      if (mapMode.mode === "rechtsplan") {
+        const foundedFeatures = features.filter(
+          (feature) => feature.properties?.name === objectId
+        );
+
+        if (foundedFeatures.length > 0) {
+          dispatch(setFeatureCollection(foundedFeatures));
+          dispatch(setSelectedFeatureIndex(0));
+          searchParams.set("aevVisible", "true");
+          setSearchParams(searchParams);
+          const projectedFC = L.Proj.geoJson(foundedFeatures);
+          const bounds = projectedFC.getBounds();
+          const map = routedMapRef?.leafletMap?.leafletElement;
+          if (map === undefined) {
+            return;
+          }
+          map.fitBounds(bounds);
+        }
+      } else {
+        // Search for Hauptnutzungen by object ID
+        if (hnFeatures && hnFeatures.length > 0) {
+          const foundedHnFeatures = hnFeatures.filter(
+            (feature) =>
+              feature.properties?.id === objectId || feature.id === objectId
+          );
+
+          if (foundedHnFeatures.length > 0) {
+            dispatch(
+              // @ts-expect-error legacy codebase exception
+              searchForHauptnutzungen({
+                point: {
+                  x: foundedHnFeatures[0].geometry.coordinates[0][0][0],
+                  y: foundedHnFeatures[0].geometry.coordinates[0][0][1],
+                },
+                done: (result) => {
+                  const projectedFC = L.Proj.geoJson(result);
+                  const bounds = projectedFC.getBounds();
+                  const map = routedMapRef?.leafletMap?.leafletElement;
+                  if (map === undefined) {
+                    return;
+                  }
+                  map.fitBounds(bounds);
+                },
+              })
+            );
+          }
+        }
+      }
+
+      ifUrlHookedSelected.current = true;
+    },
+  });
 
   const isMobile = responsiveState === "normal" ? false : true;
 
@@ -103,6 +170,25 @@ const Map = () => {
     dispatch(loadAEVs() as unknown as UnknownAction);
     // getGazData(setGazData);
   }, []);
+
+  useEffect(() => {
+    if (
+      aevFeatures &&
+      aevFeatures.length > 0 &&
+      hnFeatures &&
+      hnFeatures.length > 0
+    ) {
+      setAllFeatures([...aevFeatures]);
+    }
+  }, [aevFeatures, hnFeatures]);
+
+  useEffect(() => {
+    const tmSelectionObject = searchParams.get("tmSelectionObject");
+    if (tmSelectionObject && ifUrlHookedSelected.current) {
+      searchParams.delete("tmSelectionObject");
+      setSearchParams(searchParams.toString());
+    }
+  }, [searchParams, setSearchParams]);
 
   useEffect(() => {
     if (mode !== "arbeitskarte" && mode !== "rechtsplan") {
@@ -290,6 +376,7 @@ const Map = () => {
       const index = features.findIndex(
         (element) => element.id === event.target.feature.id
       );
+
       if (index !== -1) {
         dispatch(setSelectedFeatureIndex(index));
       }

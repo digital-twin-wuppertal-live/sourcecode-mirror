@@ -1,4 +1,11 @@
-import { useCallback, useRef, useState, useEffect, useMemo } from "react";
+import {
+  useCallback,
+  useRef,
+  useState,
+  useEffect,
+  useMemo,
+  type FC,
+} from "react";
 import { useSelector } from "react-redux";
 
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
@@ -35,30 +42,45 @@ import { useOblique } from "../hooks/useOblique";
 import { useObliqueCameraHandlers } from "../hooks/useObliqueCameraHandlers";
 import { useSiblingsByCardinal } from "../hooks/useSiblingsByCardinal";
 import { useObliqueDirectionKeybindings } from "../hooks/useObliqueDirectionKeybindings";
+import { useObliqueNearestImage } from "../hooks/useObliqueNearestImage";
 
 import { flyToExteriorOrientation } from "../utils/cameraUtils";
 import { downloadAsBlobAsync } from "../utils/downloads";
 import { getImageUrls } from "../utils/imageHandling";
-import {
-  notifyPreviewVisibilityChange,
-  subscribeToPreviewVisibility,
-} from "../utils/previewVisibility";
 
 import { CAMERA_ID_INTERIOR_ORIENTATION_PERCENTAGE_OFFSETS } from "../config";
 import { CardinalDirectionEnum } from "../utils/orientationUtils";
+import { strings } from "../strings.de";
 
 interface ObliqueControlsProps {
   headingOffset?: number;
   isObliqueMode?: boolean;
+  hideControls?: boolean;
 }
 
-export const ObliqueControls: React.FC<ObliqueControlsProps> = () => {
+type ObliqueCubeConsoleApi = {
+  show: () => void;
+  hide: () => void;
+};
+
+declare global {
+  interface Window {
+    carmaOblique?: {
+      cube?: ObliqueCubeConsoleApi;
+    };
+  }
+}
+
+export const ObliqueControls: FC<ObliqueControlsProps> = ({
+  hideControls = false,
+}) => {
   const {
     headingOffset,
     selectedImage,
     isAllDataReady,
     previewPath,
     previewQualityLevel,
+    downloadQualityLevel,
     setLockFootprint,
     animations,
     isObliqueMode,
@@ -67,21 +89,22 @@ export const ObliqueControls: React.FC<ObliqueControlsProps> = () => {
     setSelectedImage,
     prefetchSiblingPreview,
     setSuspendSelectionSearch,
-    selectedImageRefresh,
+    isPreviewVisible,
+    setPreviewVisible,
   } = useOblique();
+  const refreshSearch = useObliqueNearestImage();
   const siblingsByCardinal = useSiblingsByCardinal();
-  const ctx = useCesiumContext(),
-    {
-      shouldSuspendPitchLimiterRef,
-      shouldSuspendCameraLimitersRef,
-      requestRender,
-      isValidViewer,
-    } = ctx;
+  const {
+    shouldSuspendPitchLimiterRef,
+    shouldSuspendCameraLimitersRef,
+    requestRender,
+    isValidViewer,
+    withScene,
+  } = useCesiumContext();
   const imageId = selectedImage?.record?.id;
   const cameraId = selectedImage?.record?.cameraId;
   const { isDebugMode, isObliqueUiEval } = useFeatureFlags();
   const animationInProgressRef = useRef<boolean>(false);
-  // Avoid repeated logs when refresh is not yet wired
 
   // Used to trigger fly-to after next capture navigation
   const nextCaptureShouldFlyRef = useRef(false);
@@ -97,7 +120,7 @@ export const ObliqueControls: React.FC<ObliqueControlsProps> = () => {
   const [offsetCube, setOffsetCube] = useState(false);
   const [invertLabels, setInvertLabels] = useState(true);
   const [shouldRender, setShouldRender] = useState(isObliqueMode);
-  const [isPreviewVisible, setIsPreviewVisible] = useState(false);
+
   const [isFlyButtonHovered, setIsFlyButtonHovered] = useState(false);
   // Hide footprints while preview is visible
   useEffect(() => {
@@ -108,16 +131,6 @@ export const ObliqueControls: React.FC<ObliqueControlsProps> = () => {
     setSuspendSelectionSearch(isPreviewVisible);
   }, [isPreviewVisible, setSuspendSelectionSearch]);
 
-  /*
-  replace with registering flyHomeCallback from hostFramework/app
-  // Close preview when a Home fly is triggered
-  useEffect(() => {
-    const unsubscribe = ctx.subscribe(CtxEvent.Home, () => {
-      setIsPreviewVisible(false);
-    });
-    return unsubscribe;
-  }, [ctx]);
-  */
   // Disable camera limiters while preview is visible
   useEffect(() => {
     if (shouldSuspendPitchLimiterRef)
@@ -148,6 +161,30 @@ export const ObliqueControls: React.FC<ObliqueControlsProps> = () => {
   const [contrastBase, setContrastBase] = useState(95);
   const [saturationBase, setSaturationBase] = useState(85);
   const [useLegacyDirControls, setUseLegacyDirControls] = useState(false);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const cubeApi: ObliqueCubeConsoleApi = {
+      show: () => setShowOrientationCube(true),
+      hide: () => setShowOrientationCube(false),
+    };
+    const existing = window.carmaOblique;
+    window.carmaOblique = {
+      ...(existing ?? {}),
+      cube: cubeApi,
+    };
+
+    return () => {
+      if (window.carmaOblique?.cube === cubeApi) {
+        const { cube, ...rest } = window.carmaOblique;
+        if (Object.keys(rest).length === 0) {
+          delete window.carmaOblique;
+        } else {
+          window.carmaOblique = rest;
+        }
+      }
+    };
+  }, []);
 
   const isTransitioning = useSelector(selectViewerIsTransitioning);
   // Track last directional move to prefetch ahead in the same direction on arrival
@@ -235,18 +272,14 @@ export const ObliqueControls: React.FC<ObliqueControlsProps> = () => {
   // Request nearest image for a given cardinal via on-demand search
   const findNearestForCardinal = useCallback(
     (dir: CardinalDirectionEnum, opts?: { computeOnly?: boolean }) => {
-      if (typeof selectedImageRefresh !== "function") {
-        return null;
-      }
-      const results = selectedImageRefresh({
+      const results = refreshSearch({
         direction: dir,
         immediate: true,
-        force: isPreviewVisible,
         computeOnly: !!opts?.computeOnly,
       });
       return results && results.length ? results[0] : null;
     },
-    [selectedImageRefresh, isPreviewVisible]
+    [refreshSearch]
   );
 
   // Fly-to handling for next capture (without opening preview)
@@ -259,24 +292,26 @@ export const ObliqueControls: React.FC<ObliqueControlsProps> = () => {
       ? animations.flyToRotatedImage ?? animations.flyToExteriorOrientation
       : animations.flyToNextImage ?? animations.flyToExteriorOrientation;
     rotatedFlyPendingRef.current = false;
-    flyToExteriorOrientation(
-      ctx,
-      derivedExteriorOrientationRef.current,
-      () => {
-        animationInProgressRef.current = false;
-        if (!isPreviewVisible) {
-          setLockFootprint(false);
-        }
-        setShouldRemoveCurrentPreviewImage(false);
-        setFlyCompletionTick((t) => t + 1);
-        // Re-enable selection search after arriving only if preview is not visible
-        if (!isPreviewVisible) {
-          setSuspendSelectionSearch(false);
-        }
-        requestRender();
-      },
-      flyOptions
-    );
+    withScene((scene) => {
+      flyToExteriorOrientation(
+        scene,
+        derivedExteriorOrientationRef.current,
+        () => {
+          animationInProgressRef.current = false;
+          if (!isPreviewVisible) {
+            setLockFootprint(false);
+          }
+          setShouldRemoveCurrentPreviewImage(false);
+          setFlyCompletionTick((t) => t + 1);
+          // Re-enable selection search after arriving only if preview is not visible
+          if (!isPreviewVisible) {
+            setSuspendSelectionSearch(false);
+          }
+          requestRender();
+        },
+        flyOptions
+      );
+    });
   }, [
     animations,
     setLockFootprint,
@@ -285,7 +320,7 @@ export const ObliqueControls: React.FC<ObliqueControlsProps> = () => {
     isPreviewVisible,
     requestRender,
     isValidViewer,
-    ctx,
+    withScene,
   ]);
 
   useEffect(() => {
@@ -383,8 +418,13 @@ export const ObliqueControls: React.FC<ObliqueControlsProps> = () => {
       : {}
   );
 
-  const { activeDirection, rotateCamera, rotateToDirection, rotateToHeading } =
-    useObliqueCameraHandlers(animationInProgressRef, isDebugMode);
+  const {
+    activeDirection,
+    setActiveDirection,
+    rotateCamera,
+    rotateToDirection,
+    rotateToHeading,
+  } = useObliqueCameraHandlers(animationInProgressRef);
 
   // When rotating in preview: fade current image, trigger nearest search after rotation, and fly to the result
   const rotateCameraWithPreview = useCallback(
@@ -412,12 +452,10 @@ export const ObliqueControls: React.FC<ObliqueControlsProps> = () => {
         setShouldRemoveCurrentPreviewImage(true);
         nextCaptureShouldFlyRef.current = true;
         rotatedFlyPendingRef.current = true;
-        // Now trigger selection update
-        selectedImageRefresh?.({
-          direction: targetDir,
-          immediate: true,
-          force: isPreviewVisible,
-        });
+        // Update activeDirection immediately so buttons reflect new state
+        setActiveDirection(targetDir);
+        // Now trigger selection update directly (bypasses suspendSelectionSearch)
+        setSelectedImage(nearest);
         return true; // step accepted; fly will be triggered by selection change
       }
       rotateCamera(clockwise);
@@ -428,7 +466,8 @@ export const ObliqueControls: React.FC<ObliqueControlsProps> = () => {
       rotateCamera,
       activeDirection,
       findNearestForCardinal,
-      selectedImageRefresh,
+      setSelectedImage,
+      setActiveDirection,
       selectedImage?.record?.id,
     ]
   );
@@ -437,18 +476,12 @@ export const ObliqueControls: React.FC<ObliqueControlsProps> = () => {
   const rotateCameraKeypress = useCallback(
     (clockwise: boolean) => {
       if (isPreviewVisible) {
-        if (!selectedImageRefresh) return;
         rotateCameraWithPreview(clockwise);
       } else {
         rotateCamera(clockwise);
       }
     },
-    [
-      isPreviewVisible,
-      rotateCameraWithPreview,
-      rotateCamera,
-      selectedImageRefresh,
-    ]
+    [isPreviewVisible, rotateCameraWithPreview, rotateCamera]
   );
 
   const rotateToDirectionWithPreview = useCallback(
@@ -465,12 +498,10 @@ export const ObliqueControls: React.FC<ObliqueControlsProps> = () => {
         setShouldRemoveCurrentPreviewImage(true);
         nextCaptureShouldFlyRef.current = true;
         rotatedFlyPendingRef.current = true;
-        // Phase 2: trigger selection update to new direction to kick off fly effect
-        selectedImageRefresh?.({
-          direction: dir,
-          immediate: true,
-          force: isPreviewVisible,
-        });
+        // Update activeDirection immediately so buttons reflect new state
+        setActiveDirection(dir);
+        // Phase 2: trigger selection update directly (bypasses suspendSelectionSearch)
+        setSelectedImage(nearest);
         return; // skip camera rotation animation in preview
       }
       rotateToDirection(dir);
@@ -479,7 +510,8 @@ export const ObliqueControls: React.FC<ObliqueControlsProps> = () => {
       isPreviewVisible,
       rotateToDirection,
       findNearestForCardinal,
-      selectedImageRefresh,
+      setSelectedImage,
+      setActiveDirection,
       selectedImage?.record?.id,
     ]
   );
@@ -487,8 +519,14 @@ export const ObliqueControls: React.FC<ObliqueControlsProps> = () => {
   useFootprints(isDebugMode);
 
   const { downloadUrl } = useMemo(
-    () => getImageUrls(imageId, previewPath, previewQualityLevel),
-    [previewPath, previewQualityLevel, imageId]
+    () =>
+      getImageUrls(
+        imageId,
+        previewPath,
+        previewQualityLevel,
+        downloadQualityLevel
+      ),
+    [previewPath, previewQualityLevel, downloadQualityLevel, imageId]
   );
 
   // Global keybindings for direction controls (WASD/Arrows/QE/Numpad)
@@ -524,17 +562,14 @@ export const ObliqueControls: React.FC<ObliqueControlsProps> = () => {
   }, [isTransitioning, isValidViewer]);
 
   useEffect(() => {
-    const unsubscribe = subscribeToPreviewVisibility((visible) => {
-      setIsPreviewVisible(visible);
-    });
-
-    return unsubscribe;
-  }, []);
+    return () => {
+      setPreviewVisible(false);
+    };
+  }, [setPreviewVisible]);
 
   const flyToNearestExteriorOrientation = useCallback(async () => {
     if (isPreviewVisible) {
-      setIsPreviewVisible(false);
-      notifyPreviewVisibilityChange(false);
+      setPreviewVisible(false);
       return;
     }
 
@@ -548,24 +583,26 @@ export const ObliqueControls: React.FC<ObliqueControlsProps> = () => {
     setLockFootprint(true);
     animationInProgressRef.current = true;
 
-    flyToExteriorOrientation(
-      ctx,
-      derivedExteriorOrientationRef.current,
-      () => {
-        animationInProgressRef.current = false;
-        setIsPreviewVisible(true);
-        notifyPreviewVisibilityChange(true);
-      },
-      animations.flyToExteriorOrientation
-    );
+    withScene((scene) => {
+      flyToExteriorOrientation(
+        scene,
+        derivedExteriorOrientationRef.current,
+        () => {
+          animationInProgressRef.current = false;
+          setPreviewVisible(true);
+        },
+        animations.flyToExteriorOrientation
+      );
+    });
   }, [
     animations,
     selectedImage,
     isPreviewVisible,
+    setPreviewVisible,
     setLockFootprint,
     derivedExteriorOrientationRef,
     isValidViewer,
-    ctx,
+    withScene,
   ]);
 
   const openImageLink = useCallback(() => {
@@ -584,12 +621,12 @@ export const ObliqueControls: React.FC<ObliqueControlsProps> = () => {
 
   return (
     <>
-      {isDebugMode && (
+      {isDebugMode && !hideControls && (
         <div style={debugComponentsContainerLeftStyle}>
           <ObliqueDebugSvg />
         </div>
       )}
-      {isDebugMode && selectedImage && (
+      {isDebugMode && !hideControls && selectedImage && (
         <div style={debugComponentsContainerRightStyle}>
           <CameraVectorControls
             imageId={imageId}
@@ -612,28 +649,36 @@ export const ObliqueControls: React.FC<ObliqueControlsProps> = () => {
           previewPath={previewPath!}
           imageId={imageId}
           isVisible={isPreviewVisible}
+          hideOverlayUi={hideControls}
           dimImage={shouldRemoveCurrentPreviewImage}
           flyCompletionTick={flyCompletionTick}
           onOpenImageLink={openImageLink}
           onDirectDownload={handleDirectDownload}
+          onClose={() => {
+            setPreviewVisible(false);
+            setLockFootprint(false);
+            setSuspendSelectionSearch(false);
+          }}
           isDebugMode={isDebugMode}
           showCompactDirectionControls
+          showOrientationCube={showOrientationCube}
+          directionalButtonType={directionalButtonType}
+          offsetRad={effectiveOffsetRad}
+          offsetCube={offsetCube}
+          invertCardinalLabels={invertLabels}
+          showFacadeLabels={showFacadeLabels}
+          disableCubeDrag
+          disableCubeNorthArrow
           rotateCamera={rotateCameraKeypress}
           rotateToDirection={rotateToDirectionWithPreview}
           activeDirection={activeDirection}
           siblingCallbacks={siblingCallbacks}
           isDirectionLoading={false}
           preloadNextEnabled={isFlyButtonHovered}
-          onClose={() => {
-            setIsPreviewVisible(false);
-            notifyPreviewVisibilityChange(false);
-            setLockFootprint(false);
-            setSuspendSelectionSearch(false);
-            setShouldRemoveCurrentPreviewImage(false);
-            requestRender({ delay: 50 });
-          }}
           interiorOrientationOffsets={
-            CAMERA_ID_INTERIOR_ORIENTATION_PERCENTAGE_OFFSETS[cameraId]
+            cameraId
+              ? CAMERA_ID_INTERIOR_ORIENTATION_PERCENTAGE_OFFSETS[cameraId]
+              : undefined
           }
           brightnessBase={brightnessBase}
           contrastBase={contrastBase}
@@ -641,153 +686,162 @@ export const ObliqueControls: React.FC<ObliqueControlsProps> = () => {
           style={imagePreviewStyle}
         />
       )}
-      <div className="absolute top-0 left-0 w-svw h-svh">
-        <div
-          className="camera-rotation-controls-container"
-          style={{
-            position: "absolute",
-            bottom: "60px",
-            left: "50%",
-            transform: "translateX(-50%)",
-            display: "flex",
-            flexDirection: "column",
-            alignItems: "center",
-            gap: "8px",
-            zIndex: 1000,
-            opacity: isVisible && !isPreviewVisible ? 1 : 0,
-            transition: "opacity 300ms ease-in-out",
-            pointerEvents: "none",
-          }}
-        >
+      {!hideControls && (
+        <div className="absolute top-0 left-0 w-svw h-svh">
           <div
+            className="camera-rotation-controls-container"
             style={{
+              position: "absolute",
+              bottom: "60px",
+              left: "50%",
+              transform: "translateX(-50%)",
               display: "flex",
               flexDirection: "column",
-              gap: "10px",
               alignItems: "center",
+              gap: "8px",
+              zIndex: 1000,
+              opacity: isVisible && !isPreviewVisible ? 1 : 0,
+              transition: "opacity 300ms ease-in-out",
+              pointerEvents: "none",
             }}
           >
-            {imageId && derivedExteriorOrientationRef.current && (
-              <ControlButtonStyler
-                onClick={flyToNearestExteriorOrientation}
-                onMouseEnter={() => setIsFlyButtonHovered(true)}
-                onMouseLeave={() => setIsFlyButtonHovered(false)}
-                width="160px"
-                height="40px"
-                className="pointer-events-auto bg-blue-50 hover:bg-blue-100"
-              >
-                <span className="flex items-center">Flug zum Bild</span>
-              </ControlButtonStyler>
-            )}
-
-            {imageId && downloadUrl && (
-              <div
-                style={{
-                  display: "flex",
-                  flexDirection: "column",
-                  gap: "10px",
-                  paddingBottom: "40px",
-                  alignItems: "center",
-                  pointerEvents: "auto",
-                }}
-              >
-                <Tooltip
-                  placement="right"
-                  title="Bild in hoher Qualität in neuem Tab öffnen"
-                >
-                  <ControlButtonStyler onClick={openImageLink} width="160px">
-                    <span className="flex items-center text-base">
-                      <FontAwesomeIcon icon={faExternalLink} className="mr-2" />
-                      Bild öffnen
-                    </span>
-                  </ControlButtonStyler>
-                </Tooltip>
-
-                <Tooltip placement="right" title="Bild direkt herunterladen">
+            <div
+              style={{
+                display: "flex",
+                flexDirection: "column",
+                gap: "10px",
+                alignItems: "center",
+              }}
+            >
+              {imageId && derivedExteriorOrientationRef.current && (
+                <Tooltip placement="right" title={strings.footprintsFlyToImage}>
                   <ControlButtonStyler
-                    onClick={handleDirectDownload}
+                    onClick={flyToNearestExteriorOrientation}
+                    onMouseEnter={() => setIsFlyButtonHovered(true)}
+                    onMouseLeave={() => setIsFlyButtonHovered(false)}
                     width="160px"
+                    height="40px"
+                    className="pointer-events-auto bg-blue-50 hover:bg-blue-100"
                   >
-                    <span className="flex items-center text-base">
-                      <FontAwesomeIcon
-                        icon={faFileArrowDown}
-                        className="mr-2"
-                      />
-                      Herunterladen
-                    </span>
+                    <span className="flex items-center">Flug zum Bild</span>
                   </ControlButtonStyler>
                 </Tooltip>
+              )}
 
-                <ContactMailButton
-                  width="160px"
-                  emailAddress="geodatenzentrum@stadt.wuppertal.de"
-                  subjectPrefix="Datenschutzprüfung Luftbildschrägaufnahme"
-                  productName="Luftbildschrägaufnahmen"
-                  portalName="Wuppertaler Geodatenportal"
-                  imageId={imageId}
-                  imageUri={downloadUrl}
-                  tooltip={{
-                    title: "Datenschutzprüfung Luftbildschrägaufnahme",
-                    placement: "right",
+              {imageId && downloadUrl && (
+                <div
+                  style={{
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: "10px",
+                    paddingBottom: "40px",
+                    alignItems: "center",
+                    pointerEvents: "auto",
                   }}
-                />
-              </div>
-            )}
+                >
+                  <Tooltip
+                    placement="right"
+                    title={strings.footprintsOpenImage}
+                  >
+                    <ControlButtonStyler onClick={openImageLink} width="160px">
+                      <span className="flex items-center text-base">
+                        <FontAwesomeIcon
+                          icon={faExternalLink}
+                          className="mr-2"
+                        />
+                        Bild öffnen
+                      </span>
+                    </ControlButtonStyler>
+                  </Tooltip>
 
-            {useLegacyDirControls && (
-              <ObliqueDirectionControls
-                rotateCamera={rotateCamera}
-                rotateToDirection={rotateToDirection}
-                activeDirection={activeDirection}
-                isLoading={!isAllDataReady}
-                siblingCallbacks={
-                  directionalButtonType === "nextCapture"
-                    ? siblingCallbacks
-                    : undefined
-                }
-              />
-            )}
-            {showDirectionControls && (
-              <ObliqueDirectionControlsCompact
-                rotateCamera={rotateCamera}
-                rotateToDirection={rotateToDirection}
-                activeDirection={activeDirection}
-                isLoading={!isAllDataReady}
-                siblingCallbacks={
-                  directionalButtonType === "nextCapture"
-                    ? siblingCallbacks
-                    : undefined
-                }
-              />
-            )}
-            {showOrientationCube && (
-              <div className="flex justify-center">
-                <div className="flex flex-col items-center">
-                  <ObliqueOrientationCube
-                    size={70}
-                    rotateCamera={rotateCamera}
-                    onDirectionSelect={rotateToDirection}
-                    onHeadingSelect={rotateToHeading}
-                    offsetRad={effectiveOffsetRad}
-                    offsetCube={offsetCube}
-                    invertCardinalLabels={invertLabels}
-                    showFacadeLabels={showFacadeLabels}
-                    directionalButtonType={directionalButtonType}
-                    isLoading={!isAllDataReady}
-                    siblingCallbacks={
-                      directionalButtonType === "nextCapture"
-                        ? siblingCallbacks
-                        : undefined
-                    }
+                  <Tooltip
+                    placement="right"
+                    title={strings.footprintsDownloadImage}
+                  >
+                    <ControlButtonStyler
+                      onClick={handleDirectDownload}
+                      width="160px"
+                    >
+                      <span className="flex items-center text-base">
+                        <FontAwesomeIcon
+                          icon={faFileArrowDown}
+                          className="mr-2"
+                        />
+                        Herunterladen
+                      </span>
+                    </ControlButtonStyler>
+                  </Tooltip>
+
+                  <ContactMailButton
+                    width="160px"
+                    emailAddress="geodatenzentrum@stadt.wuppertal.de"
+                    subjectPrefix="Datenschutzprüfung Luftbildschrägaufnahme"
+                    productName="Luftbildschrägaufnahmen"
+                    portalName="Wuppertaler Geodatenportal"
+                    imageId={imageId}
+                    imageUri={downloadUrl}
+                    tooltip={{
+                      title: strings.footprintsRequestReview,
+                      placement: "right",
+                    }}
                   />
                 </div>
-              </div>
-            )}
+              )}
+
+              {useLegacyDirControls && !showOrientationCube && (
+                <ObliqueDirectionControls
+                  rotateCamera={rotateCameraKeypress}
+                  rotateToDirection={rotateToDirectionWithPreview}
+                  activeDirection={activeDirection}
+                  isLoading={!isAllDataReady}
+                  siblingCallbacks={
+                    directionalButtonType === "nextCapture"
+                      ? siblingCallbacks
+                      : undefined
+                  }
+                />
+              )}
+              {showDirectionControls && !showOrientationCube && (
+                <ObliqueDirectionControlsCompact
+                  rotateCamera={rotateCamera}
+                  rotateToDirection={rotateToDirection}
+                  activeDirection={activeDirection}
+                  isLoading={!isAllDataReady}
+                  siblingCallbacks={
+                    directionalButtonType === "nextCapture"
+                      ? siblingCallbacks
+                      : undefined
+                  }
+                />
+              )}
+              {showOrientationCube && (
+                <div className="flex justify-center">
+                  <div className="flex flex-col items-center">
+                    <ObliqueOrientationCube
+                      size={70}
+                      rotateCamera={rotateCameraKeypress}
+                      onDirectionSelect={rotateToDirectionWithPreview}
+                      onHeadingSelect={rotateToHeading}
+                      offsetRad={effectiveOffsetRad}
+                      offsetCube={offsetCube}
+                      invertCardinalLabels={invertLabels}
+                      showFacadeLabels={showFacadeLabels}
+                      directionalButtonType={directionalButtonType}
+                      isLoading={!isAllDataReady}
+                      siblingCallbacks={
+                        directionalButtonType === "nextCapture"
+                          ? siblingCallbacks
+                          : undefined
+                      }
+                    />
+                  </div>
+                </div>
+              )}
+            </div>
           </div>
         </div>
-      </div>
+      )}
     </>
   );
 };
-
 export default ObliqueControls;

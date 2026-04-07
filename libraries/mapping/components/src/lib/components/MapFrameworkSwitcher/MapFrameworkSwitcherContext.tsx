@@ -7,11 +7,13 @@
 import {
   createContext,
   useContext,
+  useEffect,
   useState,
   useRef,
   useCallback,
   useMemo,
   startTransition,
+  type MutableRefObject,
   type ReactNode,
 } from "react";
 
@@ -19,16 +21,16 @@ import type { LeafletMap } from "@carma-mapping/engines/leaflet";
 import {
   CesiumTerrainProvider,
   type Scene,
+  type SerializedCameraStateHeadingPitchRoll,
   waitForRenderFrames,
 } from "@carma/cesium";
-import type { Radians } from "@carma/units/types";
 
 import {
   transitionToCesium,
   transitionToLeaflet,
   TransitionStage,
   type TransitionOptions,
-} from "@carma-mapping/engines-interop";
+} from "@carma-mapping/engines-interop/leaflet-cesium";
 import { validateRequirements } from "./utils/validate-requirements";
 
 export const CARMA_MAP_FRAMEWORKS = {
@@ -44,10 +46,7 @@ export type CarmaMapFramework = FrameworkMap[keyof FrameworkMap];
  * add more as needed
  */
 export interface EngineState {
-  cesium?: {
-    heading: Radians;
-    pitch: Radians;
-  };
+  cesium?: SerializedCameraStateHeadingPitchRoll;
 }
 
 export interface MapFrameworkSwitcherState {
@@ -61,12 +60,15 @@ export interface MapFrameworkSwitcherRefs {
   getCesiumScene: () => Scene | null | undefined;
   getCesiumContainer: () => HTMLElement | null | undefined;
   getCesiumTerrainProviders: () => {
-    TERRAIN: CesiumTerrainProvider;
-    SURFACE: CesiumTerrainProvider;
+    TERRAIN: CesiumTerrainProvider | null;
+    SURFACE: CesiumTerrainProvider | null;
   };
 }
 
 export interface MapFrameworkSwitcherCallbacks {
+  onEnsureCesiumReady?: () => Promise<void> | void;
+  onBeforeTransitionToCesium?: () => Promise<void> | void;
+  onAfterTransitionToCesium?: () => void;
   onLeafletViewSet?: (params: {
     center: { lat: number; lng: number };
     zoom: number;
@@ -77,6 +79,8 @@ export interface MapFrameworkSwitcherContextValue {
   // State
   activeFramework: CarmaMapFramework;
   isTransitioning: boolean;
+  isPreparingCesiumTransition: boolean;
+  preparingCesiumMessage: string | null;
   isReady: boolean;
 
   // Computed helpers (no need to redefine everywhere)
@@ -110,6 +114,68 @@ export interface MapFrameworkSwitcherContextValue {
   ) => void;
 }
 
+const CESIUM_RUNTIME_READY_TIMEOUT_MS = 10_000;
+
+const readHasLeafletRuntime = (refs: MapFrameworkSwitcherRefs): boolean =>
+  Boolean(refs.getLeafletMap());
+
+const readHasCesiumRuntime = (refs: MapFrameworkSwitcherRefs): boolean =>
+  Boolean(refs.getCesiumScene() && refs.getCesiumContainer());
+
+const readCanInitializeCesiumOnDemand = (
+  callbacks: MapFrameworkSwitcherCallbacks
+): boolean => Boolean(callbacks.onEnsureCesiumReady);
+
+const readIsFrameworkSwitcherReady = ({
+  activeFramework,
+  refs,
+  callbacks,
+}: {
+  activeFramework: CarmaMapFramework;
+  refs: MapFrameworkSwitcherRefs;
+  callbacks: MapFrameworkSwitcherCallbacks;
+}): boolean => {
+  const hasLeafletRuntime = readHasLeafletRuntime(refs);
+  const hasCesiumRuntime = readHasCesiumRuntime(refs);
+
+  if (activeFramework === CARMA_MAP_FRAMEWORKS.LEAFLET) {
+    return (
+      hasLeafletRuntime &&
+      (hasCesiumRuntime || readCanInitializeCesiumOnDemand(callbacks))
+    );
+  }
+
+  return hasLeafletRuntime && hasCesiumRuntime;
+};
+
+const waitForCesiumRuntime = async ({
+  refsRef,
+  timeoutMs = CESIUM_RUNTIME_READY_TIMEOUT_MS,
+}: {
+  refsRef: MutableRefObject<MapFrameworkSwitcherRefs>;
+  timeoutMs?: number;
+}): Promise<void> => {
+  const startTimeMs = performance.now();
+
+  await new Promise<void>((resolve, reject) => {
+    const tick = () => {
+      if (readHasCesiumRuntime(refsRef.current)) {
+        resolve();
+        return;
+      }
+
+      if (performance.now() - startTimeMs >= timeoutMs) {
+        reject(new Error("Timed out while waiting for Cesium runtime."));
+        return;
+      }
+
+      window.requestAnimationFrame(tick);
+    };
+
+    tick();
+  });
+};
+
 // ============================================================================
 // Context
 // ============================================================================
@@ -136,6 +202,11 @@ export const MapFrameworkSwitcherProvider = ({
   const [activeFramework, setActiveFramework] =
     useState<CarmaMapFramework>(initialFramework);
   const [isTransitioning, setIsTransitioning] = useState(false);
+  const [isPreparingCesiumTransition, setIsPreparingCesiumTransition] =
+    useState(false);
+  const [preparingCesiumMessage, setPreparingCesiumMessage] = useState<
+    string | null
+  >(null);
   const [isReady, setIsReady] = useState(false);
 
   // derived setters
@@ -158,12 +229,14 @@ export const MapFrameworkSwitcherProvider = ({
   const isLeafletRef = useRef(isLeaflet);
   const isCesiumRef = useRef(isCesium);
   const isTransitioningRef = useRef(isTransitioning);
+  const isPreparingCesiumTransitionRef = useRef(isPreparingCesiumTransition);
 
   // Keep refs in sync with state
   activeFrameworkRef.current = activeFramework;
   isLeafletRef.current = isLeaflet;
   isCesiumRef.current = isCesium;
   isTransitioningRef.current = isTransitioning;
+  isPreparingCesiumTransitionRef.current = isPreparingCesiumTransition;
 
   // Refs for map engines and containers
   const refsRef = useRef<MapFrameworkSwitcherRefs>({
@@ -171,13 +244,27 @@ export const MapFrameworkSwitcherProvider = ({
     getCesiumScene: () => null,
     getCesiumContainer: () => null,
     getCesiumTerrainProviders: () => ({
-      TERRAIN: null as unknown as CesiumTerrainProvider,
-      SURFACE: null as unknown as CesiumTerrainProvider,
+      TERRAIN: null,
+      SURFACE: null,
     }),
   });
 
   // Refs for callbacks (rerender-free)
   const callbacksRef = useRef<MapFrameworkSwitcherCallbacks>({});
+  const stagedCesiumSceneRef = useRef<Scene | null>(null);
+  const cesiumStagingPromiseRef = useRef<Promise<void> | null>(null);
+
+  const syncReadyState = useCallback(() => {
+    const nowReady = readIsFrameworkSwitcherReady({
+      activeFramework: activeFrameworkRef.current,
+      refs: refsRef.current,
+      callbacks: callbacksRef.current,
+    });
+
+    startTransition(() => {
+      setIsReady((previous) => (previous === nowReady ? previous : nowReady));
+    });
+  }, []);
 
   // Register callbacks from app (rerender-free)
   const registerCallbacks = useCallback(
@@ -186,8 +273,9 @@ export const MapFrameworkSwitcherProvider = ({
         ...callbacksRef.current,
         ...callbacks,
       };
+      syncReadyState();
     },
-    []
+    [syncReadyState]
   );
 
   // Register refs from app (called by app-specific hooks)
@@ -198,16 +286,7 @@ export const MapFrameworkSwitcherProvider = ({
         ...refs,
       };
 
-      // Check if all required refs are now available
-      const nowReady =
-        !!refsRef.current.getLeafletMap() &&
-        !!refsRef.current.getCesiumScene() &&
-        !!refsRef.current.getCesiumContainer();
-
-      // Non-urgent state update - use startTransition to avoid blocking
-      startTransition(() => {
-        setIsReady(nowReady);
-      });
+      syncReadyState();
 
       // Apply initial visibility to Cesium container based on active framework
       // This is urgent visual feedback, keep outside startTransition
@@ -222,8 +301,12 @@ export const MapFrameworkSwitcherProvider = ({
         }
       }
     },
-    [isLeaflet, isCesium]
+    [isLeaflet, isCesium, syncReadyState]
   );
+
+  useEffect(() => {
+    syncReadyState();
+  }, [activeFramework, syncReadyState]);
 
   // Stable getter functions - NEVER change reference, safe to use in useCallback deps
   // These read from refs, so they always return current value without triggering re-renders
@@ -235,38 +318,123 @@ export const MapFrameworkSwitcherProvider = ({
   // Track engine-specific state for transitions (e.g., camera orientation)
   const lastEngineStateRef = useRef<EngineState>({});
 
+  const ensureCesiumSceneStaged = useCallback(async (scene: Scene) => {
+    setIsPreparingCesiumTransition(true);
+    setPreparingCesiumMessage("3D Modelle werden geladen");
+
+    // Always allow app-level pre-transition staging for dynamic content
+    // (for example adhoc models/primitives added while staying in 2D).
+    const beforeTransition = callbacksRef.current.onBeforeTransitionToCesium;
+    try {
+      if (beforeTransition) {
+        setPreparingCesiumMessage("3D Modelle werden geladen");
+        await beforeTransition();
+      }
+
+      const isSameLiveScene =
+        stagedCesiumSceneRef.current === scene && !scene.isDestroyed();
+      if (isSameLiveScene) {
+        console.debug("[FRAMEWORK-SWITCHER] Cesium scene already staged");
+        return;
+      }
+
+      if (cesiumStagingPromiseRef.current) {
+        await cesiumStagingPromiseRef.current;
+        return;
+      }
+
+      const stagingPromise = (async () => {
+        console.debug("[FRAMEWORK-SWITCHER] Cesium staging start");
+        setPreparingCesiumMessage("3D Modelle werden geladen");
+        // Ensure Cesium has completed a few render cycles before first fade/animation.
+        await waitForRenderFrames(scene, 5);
+
+        if (!scene.isDestroyed()) {
+          stagedCesiumSceneRef.current = scene;
+        }
+        console.debug("[FRAMEWORK-SWITCHER] Cesium staging complete");
+      })();
+
+      cesiumStagingPromiseRef.current = stagingPromise;
+      try {
+        await stagingPromise;
+      } finally {
+        if (cesiumStagingPromiseRef.current === stagingPromise) {
+          cesiumStagingPromiseRef.current = null;
+        }
+      }
+    } finally {
+      setIsPreparingCesiumTransition(false);
+      setPreparingCesiumMessage(null);
+    }
+  }, []);
+
   // Transition to Cesium
   const requestTransitionToCesium = useCallback(async () => {
-    if (isTransitioning || !isReady) {
+    if (isTransitioning || isPreparingCesiumTransitionRef.current) {
       console.warn(
         "[FRAMEWORK-SWITCHER] Cannot transition - not ready or already transitioning"
       );
       return;
     }
 
-    const leaflet = refsRef.current.getLeafletMap();
-    const scene = refsRef.current.getCesiumScene();
-    const cesiumContainer = refsRef.current.getCesiumContainer();
-    const terrainProviders = refsRef.current.getCesiumTerrainProviders();
-
-    const hasValidRequirements = validateRequirements(
-      scene,
-      cesiumContainer,
-      leaflet
-    );
-
-    if (!hasValidRequirements) {
+    if (
+      !readIsFrameworkSwitcherReady({
+        activeFramework: activeFrameworkRef.current,
+        refs: refsRef.current,
+        callbacks: callbacksRef.current,
+      })
+    ) {
       console.warn(
-        "[CESIUM] [CESIUM|2D3D|TO3D] leaflet or cesium not available no transition possible [zoom]"
+        "[FRAMEWORK-SWITCHER] Cannot transition - required runtimes are not available"
       );
       return;
     }
 
     try {
-      // Wait for Cesium to complete render cycles after React re-renders
-      // This ensures WebGL state is stable before transition operations
-      // See: https://github.com/CesiumGS/cesium/issues/11427
-      await waitForRenderFrames(scene, 5);
+      let leaflet = refsRef.current.getLeafletMap();
+      let scene = refsRef.current.getCesiumScene();
+      let cesiumContainer = refsRef.current.getCesiumContainer();
+      let terrainProviders = refsRef.current.getCesiumTerrainProviders();
+
+      if (
+        (!scene || !cesiumContainer) &&
+        callbacksRef.current.onEnsureCesiumReady
+      ) {
+        try {
+          setIsPreparingCesiumTransition(true);
+          setPreparingCesiumMessage("3D Ansicht wird initialisiert");
+          await callbacksRef.current.onEnsureCesiumReady();
+          await waitForCesiumRuntime({ refsRef });
+        } finally {
+          setIsPreparingCesiumTransition(false);
+          setPreparingCesiumMessage(null);
+        }
+
+        leaflet = refsRef.current.getLeafletMap();
+        scene = refsRef.current.getCesiumScene();
+        cesiumContainer = refsRef.current.getCesiumContainer();
+        terrainProviders = refsRef.current.getCesiumTerrainProviders();
+      }
+
+      const hasValidRequirements = validateRequirements(
+        scene,
+        cesiumContainer,
+        leaflet
+      );
+
+      if (!hasValidRequirements) {
+        console.warn(
+          "[CESIUM] [CESIUM|2D3D|TO3D] leaflet or cesium not available no transition possible [zoom]"
+        );
+        return;
+      }
+
+      // Explicit first-request staging step (and scene-change restaging) before transition starts.
+      await ensureCesiumSceneStaged(scene);
+
+      // Keep a short preflight wait for every 2D->3D transition attempt.
+      await waitForRenderFrames(scene, 2);
 
       setIsTransitioning(true);
 
@@ -277,12 +445,13 @@ export const MapFrameworkSwitcherProvider = ({
         terrainProviders,
         lastEngineStateRef.current.cesium,
         {
-          onStageChange: (stage: TransitionStage, message: string) => {
-            //console.debug(`[CESIUM] Transition stage: ${stage} - ${message}`);
+          onStageChange: () => {
+            // required by transition callback contract
           },
           onComplete: () => {
             setActiveFrameworkCesium();
             setIsTransitioning(false);
+            callbacksRef.current.onAfterTransitionToCesium?.();
           },
           onError: (error: Error) => {
             console.error("[CESIUM] Transition error:", error);
@@ -299,8 +468,8 @@ export const MapFrameworkSwitcherProvider = ({
       setActiveFrameworkLeaflet();
     }
   }, [
+    ensureCesiumSceneStaged,
     isTransitioning,
-    isReady,
     setActiveFrameworkCesium,
     setActiveFrameworkLeaflet,
     transitionOptions,
@@ -342,7 +511,7 @@ export const MapFrameworkSwitcherProvider = ({
 
       setIsTransitioning(true);
 
-      const lastHeadingPitch = await transitionToLeaflet(
+      const lastCameraState = await transitionToLeaflet(
         scene,
         leaflet,
         cesiumContainer,
@@ -368,16 +537,8 @@ export const MapFrameworkSwitcherProvider = ({
       );
 
       // Store cesium camera state for when we return to 3D
-      if (lastHeadingPitch) {
-        if (!lastEngineStateRef.current.cesium) {
-          lastEngineStateRef.current.cesium = {
-            heading: lastHeadingPitch.heading,
-            pitch: lastHeadingPitch.pitch,
-          };
-        } else {
-          lastEngineStateRef.current.cesium.heading = lastHeadingPitch.heading;
-          lastEngineStateRef.current.cesium.pitch = lastHeadingPitch.pitch;
-        }
+      if (lastCameraState) {
+        lastEngineStateRef.current.cesium = lastCameraState;
       }
     } catch (error) {
       console.error("[CESIUM] Transition to Leaflet failed:", error);
@@ -408,6 +569,8 @@ export const MapFrameworkSwitcherProvider = ({
     () => ({
       activeFramework,
       isTransitioning,
+      isPreparingCesiumTransition,
+      preparingCesiumMessage,
       isReady,
       // Computed helpers
       isLeaflet,
@@ -432,6 +595,8 @@ export const MapFrameworkSwitcherProvider = ({
     [
       activeFramework,
       isTransitioning,
+      isPreparingCesiumTransition,
+      preparingCesiumMessage,
       isReady,
       isLeaflet,
       isCesium,

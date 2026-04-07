@@ -1,7 +1,4 @@
-import {
-  useSelection,
-  useSelectionTopicMap,
-} from "@carma-appframeworks/portals";
+import { useSelection } from "@carma-appframeworks/portals";
 import {
   defaultTypeInference,
   LibFuzzySearch,
@@ -25,7 +22,6 @@ const FuzzySearchWrapper = ({ searchTextPlaceholder }) => {
   const pixelwidth =
     responsiveState === "normal" ? "300px" : windowSize.width - gap;
   const { setSelection } = useSelection();
-  useSelectionTopicMap();
 
   const onGazetteerSelection = (selection) => {
     if (!selection) {

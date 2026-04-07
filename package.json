@@ -22,6 +22,8 @@
     "@fortawesome/free-regular-svg-icons": "^6.6.0",
     "@fortawesome/free-solid-svg-icons": "^6.6.0",
     "@fortawesome/react-fontawesome": "^0.2.2",
+    "@geomatico/maplibre-cog-protocol": "^0.8.0",
+    "@motis-project/motis-client": "^2.7.6",
     "@react-hook/window-size": "^3.1.1",
     "@react-pdf/renderer": "^3.4.4",
     "@reduxjs/toolkit": "^2.2.7",
@@ -60,7 +62,7 @@
     "localforage": "^1.10.0",
     "lodash": "^4.17.21",
     "lz-string": "^1.5.0",
-    "maplibre-gl": "^5.2.0",
+    "maplibre-gl": "^5.18.0",
     "markdown-it": "^14.1.0",
     "match-sorter": "^6.3.4",
     "md5": "^2.3.0",
@@ -76,7 +78,7 @@
     "react-bootstrap-typeahead": "^6.3.2",
     "react-bs-notifier": "^7.0.0",
     "react-chartjs-2": "^5.2.0",
-    "react-cismap": "^2.10.11",
+    "react-cismap": "^2.10.13",
     "react-device-detect": "^2.2.3",
     "react-dom": "18.3.1",
     "react-dropzone": "^14.2.3",
@@ -107,9 +109,11 @@
     "storybook": "8.5.3",
     "sysend": "^1.17.5",
     "tailwind-merge": "^2.4.0",
+    "three": "^0.183.1",
     "tslib": "^2.8.1",
     "ua-parser-js": "^1.0.40",
     "uuid": "^10.0.0",
+    "vaul": "^1.1.2",
     "wellknown": "^0.5.0",
     "whatwg-fetch": "^3.6.20",
     "wms-capabilities": "^0.6.0"
@@ -153,9 +157,11 @@
     "@types/react-bootstrap": "^0.32.37",
     "@types/react-dom": "18.3.0",
     "@types/redux-logger": "^3.0.13",
+    "@types/three": "^0.183.1",
     "@vitejs/plugin-react": "^4.3.4",
     "@vitest/coverage-v8": "1.6.0",
     "@vitest/ui": "1.6.0",
+    "d3": "^7.9.0",
     "esbuild": "^0.19.2",
     "eslint": "8.57.0",
     "eslint-import-resolver-typescript": "^3.7.0",
@@ -180,5 +186,6 @@
     "vite-plugin-dts": "^4.5.0",
     "vite-plugin-static-copy": "^2.2.0",
     "vitest": "^1.6.0"
-  }
+  },
+  "packageManager": "pnpm@10.12.4+sha512.5ea8b0deed94ed68691c9bad4c955492705c5eeb8a87ef86bc62c74a26b037b08ff9570f108b2e4dbd1dd1a9186fea925e527f141c648e85af45631074680184"
 }

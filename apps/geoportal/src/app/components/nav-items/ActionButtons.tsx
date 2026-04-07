@@ -43,6 +43,7 @@ import {
 import { ShareContent } from "../ShareContent";
 import Print from "../map-print/Print";
 import CustomPopover from "./CustomPopover";
+import { getSelectedFeature } from "../../store/slices/features";
 
 const disabledClass = "text-gray-300";
 const disabledImageOpacity = "opacity-20";
@@ -58,6 +59,7 @@ const ActionButtons = () => {
   const showPrintPopup = useSelector(getIfPopupOpend);
   const backgroundLayer = useSelector(getBackgroundLayer);
   const paleOpacityValue = useSelector(getPaleOpacityValue);
+  const selectedFeature = useSelector(getSelectedFeature);
 
   const baseUrl = window.location.origin + window.location.pathname;
 
@@ -94,7 +96,6 @@ const ActionButtons = () => {
       </Tooltip>
       <Tooltip title="Karteninhalte hinzufügen">
         <button
-          disabled={!isLeaflet}
           onClick={() => {
             dispatch(setShowResourceModal(true));
           }}
@@ -104,9 +105,7 @@ const ActionButtons = () => {
           <img
             src={baseUrl + "icons/add-layers.png"}
             alt="Kartenebenen hinzufügen"
-            className={`h-5 min-w-fit mb-0.5 cursor-pointer ${
-              isLeaflet ? "" : disabledImageOpacity
-            }`}
+            className={`h-5 min-w-fit mb-0.5 cursor-pointer`}
           />
         </button>
       </Tooltip>
@@ -192,7 +191,8 @@ const ActionButtons = () => {
         shiftClickHandler={() => {
           copyShareUrl({
             layerState,
-            selection,
+            gazetteerSelection: selection,
+            selectedFeature,
           });
         }}
       />

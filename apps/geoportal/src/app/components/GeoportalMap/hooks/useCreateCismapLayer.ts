@@ -5,15 +5,20 @@ import {
   useRef,
   useState,
 } from "react";
-import type { Dispatch } from "@reduxjs/toolkit";
-import type { LatLng, Map as LeafletMap } from "leaflet";
+import type { Dispatch, Store } from "@reduxjs/toolkit";
+import L, { type LatLng, type Map as LeafletMap } from "leaflet";
+import centroid from "@turf/centroid";
 
 import CismapLayer from "react-cismap/CismapLayer";
 
 import type { Layer } from "@carma/types";
 import { useFeatureFlags } from "@carma-providers/feature-flag";
 
-import { setSelectedFeature } from "../../../store/slices/features";
+import {
+  clearTriggerSelectionById,
+  getTriggerSelectionById,
+  setSelectedFeature,
+} from "../../../store/slices/features";
 import { setLayersIdle, updateLayer } from "../../../store/slices/mapping";
 
 import { UIMode } from "../../../store/slices/ui";
@@ -21,7 +26,10 @@ import {
   cancelOngoingRequests,
   implicitVectorSelection,
   onSelectionChangedVector,
+  resolveHit,
 } from "../topicmap.utils";
+import { utils } from "@carma-appframeworks/portals";
+import { selectionPadding } from "../../../constants/selection";
 
 const MAX_ZOOM = 26;
 
@@ -71,6 +79,9 @@ export const useCreateCismapLayers = (
     selectedFeature,
     leafletMap,
     maplibreMapsRef,
+    store,
+    selectionSemanticIdentifierRef,
+    setMaplibreMaps,
   }: {
     mode: UIMode;
     dispatch: Dispatch;
@@ -78,11 +89,18 @@ export const useCreateCismapLayers = (
     selectedFeature: any;
     leafletMap: LeafletMap;
     maplibreMapsRef?: React.MutableRefObject<Map<string, any>>;
+    store: Store;
+    selectionSemanticIdentifierRef?: React.MutableRefObject<string | undefined>;
+    setMaplibreMaps?: (entry: { id: string; map: any }) => void;
   }
 ) => {
   const [globalHits, setGlobalHits] = useState({});
   const [idleLayers, setIdleLayers] = useState({});
   const [foundFeatures, setFoundFeatures] = useState({});
+  const [semanticIdForHits, setSemanticIdForHits] = useState<
+    string | undefined
+  >(undefined);
+  const lastClickLatlngRef = useRef<string | null>(null);
   const flags = useFeatureFlags();
 
   const showTileBoundaries = flags?.debugTileBoundaries;
@@ -144,6 +162,17 @@ export const useCreateCismapLayers = (
   useEffect(() => {
     rearrangeGlobalHits();
     setIdleLayers({});
+
+    if (maplibreMapsRef) {
+      const visibleVectorLayerIds = layers
+        .filter((l) => l.visible && l.layerType === "vector")
+        .map((l) => l.id);
+      maplibreMapsRef.current.forEach((_, layerId) => {
+        if (!visibleVectorLayerIds.includes(layerId)) {
+          maplibreMapsRef.current.delete(layerId);
+        }
+      });
+    }
   }, [layers]);
 
   useEffect(() => {
@@ -163,23 +192,62 @@ export const useCreateCismapLayers = (
     modeRef.current = mode;
   }, [mode]);
 
+  const getSemanticMatch = (hits: Object, semanticId: string | undefined) => {
+    if (!semanticId) return undefined;
+    const keys = Object.keys(hits);
+    for (let i = keys.length - 1; i >= 0; i--) {
+      const value = hits[keys[i]];
+      if (!value || !value[0]?.selectionLayerExists) continue;
+      const layerForHits = layers.find((l) => l.id === keys[i]);
+      const semanticInfo = layerForHits?.conf?.semanticInfo as
+        | Record<string, { layers: string[] }>
+        | undefined;
+      if (!semanticInfo) continue;
+      const semanticEntry = semanticInfo[semanticId];
+      if (semanticEntry) {
+        const match = value.find((h) =>
+          semanticEntry?.layers?.includes(h.layer?.id)
+        );
+        if (match) return { key: keys[i], value };
+      }
+    }
+    return undefined;
+  };
+
   useEffect(() => {
     updateGlobalHits();
     if (modeRef.current === UIMode.DEFAULT) {
-      const lastObject = getLastDefinedObject(globalHits);
+      const lastObject =
+        getSemanticMatch(globalHits, semanticIdForHits) ||
+        getLastDefinedObject(globalHits);
 
       if (lastObject) {
         resetSelection(globalHits);
-        const selectedVectorFeature = lastObject.value[0];
+        const layerForHits = layers.find((l) => l.id === lastObject.key);
+        const semanticInfo = layerForHits?.conf?.semanticInfo as
+          | Record<string, { layers: string[] }>
+          | undefined;
+        const selectedVectorFeature = resolveHit(
+          lastObject.value,
+          semanticInfo,
+          semanticIdForHits
+        );
         if (selectedVectorFeature.setSelection) {
           selectedVectorFeature.setSelection(true);
+          if (selectedVectorFeature?.state?.selected) {
+            utils.zoomToFeature({
+              selectedFeature: foundFeatures[lastObject.key],
+              leafletMap,
+              padding: selectionPadding,
+            });
+          }
           dispatch(setSelectedFeature(foundFeatures[lastObject.key]));
         }
       } else {
         dispatch(setSelectedFeature(null));
       }
     }
-  }, [globalHits, foundFeatures]);
+  }, [globalHits, foundFeatures, semanticIdForHits]);
 
   useEffect(() => {
     updateGlobalHits();
@@ -187,12 +255,13 @@ export const useCreateCismapLayers = (
       resetSelection(globalHits);
       if (globalHits[selectedFeature.id]) {
         const hits = globalHits[selectedFeature.id];
+        const vectorId =
+          selectedFeature.vectorId ||
+          selectedFeature.properties.sourceProps.id ||
+          selectedFeature.properties?.wmsProps?.id;
         if (hits) {
           hits.forEach((hit) => {
-            if (
-              hit.id === selectedFeature.properties.wmsProps.vectorId ||
-              hit?.properties?.id === selectedFeature.properties.wmsProps.id
-            ) {
+            if (hit.id === vectorId || hit?.properties?.id === vectorId) {
               hit.setSelection(true);
             } else {
               hit.setSelection(false);
@@ -201,7 +270,7 @@ export const useCreateCismapLayers = (
         }
       }
     }
-  }, [selectedFeature]);
+  }, [selectedFeature, globalHits]);
 
   useEffect(() => {
     if (
@@ -264,6 +333,77 @@ export const useCreateCismapLayers = (
               if (maplibreMapsRef) {
                 maplibreMapsRef.current.set(layer.id, map);
               }
+
+              if (setMaplibreMaps) {
+                setMaplibreMaps({ id: layer.id, map });
+              }
+
+              const triggerSelectionById = getTriggerSelectionById(
+                store.getState()
+              );
+              if (triggerSelectionById !== layer.id) {
+                return;
+              }
+              dispatch(clearTriggerSelectionById());
+
+              if (leafletMap && modeRef.current === UIMode.DEFAULT) {
+                const style = map.getStyle();
+                if (style?.sources) {
+                  const featuresWithGeometry: GeoJSON.Feature[] = [];
+
+                  for (const sourceKey in style.sources) {
+                    const source = style.sources[sourceKey] as any;
+                    if (
+                      source?.data &&
+                      source.data.type === "FeatureCollection"
+                    ) {
+                      const featureCollection = source.data;
+                      if (featureCollection.features) {
+                        featuresWithGeometry.push(
+                          ...featureCollection.features.filter(
+                            (f: GeoJSON.Feature) => f.geometry
+                          )
+                        );
+                      }
+                    }
+                  }
+
+                  const autoSelect = layer.conf?.autoSelect;
+
+                  if (autoSelect === false) {
+                    return;
+                  }
+
+                  let featureToSelect: GeoJSON.Feature | undefined;
+
+                  if (
+                    typeof autoSelect === "string" ||
+                    typeof autoSelect === "number"
+                  ) {
+                    featureToSelect = featuresWithGeometry.find(
+                      (f) =>
+                        f.id === autoSelect || f.properties?.id === autoSelect
+                    );
+                  } else if (featuresWithGeometry.length === 1) {
+                    featureToSelect = featuresWithGeometry[0];
+                  }
+
+                  if (featureToSelect?.geometry) {
+                    const center = centroid(
+                      featureToSelect as GeoJSON.Feature<GeoJSON.Geometry>
+                    );
+                    const [lng, lat] = center.geometry.coordinates;
+                    const latlngPoint = L.latLng(lat, lng);
+
+                    leafletMap.fireEvent("click", {
+                      latlng: latlngPoint,
+                      layerPoint: leafletMap.latLngToLayerPoint(latlngPoint),
+                      containerPoint:
+                        leafletMap.latLngToContainerPoint(latlngPoint),
+                    });
+                  }
+                }
+              }
             },
             onStyleIdle: (e) => {
               setIdleLayers((old) => {
@@ -271,6 +411,22 @@ export const useCreateCismapLayers = (
               });
             },
             onSelectionChanged: (e) => {
+              const clickKey = e.latlng
+                ? `${e.latlng.lat},${e.latlng.lng}`
+                : null;
+              const isNewClick = clickKey !== lastClickLatlngRef.current;
+              lastClickLatlngRef.current = clickKey;
+
+              const semanticIdentifier =
+                selectionSemanticIdentifierRef?.current;
+              if (selectionSemanticIdentifierRef) {
+                selectionSemanticIdentifierRef.current = undefined;
+              }
+
+              if (isNewClick) {
+                // First layer of a new click: set semantic ID (or clear if undefined)
+                setSemanticIdForHits(semanticIdentifier);
+              }
               if (modeRef.current === UIMode.DEFAULT) {
                 implicitVectorSelection(e, {
                   layer,
@@ -278,6 +434,7 @@ export const useCreateCismapLayers = (
                   selectionHandler,
                   featureHandler,
                   leafletMap,
+                  semanticIdentifier,
                 });
               } else if (modeRef.current === UIMode.FEATURE_INFO) {
                 onSelectionChangedVector(e, {
@@ -285,6 +442,7 @@ export const useCreateCismapLayers = (
                   dispatch,
                   selectionHandler,
                   map: leafletMap,
+                  store,
                 });
               }
             },

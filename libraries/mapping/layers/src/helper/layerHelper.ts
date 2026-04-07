@@ -162,7 +162,6 @@ export const createBaseConfig = (layers: XMLLayer[]) => {
       layers: item.layers.map((layer) => ({ name: layer.Name })),
     };
   });
-  console.log(result);
 
   return null;
 };
@@ -317,23 +316,26 @@ export const getLayerStructure = ({
               merge = true;
             }
           });
-          if (replace || merge) {
-            let newLayer = replaceLayers.find(
-              (layer) =>
-                layer.replaceId === foundLayer?.id ||
-                layer.mergeId === foundLayer?.id
-            );
-            if (newLayer) {
-              if (merge) {
-                newLayer = mergeLayers(newLayer, foundLayer);
-              }
-              layers.push({
-                ...newLayer,
-                serviceName: service.name,
-              });
-            }
-            continue;
-          }
+          // if (replace || merge) {
+          //   let newLayer = replaceLayers.find(
+          //     (layer) =>
+          //       layer.replaceId === foundLayer?.id ||
+          //       layer.mergeId === foundLayer?.id
+          //   );
+          //   if (newLayer) {
+          //     if (merge) {
+          //       console.log("xxx merging", newLayer);
+          //       console.log("xxx merging", foundLayer);
+          //       newLayer = mergeLayers(newLayer, foundLayer);
+          //       console.log("xxx merging finished", newLayer);
+          //     }
+          //     layers.push({
+          //       ...newLayer,
+          //       serviceName: service.name,
+          //     });
+          //   }
+          //   continue;
+          // }
           if (wms) {
             // @ts-expect-error fix typing
             foundLayer.props["url"] =
@@ -392,6 +394,24 @@ export const getLayerStructure = ({
 
             if (thumbnail) {
               foundLayer.thumbnail = thumbnail;
+            }
+
+            if (replace || merge) {
+              let newLayer = replaceLayers.find(
+                (layer) =>
+                  layer.replaceId === foundLayer?.id ||
+                  layer.mergeId === foundLayer?.id
+              );
+              if (newLayer) {
+                if (merge) {
+                  newLayer = mergeLayers(newLayer, foundLayer);
+                }
+                layers.push({
+                  ...newLayer,
+                  serviceName: service.name,
+                });
+              }
+              continue;
             }
             layers.push(foundLayer);
           }

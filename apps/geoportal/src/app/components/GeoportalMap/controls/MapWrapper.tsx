@@ -1,4 +1,4 @@
-import { useContext, useEffect, useRef, useState } from "react";
+import { useCallback, useContext, useEffect, useRef, useState } from "react";
 import { isMobile } from "react-device-detect";
 import { useDispatch, useSelector } from "react-redux";
 
@@ -18,8 +18,8 @@ import { TopicMapContext } from "react-cismap/contexts/TopicMapContextProvider";
 import { ResponsiveTopicMapContext } from "react-cismap/contexts/ResponsiveTopicMapContextProvider";
 
 import {
-  SelectionMetaData,
   SelectionMapMode,
+  type SelectionMetaData,
   useGazData,
   useSelection,
 } from "@carma-appframeworks/portals";
@@ -27,14 +27,14 @@ import {
 import { ENDPOINT, isAreaType } from "@carma-commons/resources";
 import type { SearchResultItem } from "@carma/types";
 import { detectWebGLContext } from "@carma-commons/utils";
+import { ResponsiveStatusBar } from "@carma-commons/ui/components";
 
 import {
   PitchingCompass,
-  selectViewerModels,
   useCesiumContext,
-  useHomeControl,
   useZoomControls as useZoomControlsCesium,
 } from "@carma-mapping/engines/cesium";
+import { flyViewStateInCesium } from "@carma-mapping/engines-interop/view-state";
 import {
   MapFrameworkSwitcher,
   FullscreenControl,
@@ -64,6 +64,7 @@ import { useFeatureInfoModeCursorStyle } from "../../../hooks/useFeatureInfoMode
 import { useMapStyleReduxSync } from "../../../hooks/useMapStyleReduxSync";
 import { useTourRefCollabLabels } from "../../../hooks/useTourRefCollabLabels.ts";
 import { useWindowSize } from "../../../hooks/useWindowSize.ts";
+import { useGeoportalHomeValues } from "../../../hooks/useGeoportalInitialValues.ts";
 
 import { useOblique } from "../../../oblique/hooks/useOblique.ts";
 
@@ -96,8 +97,6 @@ const setHasGPU = (flag: boolean) => (hasGPU = flag);
 const testGPU = () => detectWebGLContext(setHasGPU);
 window.addEventListener("load", testGPU, false);
 
-// TODO: centralize the hash params update behavior
-
 const MapWrapper = () => {
   const dispatch = useDispatch();
   const flags = useFeatureFlags();
@@ -112,20 +111,23 @@ const MapWrapper = () => {
 
   const showLibreMap = flags.featureFlagLibreMap;
 
-  const rerenderCountRef = useRef(0);
-  const lastRenderTimeStampRef = useRef(Date.now());
-  const lastRenderIntervalRef = useRef(0);
   const wrapperRef = useRef<HTMLDivElement>(null);
 
   // State and Selectors
   const libreMapRef = useSelector(getLibreMapRef);
   const allow3d = useSelector(getUIAllow3d) && hasGPU;
-  const models = useSelector(selectViewerModels);
 
   // Get framework switcher state from context
-  const { isLeaflet, isCesium } = useMapFrameworkSwitcherContext();
+  const {
+    isLeaflet,
+    isCesium,
+    isPreparingCesiumTransition,
+    preparingCesiumMessage,
+  } = useMapFrameworkSwitcherContext();
+  const statusFooterText = isPreparingCesiumTransition
+    ? preparingCesiumMessage ?? "3D Modelle werden geladen"
+    : null;
 
-  const effectiveMode2d = isLeaflet || !allow3d;
   const uiMode = useSelector(getUIMode);
   const isModeMeasurement = uiMode === UIMode.MEASUREMENT;
   const isModeFeatureInfo = uiMode === UIMode.FEATURE_INFO;
@@ -133,10 +135,10 @@ const MapWrapper = () => {
   const showLocatorButton = useSelector(getShowLocatorButton);
   const zenMode = useSelector(getZenMode);
   const ctx = useCesiumContext();
-  const homeControl = useHomeControl();
   const configSelection = useSelector(getConfigSelection);
 
-  const { isObliqueMode } = useOblique();
+  const { isObliqueMode, isPreviewVisible: isObliquePreviewVisible } =
+    useOblique();
 
   const {
     handleZoomIn: handleZoomInCesium,
@@ -145,6 +147,22 @@ const MapWrapper = () => {
     fovMode: isObliqueMode,
   });
   const { zoomInLeaflet, zoomOutLeaflet } = useLeafletZoomControls();
+  const {
+    defaultHomeViewState,
+    homeCenter,
+    homeLeafletZoom,
+    homeMaplibreZoom,
+  } = useGeoportalHomeValues();
+  const handleCesiumHomeClick = useCallback(() => {
+    if (!isCesium) return;
+
+    ctx.withScene((scene) => {
+      flyViewStateInCesium(scene, defaultHomeViewState, {
+        duration: 2,
+        applyFov: false,
+      });
+    });
+  }, [ctx, defaultHomeViewState, isCesium]);
 
   const { responsiveState, gap, windowSize } = useContext<
     typeof ResponsiveTopicMapContext
@@ -153,49 +171,10 @@ const MapWrapper = () => {
   const { routedMapRef: routedMap } =
     useContext<typeof TopicMapContext>(TopicMapContext);
 
-  const [pos, setPos] = useState<[number, number] | null>(null);
-  const [layoutHeight, setLayoutHeight] = useState(null);
-  const [isLocationActive, setIsLocationActive] = useState(false);
-  const [hasMapMoved, setHasMapMoved] = useState(false);
-  const [hasFoundLocation, setHasFoundLocation] = useState(false);
   const [showTerrain, setShowTerrain] = useState(false);
 
   const [zenButtonHidden, setZenButtonHidden] = useState(false);
   const [isHoveringZenButton, setIsHoveringZenButton] = useState(false);
-
-  useEffect(() => {
-    if (routedMap?.leafletMap) {
-      const map = routedMap.leafletMap.leafletElement;
-
-      const handleMapMove = () => {
-        if (isLocationActive && hasFoundLocation) {
-          setHasMapMoved(true);
-        }
-      };
-
-      const handleLocationFound = () => {
-        setTimeout(() => {
-          setHasFoundLocation(true);
-        }, 300);
-      };
-
-      map.on("dragend zoomend", handleMapMove);
-      map.on("locationfound", handleLocationFound);
-
-      return () => {
-        map.off("dragend", handleMapMove);
-        map.off("zoomend", handleMapMove);
-        map.off("locationfound", handleLocationFound);
-      };
-    }
-  }, [routedMap, isLocationActive, hasFoundLocation]);
-
-  useEffect(() => {
-    if (!isLocationActive) {
-      setHasMapMoved(false);
-      setHasFoundLocation(false);
-    }
-  }, [isLocationActive]);
 
   useEffect(() => {
     if (zenMode && !zenButtonHidden && !isHoveringZenButton) {
@@ -226,7 +205,10 @@ const MapWrapper = () => {
 
   const { setSelection } = useSelection();
 
-  const onGazetteerSelection = (selection: SearchResultItem) => {
+  const onGazetteerSelection = (
+    selection: SearchResultItem,
+    skipMapMovement = false
+  ) => {
     if (!selection) {
       console.debug("onGazetteerSelection", selection);
       setSelection(null);
@@ -237,16 +219,12 @@ const MapWrapper = () => {
       selectedFromMapMode: isLeaflet
         ? SelectionMapMode.MODE_2D
         : SelectionMapMode.MODE_3D,
-      selectionTimestamp: Date.now(),
+      selectionTimestamp: skipMapMovement ? null : Date.now(),
       isAreaSelection: isAreaType(selection.type as ENDPOINT),
     };
 
     setSelection(Object.assign({}, selection, selectionMetaData));
   };
-
-  rerenderCountRef.current++;
-  lastRenderIntervalRef.current = Date.now() - lastRenderTimeStampRef.current;
-  lastRenderTimeStampRef.current = Date.now();
 
   return (
     <ControlLayout>
@@ -342,13 +320,17 @@ const MapWrapper = () => {
                 >
                   <ControlButtonStyler
                     useDisabledStyle={false}
-                    className="!border-b-0 !rounded-b-none font-bold !z-[9999999]"
+                    className={
+                      "!border-b-0 !rounded-b-none font-bold !z-[9999999]"
+                    }
                     ref={tourRefLabels.alignNorth}
                     dataTestId="compass-control"
-                    disabled={isLeaflet && !showLibreMap}
+                    disabled={
+                      (isLeaflet && !showLibreMap) || isObliquePreviewVisible
+                    }
                   >
                     {showLibreMap ? (
-                      <LibrePitchingCompass mapRef={libreMapRef} />
+                      <LibrePitchingCompass map={libreMapRef.current} />
                     ) : (
                       <PitchingCompass />
                     )}
@@ -357,21 +339,22 @@ const MapWrapper = () => {
 
                 <MapFrameworkSwitcher
                   enableMobileWarning={true}
-                  nativeTooltip={true}
-                />
+                  className="!rounded-t-none !border-t-[1px]"
+                  ref={tourRefLabels.toggle2d3d}
+                  disabled={isObliquePreviewVisible}
+                  useDisabledStyle={false}
 
-                {
-                  // TODO implement cesium home action with generic home control for all mapping engines
-                }
+                  // nativeTooltip={true}
+                />
               </div>
             </Control>
           )}
-          <Control position="topleft" order={20}>
-            {showFullscreenButton && (
+          {showFullscreenButton && (
+            <Control position="topleft" order={20}>
               <FullscreenControl tourRef={tourRefLabels?.fullScreen} />
-            )}
-          </Control>
-          {showLocatorButton && isMobile && (
+            </Control>
+          )}
+          {!isObliquePreviewVisible && showLocatorButton && isMobile && (
             <Control position="topleft" order={30}>
               <RoutedMapLocateControl
                 tourRefLabels={tourRefLabels}
@@ -380,34 +363,39 @@ const MapWrapper = () => {
               />
             </Control>
           )}
-          <Control position="topleft" order={40}>
-            <Tooltip title="Auf Rathaus Barmen positionieren" placement="right">
-              <ControlButtonStyler
-                ref={tourRefLabels.home}
-                onClick={() => {
-                  if (showLibreMap) {
-                    if (libreMapRef.current) {
-                      libreMapRef.current.flyTo({
-                        center: [7.199918031692506, 51.272570027476256],
-                        zoom: 17,
-                        essential: true,
-                      });
-                    }
-                  } else {
-                    routedMap.leafletMap.leafletElement.flyTo(
-                      [51.272570027476256, 7.199918031692506],
-                      18
-                    );
-                    homeControl();
-                  }
-                }}
-                dataTestId="home-control"
+          {!isObliquePreviewVisible && (
+            <Control position="topleft" order={40}>
+              <Tooltip
+                title="Auf Rathaus Barmen positionieren"
+                placement="right"
               >
-                <FontAwesomeIcon icon={faHouseChimney} className="text-lg" />
-              </ControlButtonStyler>
-            </Tooltip>
-          </Control>
-          {!isMobileDevice && (
+                <ControlButtonStyler
+                  ref={tourRefLabels.home}
+                  onClick={() => {
+                    if (showLibreMap) {
+                      if (libreMapRef.current) {
+                        libreMapRef.current.flyTo({
+                          center: [homeCenter[1], homeCenter[0]],
+                          zoom: homeMaplibreZoom,
+                          essential: true,
+                        });
+                      }
+                    } else {
+                      routedMap.leafletMap.leafletElement.flyTo(
+                        homeCenter,
+                        homeLeafletZoom
+                      );
+                      handleCesiumHomeClick();
+                    }
+                  }}
+                  dataTestId="home-control"
+                >
+                  <FontAwesomeIcon icon={faHouseChimney} className="text-lg" />
+                </ControlButtonStyler>
+              </Tooltip>
+            </Control>
+          )}
+          {!isObliquePreviewVisible && !isMobileDevice && (
             <MeasurementControl
               position="topleft"
               order={60}
@@ -425,38 +413,40 @@ const MapWrapper = () => {
               ref={tourRefLabels.measurement}
             />
           )}
-          <Control position="topleft" order={50}>
-            <Tooltip
-              title={
-                isModeFeatureInfo
-                  ? "Modus Multi-Sachdatenabfrage ausschalten"
-                  : "Modus Multi-Sachdatenabfrage einschalten"
-              }
-              placement="right"
-            >
-              <ControlButtonStyler
-                disabled={!isLeaflet}
-                useDisabledStyle={!isLeaflet}
-                onClick={() => {
-                  handleToggleFeatureInfo();
-                  dispatch(setSelectedFeature(null));
-                  dispatch(setSecondaryInfoBoxElements([]));
-                  dispatch(setFeatures([]));
-                  setPos(null);
-                  dispatch(setPreferredLayerId(""));
-                }}
-                className="font-semibold"
-                ref={tourRefLabels.featureInfo}
-                dataTestId="feature-info-control"
+          {!isObliquePreviewVisible && (
+            <Control position="topleft" order={50}>
+              <Tooltip
+                title={
+                  isModeFeatureInfo
+                    ? "Modus Multi-Sachdatenabfrage ausschalten"
+                    : "Modus Multi-Sachdatenabfrage einschalten"
+                }
+                placement="right"
               >
-                <FontAwesomeIcon
-                  icon={faInfo}
-                  className={isModeFeatureInfo ? "text-[#1677ff]" : ""}
-                />
-              </ControlButtonStyler>
-            </Tooltip>
-          </Control>
-          {showLibreMap && (
+                <ControlButtonStyler
+                  disabled={!isLeaflet}
+                  useDisabledStyle={!isLeaflet}
+                  onClick={() => {
+                    handleToggleFeatureInfo();
+                    dispatch(setSelectedFeature(null));
+                    dispatch(setSecondaryInfoBoxElements([]));
+                    dispatch(setFeatures([]));
+                    dispatch(setPreferredLayerId(""));
+                  }}
+                  className="font-semibold"
+                  ref={tourRefLabels.featureInfo}
+                  dataTestId="feature-info-control"
+                >
+                  <FontAwesomeIcon
+                    icon={faInfo}
+                    className={isModeFeatureInfo ? "text-[#1677ff]" : ""}
+                  />
+                </ControlButtonStyler>
+              </Tooltip>
+            </Control>
+          )}
+
+          {!isObliquePreviewVisible && showLibreMap && (
             <Control position="topleft" order={80}>
               <Tooltip title={"Terrain"} placement="right">
                 <ControlButtonStyler
@@ -482,11 +472,20 @@ const MapWrapper = () => {
               </Tooltip>
             </Control>
           )}
-          <Control position="topcenter" order={10}>
-            {isLeaflet && <LayerWrapper />}
-          </Control>
+          {!isObliquePreviewVisible && (
+            <Control position="topcenter" order={10}>
+              <LayerWrapper />
+            </Control>
+          )}
           <Control position="bottomleft" order={10}>
-            <div ref={tourRefLabels.gazetteer} className={`h-full w-full`}>
+            <div
+              ref={tourRefLabels.gazetteer}
+              className={`h-full w-full transition-opacity duration-200 ${
+                isObliquePreviewVisible
+                  ? "opacity-0 pointer-events-none"
+                  : "opacity-100"
+              }`}
+            >
               <LibFuzzySearch
                 gazData={gazData}
                 onSelection={onGazetteerSelection}
@@ -497,6 +496,7 @@ const MapWrapper = () => {
                     : windowSize.width - gap
                 }
                 selection={configSelection}
+                landParcelSearch={true}
               />
             </div>
           </Control>
@@ -516,11 +516,23 @@ const MapWrapper = () => {
           ) : (
             <>
               <GeoportalMap height={height} width={width} allow3d={allow3d} />
-              {isCesium && <ObliqueControls />}
+              {isCesium && <ObliqueControls hideControls={zenMode} />}
             </>
           )}
         </div>
       </ControlLayoutCanvas>
+      <div
+        style={{
+          position: "fixed",
+          left: 0,
+          right: 0,
+          bottom: 0,
+          zIndex: 1000000,
+          pointerEvents: "none",
+        }}
+      >
+        <ResponsiveStatusBar text={statusFooterText} />
+      </div>
     </ControlLayout>
   );
 };

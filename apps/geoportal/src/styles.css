@@ -114,3 +114,23 @@ html {
 .modal-content img {
   display: inline;
 }
+
+/* Fix Tailwind's .collapse overriding Bootstrap's accordion collapse */
+.collapse.show {
+  visibility: visible;
+}
+
+/* Spin animation for orbit icons - 6s rotation */
+@keyframes orbit-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.orbit-active svg,
+.orbit-active .svg-inline--fa {
+  animation: orbit-spin 6s infinite linear;
+}

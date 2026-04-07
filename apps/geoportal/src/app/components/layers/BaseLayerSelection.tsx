@@ -6,12 +6,13 @@ import {
   setSelectedMapLayer,
 } from "../../store/slices/mapping";
 import { Radio } from "antd";
-import { layerMap } from "../../config";
+import { cesiumBackgroundlayerNames, layerMap } from "../../config";
 import LayerSelection from "./LayerSelection";
 import { useState } from "react";
 import { useMapStyle } from "@carma-appframeworks/portals";
 import { MapStyleKeys } from "../../constants/MapStyleKeys";
 import { createBackgroundLayerConfig } from "../../helper/layer";
+import { useMapFrameworkSwitcherContext } from "@carma-mapping/components";
 
 const BaseLayerSelection = () => {
   const [hovered, setHovered] = useState(false);
@@ -20,6 +21,7 @@ const BaseLayerSelection = () => {
   const { setCurrentStyle } = useMapStyle();
   const selectedMapLayer = useSelector(getSelectedMapLayer);
   const backgroundLayer = useSelector(getBackgroundLayer);
+  const { isLeaflet } = useMapFrameworkSwitcherContext();
 
   const handleRadioClick = (e) => {
     if (backgroundLayer.id !== "karte") {
@@ -34,10 +36,6 @@ const BaseLayerSelection = () => {
           eignung: layerMap[e.target.value].eignung,
           layerType: "wmts",
           visible: true,
-          props: {
-            name: "",
-            url: layerMap[e.target.value].url,
-          },
           layers: layerMap[e.target.value].layers,
         })
       );
@@ -47,7 +45,7 @@ const BaseLayerSelection = () => {
   return (
     <LayerSelection
       id="karte"
-      title="Karte"
+      title={isLeaflet ? "Karte" : cesiumBackgroundlayerNames.karte}
       selectedLayer={{ ...selectedMapLayer, id: "karte" }}
       onMouseEnter={() => {
         setHovered(true);
@@ -56,44 +54,50 @@ const BaseLayerSelection = () => {
         setHovered(false);
       }}
     >
-      <Radio.Group
-        value={selectedMapLayer.id}
-        onChange={(e) => {
-          const config = createBackgroundLayerConfig(e.target.value);
-          dispatch(setSelectedMapLayer(config));
+      {isLeaflet && (
+        <Radio.Group
+          value={selectedMapLayer.id}
+          onChange={(e) => {
+            const config = createBackgroundLayerConfig(e.target.value);
+            dispatch(setSelectedMapLayer(config));
 
-          dispatch(
-            setBackgroundLayer({
-              ...config,
-              id: "karte",
-            })
-          );
-        }}
-        className="pb-2 flex flex-col px-2 min-[686px]:inline-block"
-        optionType="default"
-        style={{
-          filter:
-            backgroundLayer.id !== "karte" && !hovered ? "saturate(0)" : "",
-        }}
-      >
-        <Radio
-          onClick={handleRadioClick}
-          value="stadtplan"
-          className="text-left"
+            dispatch(
+              setBackgroundLayer({
+                ...config,
+                id: "karte",
+              })
+            );
+          }}
+          className="pb-2 flex flex-col px-2 min-[686px]:inline-block"
+          optionType="default"
+          style={{
+            filter:
+              backgroundLayer.id !== "karte" && !hovered ? "saturate(0)" : "",
+          }}
         >
-          Stadtplan
-        </Radio>
-        <Radio
-          onClick={handleRadioClick}
-          value="gelaende"
-          className="text-left"
-        >
-          Gelände
-        </Radio>
-        <Radio onClick={handleRadioClick} value="amtlich" className="text-left">
-          Amtliche Basiskarte
-        </Radio>
-      </Radio.Group>
+          <Radio
+            onClick={handleRadioClick}
+            value="stadtplan"
+            className="text-left"
+          >
+            Stadtplan
+          </Radio>
+          <Radio
+            onClick={handleRadioClick}
+            value="gelaende"
+            className="text-left"
+          >
+            Gelände
+          </Radio>
+          <Radio
+            onClick={handleRadioClick}
+            value="amtlich"
+            className="text-left"
+          >
+            Amtliche Basiskarte
+          </Radio>
+        </Radio.Group>
+      )}
     </LayerSelection>
   );
 };

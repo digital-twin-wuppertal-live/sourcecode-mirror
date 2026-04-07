@@ -1,12 +1,10 @@
 import { createElement } from "react";
 import type { Dispatch, Store } from "@reduxjs/toolkit";
-import type { LatLng, Map, Point } from "leaflet";
+import type { LatLng, Map as LeafletMap, Point } from "leaflet";
+import type maplibregl from "maplibre-gl";
 import proj4 from "proj4";
 
-import {
-  functionToFeature,
-  objectToFeature,
-} from "@carma-appframeworks/portals";
+import { functionToFeature, objectToFeature } from "@carma-mapping/utils";
 import type { Layer } from "@carma/types";
 
 import {
@@ -46,7 +44,8 @@ type Options = {
   mode: UIMode;
   store: Store;
   zoom: number;
-  map: Map | maplibregl.Map;
+  map: LeafletMap | maplibregl.Map;
+  maplibreMapsRef?: React.MutableRefObject<Map<string, maplibregl.Map>>;
 };
 
 // TODO: move to portal lib?
@@ -70,7 +69,7 @@ export const onClickTopicMap = async (
     target?: HTMLElement;
     type?: string;
   },
-  { dispatch, mode, store, zoom, map }: Options
+  { dispatch, mode, store, zoom, map, maplibreMapsRef }: Options
 ) => {
   const layers = getLayers(store.getState());
   const queryableLayers = getQueryableLayers(layers, zoom);
@@ -79,9 +78,23 @@ export const onClickTopicMap = async (
     getAtLeastOneLayerIsQueryable(layers, zoom)
   ) {
     const completedVectorLayers = getCompletedVectorLayers(store.getState());
-    const queryableVectorLayers = queryableLayers.filter(
+    const allQueryableVectorLayers = queryableLayers.filter(
       (layer) => layer.layerType === "vector"
     );
+
+    const queryableVectorLayers = allQueryableVectorLayers.filter((layer) => {
+      if (!maplibreMapsRef?.current) {
+        return true;
+      }
+      return maplibreMapsRef.current.has(layer.id);
+    });
+
+    const vectorLayersNotReady = allQueryableVectorLayers.filter(
+      (layer) => !queryableVectorLayers.includes(layer)
+    );
+    vectorLayersNotReady.forEach((layer) => {
+      dispatch(addNothingFoundID(layer.id));
+    });
 
     // Check if all vector layers have completed loading their vector infos
     const allVectorLayersCompleted = queryableVectorLayers.every((layer) =>
@@ -225,7 +238,8 @@ export const onClickTopicMap = async (
           } else {
             dispatch(setPreferredVectorLayerId(undefined));
           }
-        } else if (preferredLayerId) {
+        }
+        if (preferredLayerId) {
           const preferredLayerIndex = filteredResult.findIndex(
             (feature) => feature.id === preferredLayerId
           );
@@ -401,24 +415,57 @@ const createVectorFeature = async (
     vectorId: selectedVectorFeature.id,
   };
   let result = "";
-  let featureInfoZoom = 20;
-  let blockLegacyGetFeatureInfo = false;
-  layer.other.keywords.forEach((keyword) => {
-    const extracted = keyword.split("carmaconf://infoBoxMapping:")[1];
-    const zoom = keyword.split("carmaConf://featureInfoZoom:")[1];
+  let featureInfoZoom = layer.conf?.featureInfoZoom
+    ? parseInt(layer.conf.featureInfoZoom as string)
+    : 20;
+  let blockLegacyGetFeatureInfo =
+    layer.conf && "blockLegacyGetFeatureInfo" in layer.conf;
 
-    if (keyword.includes("blockLegacyGetFeatureInfo")) {
-      blockLegacyGetFeatureInfo = true;
+  let featureProperties = null;
+
+  const layerInfo = layer.layerInfo;
+  let accentColor = null;
+  if (layerInfo && layerInfo.accentColor) {
+    accentColor = layerInfo.accentColor;
+  }
+
+  if ("lazyInfoBox" in layer.conf) {
+    let parsedInfo = {};
+    if (properties.info && typeof properties.info === "string") {
+      try {
+        parsedInfo = JSON.parse(properties.info);
+      } catch (e) {
+        console.error("Failed to parse info property:", e);
+      }
     }
 
-    if (extracted) {
-      result += extracted + "\n";
+    const parsedProperties: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(properties)) {
+      if (key === "info") continue;
+      if (
+        typeof value === "string" &&
+        (value.startsWith("[") || value.startsWith("{"))
+      ) {
+        try {
+          parsedProperties[key] = JSON.parse(value);
+        } catch {
+          // Ignore parsing errors, keep original value
+        }
+      }
     }
 
-    if (zoom) {
-      featureInfoZoom = parseInt(zoom);
-    }
-  });
+    featureProperties = {
+      properties: {
+        ...properties,
+        ...parsedInfo,
+        ...parsedProperties,
+      },
+    };
+  }
+
+  if (layer.conf?.infoboxMapping && Array.isArray(layer.conf.infoboxMapping)) {
+    result = (layer.conf.infoboxMapping as string[]).join("\n");
+  }
 
   if (result) {
     if (result.includes("function")) {
@@ -429,16 +476,22 @@ const createVectorFeature = async (
         .join("\n");
     }
 
-    const featureProperties = result.includes("function")
+    featureProperties = result.includes("function")
       ? await functionToFeature(properties, result)
       : await objectToFeature(properties, result);
+
     if (!featureProperties) {
       return undefined;
     }
-    const genericLinks = featureProperties?.properties?.genericLinks || [];
+  }
+
+  if (featureProperties) {
+    const genericLinks = (featureProperties?.properties?.genericLinks ||
+      []) as any[];
 
     feature = {
       properties: {
+        ...(accentColor !== null && { accentColor }),
         ...featureProperties.properties,
         genericLinks:
           blockLegacyGetFeatureInfo || !legacyFeatureInfoUrl
@@ -456,12 +509,31 @@ const createVectorFeature = async (
       geometry: selectedVectorFeature.geometry,
       id: layer.id,
       vectorId: selectedVectorFeature.id,
+      sourceFeature: selectedVectorFeature,
       showMarker:
         selectedVectorFeature.geometry.type === "Polygon" ||
         selectedVectorFeature.geometry.type === "MultiPolygon",
     };
   }
+
   return feature;
+};
+
+export const resolveHit = (
+  hits: any[],
+  semanticInfo: Record<string, { layers: string[] }> | undefined,
+  semanticIdentifier: string | undefined
+) => {
+  if (semanticIdentifier && semanticInfo) {
+    const semanticEntry = semanticInfo[semanticIdentifier];
+    if (semanticEntry) {
+      const match = hits.find((h) =>
+        semanticEntry.layers?.includes(h.layer?.id)
+      );
+      if (match) return match;
+    }
+  }
+  return hits[0];
 };
 
 export const implicitVectorSelection = async (
@@ -470,14 +542,36 @@ export const implicitVectorSelection = async (
     hit: any;
     latlng: LatLng;
   },
-  { layer, dispatch, selectionHandler, featureHandler, leafletMap }
+  {
+    layer,
+    dispatch,
+    selectionHandler,
+    featureHandler,
+    leafletMap,
+    semanticIdentifier,
+  }: {
+    layer: Layer;
+    dispatch: Dispatch;
+    selectionHandler: (e: any, layer: Layer) => void;
+    featureHandler: (feature: any, layer: Layer) => void;
+    leafletMap: LeafletMap;
+    semanticIdentifier?: string;
+  }
 ) => {
   selectionHandler(e, layer);
   if (!e.hits) {
   }
 
+  const semanticInfo = layer.conf?.semanticInfo as
+    | Record<string, { layers: string[] }>
+    | undefined;
+
   if (e.hits && !layer.queryable) {
-    const selectedVectorFeature = e.hits[0];
+    const selectedVectorFeature = resolveHit(
+      e.hits,
+      semanticInfo,
+      semanticIdentifier
+    );
 
     if (selectedVectorFeature.setSelection) {
       selectedVectorFeature.setSelection(false);
@@ -506,7 +600,7 @@ export const implicitVectorSelection = async (
           5
         )}, ${coordinates[0].toFixed(5)}`,
         subtitle: "(Geogr. Breite und Länge in Dezimalgrad, ETRS89)",
-        wmsProps: selectedVectorFeature.properties,
+        sourceProps: selectedVectorFeature.properties,
       },
       geometry: selectedVectorFeature.geometry,
       id: "information",
@@ -516,7 +610,11 @@ export const implicitVectorSelection = async (
   }
 
   if (e.hits && layer.queryable) {
-    const selectedVectorFeature = e.hits[0];
+    const selectedVectorFeature = resolveHit(
+      e.hits,
+      semanticInfo,
+      semanticIdentifier
+    );
 
     if (selectedVectorFeature.setSelection) {
       selectedVectorFeature.setSelection(false);
@@ -551,8 +649,18 @@ export const onSelectionChangedVector = async (
     hit: any;
     latlng: LatLng | maplibregl.LngLat;
   },
-  { layer, dispatch, selectionHandler, map }
+  { layer, dispatch, selectionHandler, map, store }
 ) => {
+  const layers = getLayers(store.getState());
+  const useInFeatureInfo = layers.some(
+    (l) => l.id === layer.id && l.useInFeatureInfo
+  );
+
+  if (!useInFeatureInfo) {
+    dispatch(addNothingFoundID(layer.id));
+    return;
+  }
+
   selectionHandler(e, layer);
   if (!e.hits) {
   }
@@ -604,7 +712,7 @@ export const onSelectionChangedVector = async (
             5
           )}, ${coordinates[0].toFixed(5)}`,
           subtitle: "(Geogr. Breite und Länge in Dezimalgrad, ETRS89)",
-          wmsProps: selectedVectorFeature.properties,
+          sourceProps: selectedVectorFeature.properties,
         },
         geometry: selectedVectorFeature.geometry,
         id: layer.id,

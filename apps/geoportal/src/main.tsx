@@ -14,6 +14,8 @@ import {
 import App from "./app/App";
 import store from "./app/store";
 import { CESIUM_CONFIG } from "./app/config/app.config";
+import { AdhocFeatureDisplayProvider } from "@carma-appframeworks/portals";
+import { ImageList } from "@carma-mapping/layers";
 
 cjsGlobalShim();
 // Set up Cesium environment (CESIUM_BASE_URL) via engine helper
@@ -27,23 +29,31 @@ preventPinchZoom();
 
 const root = createRoot(document.getElementById("root") as HTMLElement);
 
+document.getElementById("splash-loading")?.remove();
+
 console.debug("RENDER: [GEOPORTAL] ROOT");
 
 root.render(
   <Provider store={store}>
     <PersistGate loading={null} persistor={persistor}>
-      <RouterProvider
-        router={createHashRouter([
-          {
-            path: "/",
-            element: <App />,
-          },
-          {
-            path: "/publish",
-            element: <App published={true} />,
-          },
-        ])}
-      />
+      <AdhocFeatureDisplayProvider>
+        <RouterProvider
+          router={createHashRouter([
+            {
+              path: "/",
+              element: <App />,
+            },
+            {
+              path: "/publish",
+              element: <App published={true} />,
+            },
+            {
+              path: "/about/images",
+              element: <ImageList />,
+            },
+          ])}
+        />
+      </AdhocFeatureDisplayProvider>
     </PersistGate>
   </Provider>
 );

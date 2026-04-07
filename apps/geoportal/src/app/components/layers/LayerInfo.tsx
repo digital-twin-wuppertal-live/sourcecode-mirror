@@ -1,3 +1,4 @@
+import parse from "html-react-parser";
 import { Tabs } from "antd";
 import { tabItems } from "./items";
 import { useDispatch, useSelector } from "react-redux";
@@ -7,8 +8,8 @@ import { useContext, useEffect, useState } from "react";
 import "./text.css";
 import { TopicMapContext } from "react-cismap/contexts/TopicMapContextProvider";
 import LayerInfoWrapper from "./LayerInfoWrapper";
-import { parseDescription } from "@carma-mapping/layers";
-import { updateUrl } from "@carma-commons/utils";
+import { LegendDisplay, parseDescription } from "@carma-mapping/layers";
+import { useMapFrameworkSwitcherContext } from "@carma-mapping/components";
 
 interface LayerInfoProps {
   description: string;
@@ -36,6 +37,7 @@ const LayerInfo = ({ description, legend, zoomLevels }: LayerInfoProps) => {
   const currentLayer = layers[selectedLayerIndex];
   const parsedDescription = parseDescription(description);
   const metadataUrl = currentLayer?.props?.metaData?.[0]?.OnlineResource;
+  const { isCesium } = useMapFrameworkSwitcherContext();
   // @ts-ignore
   const layerType = currentLayer?.props?.style
     ? "Vektorlayer (Mapbox-konformer Vector-Tiles-Service)"
@@ -82,7 +84,7 @@ const LayerInfo = ({ description, legend, zoomLevels }: LayerInfoProps) => {
       zoom < zoomLevels.maxZoom && zoom > zoomLevels.minZoom;
 
     return (
-      layerType +
+      (isCesium ? "3D-Objekt" : layerType) +
       (!layerCurrentlyVisible ? " | keine Anzeige im aktuellen Maßstab" : "")
     );
   };
@@ -91,10 +93,10 @@ const LayerInfo = ({ description, legend, zoomLevels }: LayerInfoProps) => {
     <LayerInfoWrapper
       content={
         <>
-          <div className="flex sm:flex-row flex-col overflow-auto gap-2 w-full h-full overflow-y-hidden">
-            <div className="formContainer h-full flex flex-col gap-2 w-full sm:w-[80%] hide-tabs">
+          <div className="flex sm:flex-row flex-col gap-2 w-full h-full overflow-hidden">
+            <div className="formContainer flex flex-col gap-2 w-full sm:w-[80%] hide-tabs min-h-0 overflow-hidden">
               {parsedDescription && parsedDescription.length > 0 && (
-                <div>
+                <div className="flex-shrink-0 overflow-y-auto max-h-[60%]">
                   {parsedDescription.map((section, index) => {
                     if (
                       section.title === "Sichtbarkeit" &&
@@ -108,30 +110,32 @@ const LayerInfo = ({ description, legend, zoomLevels }: LayerInfoProps) => {
                     return (
                       <div key={`section-${index}`}>
                         <h5 className="font-semibold">{section.title}</h5>
-                        <p className="text-sm">{section.description}</p>
+                        <p className="text-sm">{parse(section.description)}</p>
                       </div>
                     );
                   })}
                 </div>
               )}
-              <hr className="h-px my-0 bg-gray-300 border-0 w-full" />
+              <hr className="h-px my-0 bg-gray-300 border-0 w-full flex-shrink-0" />
 
-              <Tabs
-                animated={false}
-                items={tabItems(currentLayer, metadataText, pdfUrl)}
-                activeKey={activeTabKey}
-                onChange={(key) => dispatch(setUIActiveTabKey(key))}
-              />
+              <div className="flex-1 min-h-0 overflow-y-auto">
+                <Tabs
+                  animated={false}
+                  items={tabItems(currentLayer, metadataText, pdfUrl)}
+                  activeKey={activeTabKey}
+                  onChange={(key) => dispatch(setUIActiveTabKey(key))}
+                />
+              </div>
               <hr className="h-px my-0 bg-gray-300 border-0 w-full sm:hidden" />
             </div>
             <div className="w-1/3 h-[calc(100%-26px)]">
               <h5 className="pl-1.5">Legende</h5>
               <div className="h-full sm:overflow-auto">
                 {legend?.map((legend, i) => (
-                  <img
+                  <LegendDisplay
                     key={`legend_${i}`}
-                    src={updateUrl(legend.OnlineResource)}
-                    alt="Legende"
+                    url={legend.OnlineResource}
+                    updateUrl
                     className="aspect-auto h-auto object-contain overflow-clip"
                   />
                 ))}

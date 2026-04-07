@@ -21,10 +21,14 @@ import { MappingConstants } from "react-cismap";
 import { defaultLayerConf } from "react-cismap/tools/layerFactory";
 import {
   GazDataProvider,
-  SandboxedEvalProvider,
   SelectionProvider,
 } from "@carma-appframeworks/portals";
-import { gazDataConfig } from "../config/gazData";
+import { SandboxedEvalProvider } from "@carma-commons/sandbox-eval";
+import {
+  gazDataConfig,
+  buildGazDataConfig,
+  defaultEndpoints,
+} from "../config/gazData";
 import WMSCapabilities from "wms-capabilities";
 
 import merge from "lodash/merge";
@@ -35,6 +39,7 @@ import {
   extractInformation,
   getHashParams,
 } from "@carma-commons/utils";
+import { isEndpoint } from "@carma-commons/resources";
 import md5 from "md5";
 import {
   createMetaHelpBlock,
@@ -173,6 +178,7 @@ function App({ name }) {
               style: layer?.other?.vectorStyle,
               infoboxMapping: layer?.conf?.infoboxMapping,
             };
+
             const styleVal = layer.conf?.vectorStyle;
             if (styleVal && styleVal !== "") {
               layerObj.style = styleVal;
@@ -245,6 +251,7 @@ function App({ name }) {
   const [featureGazData, setFeatureGazData] = useState([]);
   const [faultyConfig, setFaultyConfig] = useState(false);
   const [projectConfigFound, setProjectConfigFound] = useState(true);
+  const [effectiveGazConfig, setEffectiveGazConfig] = useState(gazDataConfig);
   useEffect(() => {
     log(
       `... where i get my config from: ${JSON.stringify({
@@ -428,6 +435,22 @@ function App({ name }) {
       // Deep-merge project config into default config
       merge(config, projectConfig);
 
+      // Compute effective gazetteer config from project config
+      const overwrite = config.tm?.overwriteGazetteerTopics;
+      const additional = config.tm?.additionalGazetteerTopics;
+
+      if (Array.isArray(overwrite) && overwrite.length > 0) {
+        const validEndpoints = overwrite.filter(isEndpoint);
+        setEffectiveGazConfig(buildGazDataConfig(validEndpoints));
+      } else if (Array.isArray(additional) && additional.length > 0) {
+        const validAdditional = additional.filter(isEndpoint);
+        const combined = [
+          ...defaultEndpoints,
+          ...validAdditional.filter((ep) => !defaultEndpoints.includes(ep)),
+        ];
+        setEffectiveGazConfig(buildGazDataConfig(combined));
+      }
+
       if (config?.tm?.windowtitle) {
         document.title = config.tm.windowtitle;
       }
@@ -521,6 +544,66 @@ function App({ name }) {
           loadStyleManipulation(layer, configServer, configPath, slugName)
         );
         await Promise.all(manipulationPromises);
+
+        // --- InfoBox Mapping: Load mapping function from JS file if needed ---
+        function getInfoBoxMappingFunctionUrl(
+          infoBoxMappingFunction,
+          configServer,
+          configPath,
+          slugName
+        ) {
+          if (
+            typeof infoBoxMappingFunction === "string" &&
+            infoBoxMappingFunction.startsWith("@")
+          ) {
+            const filename = infoBoxMappingFunction.slice(1);
+            const path = configPath.endsWith("/")
+              ? configPath
+              : configPath + "/";
+            const server = configServer.endsWith("/")
+              ? configServer.slice(0, -1)
+              : configServer;
+            return `${server}${path}${slugName}/${filename}`;
+          }
+          return null;
+        }
+        async function loadInfoBoxMappingFunction(
+          layer,
+          configServer,
+          configPath,
+          slugName
+        ) {
+          if (
+            layer.infoBoxMappingFunction &&
+            typeof layer.infoBoxMappingFunction === "string" &&
+            layer.infoBoxMappingFunction.startsWith("@") &&
+            !layer.infoboxMapping
+          ) {
+            const url = getInfoBoxMappingFunctionUrl(
+              layer.infoBoxMappingFunction,
+              configServer,
+              configPath,
+              slugName
+            );
+            try {
+              const code = await fetch(url).then((r) => r.text());
+              // The infoboxMapping expects an array with the function as a string
+              // Remove newlines to avoid syntax errors in sandboxed eval
+              const singleLineCode = code.replace(/\n/g, " ");
+              layer.infoboxMapping = [singleLineCode];
+            } catch (e) {
+              log(
+                `Failed to fetch/parse infoBoxMappingFunction for layer ${
+                  layer.name || layer.id
+                }: ${e}`
+              );
+            }
+          }
+        }
+        const infoBoxMappingPromises = config.tm.vectorLayers.map((layer) =>
+          loadInfoBoxMappingFunction(layer, configServer, configPath, slugName)
+        );
+        await Promise.all(infoBoxMappingPromises);
       }
 
       // Normalize layers: if only 'layer' is present, extract 'capabilitiesLayer' and 'capabilities'
@@ -615,6 +698,49 @@ function App({ name }) {
           type: "MARKDOWN",
           content: config.simpleHelpMd,
         };
+      }
+
+      // Load helpSections if defined in config
+      if (Array.isArray(config?.tm?.helpSections)) {
+        const loadedHelpSections = [];
+        for (const section of config.tm.helpSections) {
+          let content = section.markdown;
+          // If markdown starts with @, fetch the file
+          if (typeof content === "string" && content.startsWith("@")) {
+            const filename = content.slice(1);
+            const mdPath = server + path + slugName + "/" + filename;
+            try {
+              const response = await fetch(mdPath);
+              if (response.ok) {
+                content = await response.text();
+              } else {
+                console.warn(`Failed to load help section: ${mdPath}`);
+                content = "";
+              }
+            } catch (e) {
+              console.warn(`Error loading help section: ${mdPath}`, e);
+              content = "";
+            }
+          }
+          loadedHelpSections.push({
+            title: section.title,
+            bsStyle: section.bsStyle || "secondary",
+            contentBlockConf: {
+              type: "MARKDOWN",
+              content: content,
+            },
+          });
+        }
+        config.helpSections = loadedHelpSections;
+      } else if (config.simpleHelpObject) {
+        // Backwards compatibility: create helpSections from simpleHelpObject
+        config.helpSections = [
+          {
+            title: "Zweckbestimmung",
+            bsStyle: "secondary",
+            contentBlockConf: config.simpleHelpObject,
+          },
+        ];
       }
 
       if (config.infoBoxConfig !== undefined) {
@@ -1159,7 +1285,7 @@ function App({ name }) {
             </div>
           </div>
         )}
-        <GazDataProvider config={gazDataConfig}>
+        <GazDataProvider config={effectiveGazConfig}>
           <SelectionProvider>
             <TopicMapContextProvider
               {...refConfig}

@@ -5,8 +5,10 @@ import localForage from "localforage";
 import authSlice from "./slices/auth";
 import mapSettings from "./slices/mapSettings";
 import ui from "./slices/ui";
-
+import keyTables from "./slices/keyTables";
+import arbeitsauftraege from "./slices/arbeitsauftraege";
 import featureCollectionSlice from "./slices/featureCollection";
+import featuresFormsSlice from "./slices/featuresForms";
 
 console.log("store initializing ....");
 
@@ -60,15 +62,31 @@ const mapSettingsConfig = {
   whitelist: [
     "activeBackgroundLayer",
     "backgroundLayerOpacities",
+    "activeAdditionalLayers",
+    "additionalLayerOpacities",
     "inPaleMode",
     "inSearchMode",
+    "enabledLeitungstypen",
+    "enabledCategoryFilters",
   ],
 };
 
 const featureCollectionConfig = {
   key: "@app.featureCollection",
   storage: localForage,
-  whitelist: ["filter", "inFocusMode"],
+  whitelist: ["inFocusMode"],
+};
+
+const featuresFormsConfig = {
+  key: "@belis-desktop.featuresForms",
+  storage: localForage,
+  whitelist: ["drafts"],
+};
+
+const arbeitsauftraegeConfig = {
+  key: "@belis-desktop.arbeitsauftraege",
+  storage: localForage,
+  whitelist: ["selectedTeamId"],
 };
 
 const store = configureStore({
@@ -80,6 +98,15 @@ const store = configureStore({
       featureCollectionSlice.reducer
     ),
     ui: ui.reducer,
+    keyTables: keyTables.reducer,
+    arbeitsauftraege: persistReducer(
+      arbeitsauftraegeConfig,
+      arbeitsauftraege.reducer
+    ),
+    featuresForms: persistReducer(
+      featuresFormsConfig,
+      featuresFormsSlice.reducer
+    ),
   },
   devTools: devToolsEnabled === true && inProduction === false,
   middleware,

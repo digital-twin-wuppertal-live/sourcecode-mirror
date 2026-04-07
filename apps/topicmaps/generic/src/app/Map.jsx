@@ -1,4 +1,11 @@
-import { useContext, useEffect, useState } from "react";
+import {
+  useCallback,
+  useContext,
+  useEffect,
+  useRef,
+  useState,
+  useMemo,
+} from "react";
 
 import "./App.css";
 import "bootstrap/dist/css/bootstrap.min.css";
@@ -29,6 +36,7 @@ import { EmptySearchComponent } from "@carma-mapping/fuzzy-search";
 import FuzzySearchWrapper from "./components/FuzzySearchWrapper";
 import { Control, ControlLayout } from "@carma-mapping/map-controls-layout";
 import {
+  createFilterButtons,
   FullscreenControl,
   RoutedMapLocateControl,
   ZoomControl,
@@ -37,7 +45,7 @@ import CismapLayer from "react-cismap/CismapLayer";
 import Menu from "./components/Menu";
 import { TopicMapStylingContext } from "react-cismap/contexts/TopicMapStylingContextProvider";
 import md5 from "md5";
-import { createVectorFeature } from "@carma-appframeworks/portals";
+import { createVectorFeature } from "@carma-mapping/utils";
 
 const host = import.meta.env.VITE_WUPP_ASSET_BASEURL;
 const downloadText = (text, filename) => {
@@ -89,7 +97,9 @@ function renderCismapLayers(
   markerSymbolSize,
   setGlobalHits,
   initialVisualSelection,
-  layerInformation
+  layerInformation,
+  setMaplibreMap,
+  setIdleLayers
 ) {
   return (
     <>
@@ -128,6 +138,19 @@ function renderCismapLayers(
                   return ret;
                 });
               }}
+              onStyleIdle={() => {
+                if (setIdleLayers) {
+                  setIdleLayers((old) => ({
+                    ...old,
+                    [layer.id || index]: true,
+                  }));
+                }
+              }}
+              onMapLibreCoreMapReady={(map) => {
+                if (setMaplibreMap) {
+                  setMaplibreMap(map);
+                }
+              }}
             />
           );
         })}
@@ -149,13 +172,46 @@ const Map = ({
   const [cl_key, setClKey] = useState("");
   const { routedMapRef } = useSelectionTopicMap() ?? {};
   const [selectedVectorObject, setSelectedVectorObject] = useState(undefined);
+  const [maplibreMap, setMaplibreMap] = useState(null);
+  const [idleLayers, setIdleLayers] = useState({});
+  const layersIdleRef = useRef(false);
+
+  const vectorLayerCount = config.tm?.vectorLayers?.length ?? 0;
+
+  const resetLayersIdle = useCallback(() => {
+    setIdleLayers({});
+    layersIdleRef.current = false;
+  }, []);
+
+  useEffect(() => {
+    const isIdle =
+      vectorLayerCount > 0 &&
+      Object.keys(idleLayers).length >= vectorLayerCount;
+    layersIdleRef.current = isIdle;
+  }, [idleLayers, vectorLayerCount]);
+
+  useEffect(() => {
+    setIdleLayers({});
+    layersIdleRef.current = false;
+  }, [vectorLayerCount]);
+
+  // Memoize the filter buttons component to prevent re-creation on every render
+  const FilterButtonsComponent = useMemo(() => {
+    if (config?.tm?.filterConfig) {
+      return createFilterButtons(config.tm.filterConfig);
+    }
+    return null;
+  }, [config?.tm?.filterConfig]);
   // console.log("xxx markerSymbolSize", markerSymbolSize);
 
   // lets assume we will only have vector layers
   useEffect(() => {
     const getFeature = async (infoboxMapping, hit) => {
-      // console.log("xxx infoboxMapping", infoboxMapping);
+      console.log("xxx infoboxMapping", infoboxMapping);
       const feature = await createVectorFeature(infoboxMapping, hit);
+
+      // console.log("xxx a2c setFeature", feature);
+
       setFeature(feature);
     };
 
@@ -264,8 +320,21 @@ const Map = ({
                 featureGazData={featureGazData}
                 placeholder={config.tm.gazetteerSearchBoxPlaceholdertext}
                 clickAfterGazetteerHit={config.tm.clickAfterGazetteerHit}
+                layersIdleRef={layersIdleRef}
+                resetLayersIdle={resetLayersIdle}
+                landParcelSearch={config.tm.useLandparcelSearch}
               />
             </div>
+          </Control>
+        )}
+
+        {FilterButtonsComponent && (
+          <Control position="topcenter" order={10}>
+            <FilterButtonsComponent
+              maplibreMap={maplibreMap}
+              selectedFeature={feature}
+              setSelectedFeature={setFeature}
+            />
           </Control>
         )}
 
@@ -309,14 +378,16 @@ const Map = ({
               skipSymbolsizeSetting={
                 config?.tm?.applicationMenuSkipSymbolsizeSetting
               }
-              simpleHelp={config?.simpleHelpObject}
+              helpSections={config?.helpSections}
               previewMapPosition={config?.tm?.previewMapPosition}
               previewChildren={renderCismapLayers(
                 config,
                 markerSymbolSize,
                 setGlobalHits,
                 selectedVectorObject,
-                layerInformation
+                layerInformation,
+                null,
+                null
               )}
               previewFeatureCollectionCount={
                 config?.tm?.previewFeatureCollectionCount
@@ -335,6 +406,7 @@ const Map = ({
                   <MenuFooter
                     version={getApplicationVersion(versionData)}
                     setAppMenuActiveMenuSection={setAppMenuActiveMenuSection}
+                    sectionKey="HelpSection"
                   />
                 )
               }
@@ -348,7 +420,9 @@ const Map = ({
             markerSymbolSize,
             setGlobalHits,
             selectedVectorObject,
-            layerInformation
+            layerInformation,
+            setMaplibreMap,
+            setIdleLayers
           )}
           {config.tm.noFeatureCollection !== true && (
             <>

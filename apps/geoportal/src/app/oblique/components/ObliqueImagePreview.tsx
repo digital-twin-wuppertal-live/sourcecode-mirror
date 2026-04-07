@@ -12,6 +12,7 @@ import {
 } from "@fortawesome/free-solid-svg-icons";
 import { Tooltip, Radio, type RadioChangeEvent } from "antd";
 
+import { PerspectiveFrustum } from "@carma/cesium";
 import { useCesiumContext } from "@carma-mapping/engines/cesium";
 import { ControlButtonStyler } from "@carma-mapping/map-controls-layout";
 import { PREVIEW_IMAGE_BASE_SCALE_FACTOR } from "../config";
@@ -23,10 +24,12 @@ import {
 import { Backdrop } from "./ObliqueImagePreview.Backdrop";
 import { ContactMailButton } from "@carma-appframeworks/portals";
 import { ObliqueDirectionControlsCompact } from "./ObliqueDirectionControls.Compact";
+import ObliqueOrientationCube from "./ObliqueOrientationCube";
 import type { CardinalDirectionEnum } from "../utils/orientationUtils";
 import { getViewerSyncedDimensions } from "../utils/getViewerSyncedDimensions";
 import { useProgressivePreviewSource } from "../hooks/useProgressivePreviewSource";
 import { useForwardZoomEventsToCesium } from "../hooks/useForwardZoomEventsToCesium";
+import { strings } from "../strings.de";
 
 interface ObliqueImagePreviewProps {
   // Base path for progressive preview levels (for level 6 initial load)
@@ -58,6 +61,15 @@ interface ObliqueImagePreviewProps {
   saturationBase?: number;
   // Show compact direction controls between download and report
   showCompactDirectionControls?: boolean;
+  // Show orientation cube instead of compact controls
+  showOrientationCube?: boolean;
+  directionalButtonType?: "captureDirection" | "nextCapture";
+  offsetRad?: number;
+  offsetCube?: boolean;
+  invertCardinalLabels?: boolean;
+  showFacadeLabels?: boolean;
+  disableCubeDrag?: boolean;
+  disableCubeNorthArrow?: boolean;
   // Direction controls inputs (optional)
   rotateCamera?: (clockwise: boolean) => void;
   rotateToDirection?: (d: CardinalDirectionEnum) => void;
@@ -66,6 +78,8 @@ interface ObliqueImagePreviewProps {
   isDirectionLoading?: boolean;
   // When true, allow preloading the next buffer image
   preloadNextEnabled?: boolean;
+
+  hideOverlayUi?: boolean;
 }
 
 type ImageQuality = "REGULAR" | "HQ" | "BEST";
@@ -113,12 +127,21 @@ export const ObliqueImagePreview: FC<ObliqueImagePreviewProps> = ({
   contrastBase = 85,
   saturationBase = 100,
   showCompactDirectionControls = true,
+  showOrientationCube = false,
+  directionalButtonType = "nextCapture",
+  offsetRad = 0,
+  offsetCube = false,
+  invertCardinalLabels = true,
+  showFacadeLabels = true,
+  disableCubeDrag = false,
+  disableCubeNorthArrow = false,
   rotateCamera,
   rotateToDirection,
   activeDirection,
   siblingCallbacks,
   isDirectionLoading = false,
   preloadNextEnabled = false,
+  hideOverlayUi = false,
 }) => {
   const [shouldFadeIn, setShouldFadeIn] = useState(false);
   const [isVertical, setIsVertical] = useState(false);
@@ -142,7 +165,49 @@ export const ObliqueImagePreview: FC<ObliqueImagePreviewProps> = ({
   const [saturation, setSaturation] = useState(100);
 
   const ctx = useCesiumContext();
-  const { rootRef, onWheel, fovOverride } = useForwardZoomEventsToCesium();
+  const { rootRef } = useForwardZoomEventsToCesium();
+  const [externalFovOverride, setExternalFovOverride] = useState<
+    number | undefined
+  >(undefined);
+
+  useEffect(() => {
+    if (!isVisible) return;
+
+    let didAttach = false;
+    let detach: (() => void) | null = null;
+
+    ctx.withScene((scene) => {
+      const handlePostRender = () => {
+        const frustum = scene.camera.frustum;
+        if (frustum instanceof PerspectiveFrustum) {
+          const nextFov = frustum.fov;
+          setExternalFovOverride((prev) => (prev === nextFov ? prev : nextFov));
+        } else {
+          setExternalFovOverride((prev) =>
+            prev === undefined ? prev : undefined
+          );
+        }
+      };
+
+      scene.postRender.addEventListener(handlePostRender);
+      didAttach = true;
+      handlePostRender();
+
+      detach = () => {
+        if (!scene.isDestroyed()) {
+          scene.postRender.removeEventListener(handlePostRender);
+        }
+      };
+    });
+
+    return () => {
+      if (didAttach) {
+        detach?.();
+      }
+    };
+  }, [ctx, isVisible]);
+
+  const effectiveFovOverride = externalFovOverride;
 
   const { xOffset, yOffset } = interiorOrientationOffsets;
 
@@ -347,13 +412,12 @@ export const ObliqueImagePreview: FC<ObliqueImagePreviewProps> = ({
     isVertical,
     imageAspectRatio,
     PREVIEW_IMAGE_BASE_SCALE_FACTOR,
-    fovOverride
+    effectiveFovOverride
   );
 
   return (
     <div
       ref={rootRef}
-      onWheel={onWheel}
       style={{
         position: "absolute",
         width: "100%",
@@ -370,94 +434,116 @@ export const ObliqueImagePreview: FC<ObliqueImagePreviewProps> = ({
         interactive={isVisible}
         onClick={handleBackdropClick}
       />
-      <div
-        className="absolute top-0 left-0 w-full h-svh"
-        style={{ zIndex: 1500, pointerEvents: "none" }}
-      >
-        <div style={ControlsContainerStyle}>
-          <Tooltip title="Bild in neuem Tab öffnen" placement="top">
-            <div>
-              <ControlButtonStyler onClick={onOpenImageLink} width="auto">
-                <span className="flex-1 text-base px-4">
-                  <FontAwesomeIcon icon={faExternalLink} className="mr-2" />
-                  Bild öffnen
-                </span>
-              </ControlButtonStyler>
-            </div>
-          </Tooltip>
-          <Tooltip title="Bild direkt herunterladen" placement="top">
-            <div>
-              <ControlButtonStyler onClick={onDirectDownload} width="auto">
-                <span className="flex-1 text-base px-4">
-                  <FontAwesomeIcon icon={faFileArrowDown} className="mr-2" />
-                  Herunterladen
-                </span>
-              </ControlButtonStyler>
-            </div>
-          </Tooltip>
-          {showCompactDirectionControls && rotateCamera && (
-            <ObliqueDirectionControlsCompact
-              rotateCamera={rotateCamera}
-              rotateToDirection={rotateToDirection || (() => {})}
-              activeDirection={activeDirection}
-              isLoading={isDirectionLoading}
-              siblingCallbacks={siblingCallbacks}
+      {!hideOverlayUi && (
+        <div
+          className="absolute top-0 left-0 w-full h-svh"
+          style={{ zIndex: 1500, pointerEvents: "none" }}
+        >
+          <div style={ControlsContainerStyle}>
+            {showOrientationCube && (
+              <div className="flex justify-center w-full">
+                <ObliqueOrientationCube
+                  size={70}
+                  rotateCamera={rotateCamera}
+                  onDirectionSelect={rotateToDirection}
+                  offsetRad={offsetRad}
+                  offsetCube={offsetCube}
+                  invertCardinalLabels={invertCardinalLabels}
+                  showFacadeLabels={showFacadeLabels}
+                  directionalButtonType={directionalButtonType}
+                  isLoading={isDirectionLoading}
+                  siblingCallbacks={siblingCallbacks}
+                  disableDrag={disableCubeDrag}
+                  disableNorthArrow={disableCubeNorthArrow}
+                />
+              </div>
+            )}
+            <Tooltip title={strings.previewOpenImage} placement="top">
+              <div>
+                <ControlButtonStyler onClick={onOpenImageLink} width="auto">
+                  <span className="flex-1 text-base px-4">
+                    <FontAwesomeIcon icon={faExternalLink} className="mr-2" />
+                    Bild öffnen
+                  </span>
+                </ControlButtonStyler>
+              </div>
+            </Tooltip>
+            <Tooltip title={strings.previewDownloadImage} placement="top">
+              <div>
+                <ControlButtonStyler onClick={onDirectDownload} width="auto">
+                  <span className="flex-1 text-base px-4">
+                    <FontAwesomeIcon icon={faFileArrowDown} className="mr-2" />
+                    Herunterladen
+                  </span>
+                </ControlButtonStyler>
+              </div>
+            </Tooltip>
+            {showCompactDirectionControls &&
+              !showOrientationCube &&
+              rotateCamera && (
+                <ObliqueDirectionControlsCompact
+                  rotateCamera={rotateCamera}
+                  rotateToDirection={rotateToDirection || (() => {})}
+                  activeDirection={activeDirection}
+                  isLoading={isDirectionLoading}
+                  siblingCallbacks={siblingCallbacks}
+                />
+              )}
+            <ContactMailButton
+              width="160px"
+              emailAddress="geodatenzentrum@stadt.wuppertal.de"
+              subjectPrefix="Datenschutzprüfung Luftbildschrägaufnahme"
+              productName="Luftbildschrägaufnahmen"
+              portalName="Wuppertaler Geodatenportal"
+              imageId={imageId}
+              imageUri={finalPreviewSrc || undefined}
+              tooltip={{
+                title: strings.previewRequestReview,
+                placement: "top",
+              }}
             />
-          )}
-          <ContactMailButton
-            width="160px"
-            emailAddress="geodatenzentrum@stadt.wuppertal.de"
-            subjectPrefix="Datenschutzprüfung Luftbildschrägaufnahme"
-            productName="Luftbildschrägaufnahmen"
-            portalName="Wuppertaler Geodatenportal"
-            imageId={imageId}
-            imageUri={finalPreviewSrc || undefined}
-            tooltip={{
-              title: "Datenschutzprüfung Luftbildschrägaufnahme",
-              placement: "top",
-            }}
-          />
-          <Tooltip title="Vorschau schließen" placement="top">
-            <div>
-              <ControlButtonStyler onClick={handleBackdropClick} width="auto">
-                <span className="flex-1 text-base px-4">
-                  Vorschau Schließen
-                </span>
-              </ControlButtonStyler>
-            </div>
-          </Tooltip>
-          {/* Force a new row for the radio groups */}
-          {isDebugMode && (
-            <>
-              <div style={{ flexBasis: "100%", height: 0 }} />
-              <Radio.Group
-                value={currentQuality}
-                onChange={handleQualityChange}
-                optionType="button"
-                buttonStyle="solid"
-                size="small"
-                style={{ marginLeft: "10px" }}
-              >
-                <Radio.Button value="REGULAR">Standard (L3)</Radio.Button>
-                <Radio.Button value="HQ">HQ (L2)</Radio.Button>
-                <Radio.Button value="BEST">(L1 N/A)</Radio.Button>
-              </Radio.Group>
-              <Radio.Group
-                value={blendMode}
-                onChange={handleBlendModeChange}
-                optionType="button"
-                buttonStyle="solid"
-                size="small"
-                style={{ marginLeft: "10px" }}
-              >
-                <Radio.Button value="normal">Normal</Radio.Button>
-                <Radio.Button value="difference">Difference</Radio.Button>
-                <Radio.Button value="normal50">50% Opacity</Radio.Button>
-              </Radio.Group>
-            </>
-          )}
+            <Tooltip title={strings.previewClose} placement="top">
+              <div>
+                <ControlButtonStyler onClick={handleBackdropClick} width="auto">
+                  <span className="flex-1 text-base px-4">
+                    Vorschau schließen
+                  </span>
+                </ControlButtonStyler>
+              </div>
+            </Tooltip>
+            {/* Force a new row for the radio groups */}
+            {isDebugMode && (
+              <>
+                <div style={{ flexBasis: "100%", height: 0 }} />
+                <Radio.Group
+                  value={currentQuality}
+                  onChange={handleQualityChange}
+                  optionType="button"
+                  buttonStyle="solid"
+                  size="small"
+                  style={{ marginLeft: "10px" }}
+                >
+                  <Radio.Button value="REGULAR">Standard (L3)</Radio.Button>
+                  <Radio.Button value="HQ">HQ (L2)</Radio.Button>
+                  <Radio.Button value="BEST">(L1 N/A)</Radio.Button>
+                </Radio.Group>
+                <Radio.Group
+                  value={blendMode}
+                  onChange={handleBlendModeChange}
+                  optionType="button"
+                  buttonStyle="solid"
+                  size="small"
+                  style={{ marginLeft: "10px" }}
+                >
+                  <Radio.Button value="normal">Normal</Radio.Button>
+                  <Radio.Button value="difference">Difference</Radio.Button>
+                  <Radio.Button value="normal50">50% Opacity</Radio.Button>
+                </Radio.Group>
+              </>
+            )}
+          </div>
         </div>
-      </div>
+      )}
       {currentSrc && currentLoaded && !dimImage && !showNext && (
         <PreviewImage
           src={currentSrc}

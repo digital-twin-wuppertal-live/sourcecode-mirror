@@ -1,32 +1,50 @@
-import { useEffect, useMemo, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef } from "react";
 
-import type { Viewer } from "cesium";
-
-import { type Scene, CesiumMath } from "@carma/cesium";
+import { type Scene } from "@carma/cesium";
+import { handleDelayedRender } from "@carma-commons/utils";
 
 import {
   useCesiumContext,
   useFovWheelZoom,
   useCesiumCameraForceOblique,
+  testCameraObliqueCompliant,
 } from "@carma-mapping/engines/cesium";
+import { useMapFrameworkSwitcherContext } from "@carma-mapping/components";
 
 import { useOblique } from "./useOblique";
 import { enterObliqueMode, leaveObliqueMode } from "../utils/cameraUtils";
 
-const viewerPreUpdateHandlers = new WeakMap<Viewer, (scene: Scene) => void>();
-
 export function useObliqueInitializer(debug = false) {
-  const ctx = useCesiumContext();
-  const { viewerRef, shouldSuspendPitchLimiterRef, requestRender } = ctx;
+  const {
+    shouldSuspendPitchLimiterRef,
+    getScene,
+    sceneAnimationMapRef,
+    initialViewApplied,
+  } = useCesiumContext();
+  const { isTransitioning } = useMapFrameworkSwitcherContext();
   const {
     isObliqueMode,
     fixedHeight,
     fixedPitch,
     minFov,
     maxFov,
-    headingOffset,
+    restoreFovOnLeave,
+    setSuspendSelectionSearch,
   } = useOblique();
   const originalFovRef = useRef<number | null>(null);
+
+  // Derived scene ref for useCesiumCameraForceOblique
+  const sceneRef = useRef<Scene | null>(null);
+  sceneRef.current = getScene();
+
+  const checkExternalAnimations = useCallback(
+    (scene: Scene) => {
+      return (
+        (sceneAnimationMapRef?.current?.has(scene) ?? false) || isTransitioning
+      );
+    },
+    [sceneAnimationMapRef, isTransitioning]
+  );
 
   const wheelZoomOptions = useMemo(
     () => ({
@@ -37,25 +55,38 @@ export function useObliqueInitializer(debug = false) {
   );
 
   const { setEnabled: setWheelZoomEnabled } = useFovWheelZoom(
-    ctx,
     isObliqueMode,
     wheelZoomOptions
   );
 
+  const obliqueOptions = useMemo(
+    () => ({ fixedPitch, fixedHeight }),
+    [fixedPitch, fixedHeight]
+  );
+
   const { enableCameraForceOblique, disableCameraForceOblique } =
     useCesiumCameraForceOblique(
-      viewerRef,
-      fixedPitch,
-      fixedHeight,
-      shouldSuspendPitchLimiterRef
+      sceneRef,
+      obliqueOptions,
+      shouldSuspendPitchLimiterRef,
+      checkExternalAnimations
     );
 
   useEffect(() => {
     // Always set the zoom handler state based on oblique mode; the hook will defer attaching until a viewer exists
     setWheelZoomEnabled(isObliqueMode);
 
-    ctx.withCamera((camera, viewer) => {
-      const cameraController = viewer.scene.screenSpaceCameraController;
+    if (!initialViewApplied) {
+      return;
+    }
+
+    const scene = getScene();
+    if (scene) {
+      const requestRender = (opts?: { delay?: number; repeat?: number }) =>
+        handleDelayedRender(() => scene.requestRender(), opts);
+
+      const cameraController = scene.screenSpaceCameraController;
+      const camera = scene.camera;
 
       cameraController.enableRotate = true;
       cameraController.enableTilt = true;
@@ -63,56 +94,62 @@ export function useObliqueInitializer(debug = false) {
 
       if (isObliqueMode) {
         debug && console.debug("entering Oblique Mode");
-        // If camera already has an oblique-like pitch (e.g., restored from hash), don't override it
-        let isAlreadyOblique = false;
-        ctx.withCamera((camera) => {
-          const p = camera.pitch;
-          const minOblique = -CesiumMath.toRadians(80);
-          const maxOblique = -CesiumMath.toRadians(5);
-          isAlreadyOblique = p > minOblique && p < maxOblique;
-        });
+        const isCameraObliqueCompliant = testCameraObliqueCompliant(
+          camera,
+          obliqueOptions
+        );
 
-        if (isAlreadyOblique) {
+        if (isCameraObliqueCompliant) {
+          debug && console.debug("skipping enter animation");
           enableCameraForceOblique();
           requestRender({ delay: 50, repeat: 2 });
         } else {
-          enterObliqueMode(ctx, originalFovRef, fixedPitch, fixedHeight, () => {
-            enableCameraForceOblique();
-            requestRender({ delay: 50, repeat: 2 });
-          });
+          setSuspendSelectionSearch(true);
+          enterObliqueMode(
+            scene,
+            originalFovRef,
+            fixedPitch,
+            fixedHeight,
+            () => {
+              setSuspendSelectionSearch(false);
+              enableCameraForceOblique();
+              requestRender({ delay: 50, repeat: 2 });
+            }
+          );
         }
       } else {
         debug && console.debug("leaving Oblique Mode", originalFovRef.current);
-        leaveObliqueMode(ctx, originalFovRef, () => {
-          disableCameraForceOblique();
-          requestRender();
-        });
+        leaveObliqueMode(
+          scene,
+          originalFovRef,
+          () => {
+            disableCameraForceOblique();
+            requestRender();
+          },
+          restoreFovOnLeave
+        );
       }
-    });
+    }
 
     return () => {
-      ctx.withViewer((viewer) => {
-        if (viewerPreUpdateHandlers.has(viewer)) {
-          const handlerToRemove = viewerPreUpdateHandlers.get(viewer);
-          viewer.scene.preUpdate.removeEventListener(handlerToRemove!);
-          viewerPreUpdateHandlers.delete(viewer);
-        }
-      });
+      disableCameraForceOblique();
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     debug,
     isObliqueMode,
-    ctx,
-    viewerRef,
+    initialViewApplied,
+    // ctx, // intentionally omitted to prevent re-triggering on context changes
+    getScene,
     fixedPitch,
     fixedHeight,
     minFov,
     maxFov,
-    headingOffset,
+    restoreFovOnLeave,
     setWheelZoomEnabled,
     enableCameraForceOblique,
     disableCameraForceOblique,
-    requestRender,
+    setSuspendSelectionSearch,
   ]);
 
   return {

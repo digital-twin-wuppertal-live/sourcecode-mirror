@@ -5,14 +5,21 @@ import {
   faChevronLeft,
   faChevronRight,
   faChevronUp,
+  faMagnifyingGlass,
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
-import type { SliderSingleProps } from "antd";
 import { forwardRef, useContext, useEffect, useRef } from "react";
 import { TopicMapContext } from "react-cismap/contexts/TopicMapContextProvider";
 import { useDispatch, useSelector } from "react-redux";
+import centroid from "@turf/centroid";
+import L from "leaflet";
 
-import { SELECTED_LAYER_INDEX } from "@carma-appframeworks/portals";
+import {
+  DEFAULT_ADHOC_FEATURE_LAYER_ID,
+  SELECTED_LAYER_INDEX,
+  resolveAdhocSelectionTargetByCollectionId,
+  useAdhocFeatureDisplay,
+} from "@carma-appframeworks/portals";
 import { cn } from "@carma-commons/utils";
 
 import {
@@ -37,17 +44,21 @@ import BaseLayerSelection from "./BaseLayerSelection";
 import LayerInfo from "./LayerInfo";
 import OpacitySlider from "./OpacitySlider";
 import VisibilityToggle from "./VisibilityToggle";
-import { LayerIcon } from "@carma-mapping/components";
+import {
+  LayerIcon,
+  useMapFrameworkSwitcherContext,
+} from "@carma-mapping/components";
+import { resolveAdhocStyleData } from "../../helper/adhoc-feature-utils";
+import { zoomToStyleFeatures } from "../../helper/gisHelper";
+import { setTriggerSelectionById } from "../../store/slices/features";
+import { addAdhocFeatureFromLayer } from "../../helper/adhoc-layer-feature";
 
 type Ref = HTMLDivElement;
 
 interface SecondaryViewProps {}
 
-export const formatter: NonNullable<
-  SliderSingleProps["tooltip"]
->["formatter"] = (value) => `${100 - value * 100}%`;
-
-const SecondaryView = forwardRef<Ref, SecondaryViewProps>(({}, ref) => {
+const SecondaryView = forwardRef<Ref, SecondaryViewProps>(({}, _ref) => {
+  void _ref;
   const { routedMapRef } = useContext<typeof TopicMapContext>(TopicMapContext);
   const infoRef = useRef<HTMLDivElement>(null);
   const dispatch = useDispatch();
@@ -63,7 +74,6 @@ const SecondaryView = forwardRef<Ref, SecondaryViewProps>(({}, ref) => {
       ? [{ OnlineResource: layer.other.vectorLegend }]
       : layer.props?.legend || [];
 
-  const iconName = layer?.other?.icon;
   const icon = layer.title.includes("Orthofoto")
     ? "ortho"
     : layer.title === "Bäume"
@@ -72,6 +82,27 @@ const SecondaryView = forwardRef<Ref, SecondaryViewProps>(({}, ref) => {
     ? "gärten"
     : undefined;
   const isBaseLayer = selectedLayerIndex === -1;
+
+  const {
+    featureCollections,
+    addFeature,
+    setSelectedFeatureById,
+    setShouldFocusSelected,
+  } = useAdhocFeatureDisplay();
+  const { isLeaflet, isCesium } = useMapFrameworkSwitcherContext();
+
+  useEffect(() => {
+    const handleEscapeKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        dispatch(setSelectedLayerIndexNoSelection());
+      }
+    };
+
+    document.addEventListener("keydown", handleEscapeKey);
+    return () => {
+      document.removeEventListener("keydown", handleEscapeKey);
+    };
+  }, [dispatch]);
 
   useEffect(() => {
     const findElementByIdRecursive = (element: Element, id: string) => {
@@ -100,9 +131,19 @@ const SecondaryView = forwardRef<Ref, SecondaryViewProps>(({}, ref) => {
       const openBaseLayerViewButtons = document.querySelectorAll(
         '[id^="openBaseLayerView"]'
       );
+      const filterLayerButtons = document.querySelectorAll(
+        '[id^="filterLayerButton-"]'
+      );
 
-      openBaseLayerViewButtons.forEach((layerButton, i) => {
+      openBaseLayerViewButtons.forEach((layerButton) => {
         if (layerButton.contains(event.target as Node)) {
+          returnFunction = true;
+          return;
+        }
+      });
+
+      filterLayerButtons.forEach((filterButton) => {
+        if (filterButton.contains(event.target as Node)) {
           returnFunction = true;
           return;
         }
@@ -121,7 +162,7 @@ const SecondaryView = forwardRef<Ref, SecondaryViewProps>(({}, ref) => {
         return;
       }
 
-      removeLayerButtons.forEach((layerButton, i) => {
+      removeLayerButtons.forEach((layerButton) => {
         if (layerButton.contains(event.target as Node)) {
           removedOtherLayer = true;
         }
@@ -168,7 +209,7 @@ const SecondaryView = forwardRef<Ref, SecondaryViewProps>(({}, ref) => {
       onClick={() => {
         dispatch(setSelectedLayerIndexNoSelection());
       }}
-      className="pt-4 w-full"
+      className="pt-3 w-full"
     >
       <div className="flex items-center justify-center w-full">
         <div
@@ -234,13 +275,116 @@ const SecondaryView = forwardRef<Ref, SecondaryViewProps>(({}, ref) => {
                   opacity={layer.opacity}
                   id={layer.id}
                   isVisible={layer.visible}
+                  disabled={isCesium}
                 />
               </div>
             </div>
+            {layer.type === "object" && (
+              <button
+                className="hover:text-gray-500 text-gray-600 flex items-center justify-center"
+                onClick={async (e) => {
+                  e.stopPropagation();
+                  if (isLeaflet) {
+                    const styleData = await resolveAdhocStyleData(
+                      layer.props.style
+                    );
+
+                    const leafletMap = routedMapRef?.leafletMap?.leafletElement;
+                    if (styleData && leafletMap) {
+                      let clickFeature: GeoJSON.Feature | undefined;
+                      for (const sourceKey in styleData.sources) {
+                        const source = styleData.sources[sourceKey] as any;
+                        if (
+                          source?.data?.type === "FeatureCollection" &&
+                          source.data.features
+                        ) {
+                          clickFeature = source.data.features.find(
+                            (f: GeoJSON.Feature) => f.geometry
+                          );
+                          if (clickFeature) break;
+                        }
+                      }
+
+                      if (clickFeature?.geometry) {
+                        const center = centroid(
+                          clickFeature as GeoJSON.Feature<GeoJSON.Geometry>
+                        );
+                        const [lng, lat] = center.geometry.coordinates;
+                        const latlngPoint = L.latLng(lat, lng);
+
+                        const fireClick = () => {
+                          leafletMap.fireEvent("click", {
+                            latlng: latlngPoint,
+                            layerPoint:
+                              leafletMap.latLngToLayerPoint(latlngPoint),
+                            containerPoint:
+                              leafletMap.latLngToContainerPoint(latlngPoint),
+                          });
+                        };
+
+                        let fired = false;
+                        const onMoveEnd = () => {
+                          if (fired) return;
+                          fired = true;
+                          leafletMap.off("moveend", onMoveEnd);
+                          setTimeout(fireClick, 300);
+                        };
+
+                        leafletMap.on("moveend", onMoveEnd);
+                        // Fallback: if fitBounds snaps without animation, moveend may already have fired
+                        setTimeout(onMoveEnd, 500);
+                      }
+
+                      await zoomToStyleFeatures(styleData, routedMapRef);
+                    } else {
+                      await zoomToStyleFeatures(styleData, routedMapRef);
+                      dispatch(setTriggerSelectionById(layer.id));
+                    }
+                  } else if (isCesium) {
+                    let didSelectFeature = false;
+                    const selectionTarget =
+                      resolveAdhocSelectionTargetByCollectionId(
+                        featureCollections,
+                        layer.id
+                      );
+
+                    if (selectionTarget) {
+                      setSelectedFeatureById(
+                        selectionTarget.id,
+                        selectionTarget.collectionId,
+                        selectionTarget.layerId
+                      );
+                      didSelectFeature = true;
+                    } else {
+                      const addedFeature = await addAdhocFeatureFromLayer({
+                        layer,
+                        collectionId: layer.id,
+                        layerId: DEFAULT_ADHOC_FEATURE_LAYER_ID,
+                        addFeature,
+                      });
+                      if (addedFeature) {
+                        setSelectedFeatureById(
+                          addedFeature.id,
+                          addedFeature.collectionId,
+                          addedFeature.layerId
+                        );
+                        didSelectFeature = true;
+                      }
+                    }
+                    if (didSelectFeature) {
+                      setShouldFocusSelected(true);
+                    }
+                  }
+                }}
+              >
+                <FontAwesomeIcon icon={faMagnifyingGlass} />
+              </button>
+            )}
             <VisibilityToggle
               visible={layer.visible}
               id={layer.id}
               isBackgroundLayer={isBaseLayer}
+              disabled={isCesium}
             />
             <button
               onClick={() => {

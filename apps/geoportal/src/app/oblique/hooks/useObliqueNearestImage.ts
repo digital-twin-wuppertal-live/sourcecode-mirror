@@ -1,13 +1,16 @@
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef } from "react";
 import knn from "rbush-knn";
+
+import { waitForCondition } from "@carma/cesium";
+import { normalizeOptions } from "@carma-commons/utils";
 
 import {
   sceneHasTweens,
   useCesiumContext,
-  getOrbitPoint,
+  pickSceneCenter,
+  isValidScene,
 } from "@carma-mapping/engines/cesium";
 
-import { useOrbitPoint } from "./useOrbitPoint";
 import { useOblique } from "./useOblique";
 
 import {
@@ -22,43 +25,45 @@ import type { NearestObliqueImageRecord } from "../types";
 
 import { NUM_NEAREST_IMAGES } from "../config";
 
-interface UseObliqueNearestImageOptions {
+export interface UseObliqueNearestImageOptions {
   debounceTime?: number;
   k?: number;
-  // When true, attaches a camera.changed listener for continuous updates
-  continuous?: boolean;
+  maxDistanceMeters?: number;
 }
 
-const defaultOptions: UseObliqueNearestImageOptions = {
+const defaultOptions = {
   debounceTime: 150,
   k: NUM_NEAREST_IMAGES,
-  continuous: false,
-};
+  maxDistanceMeters: 5000,
+} satisfies Required<UseObliqueNearestImageOptions>;
 
-interface RequestNearestArgs {
+export interface RefreshSearchArgs {
   direction?: CardinalDirectionEnum;
   headingRad?: number;
-  immediate?: boolean; // bypass debounce
-  force?: boolean; // allow when suspended
-  computeOnly?: boolean; // don't mutate selection, just return results
+  immediate?: boolean;
+  computeOnly?: boolean;
 }
 
 export function useObliqueNearestImage(
   debug = false,
   options: UseObliqueNearestImageOptions = defaultOptions
 ) {
-  const ctx = useCesiumContext();
-  const { viewerRef, isValidViewer } = ctx;
+  const { getScene, initialViewApplied } = useCesiumContext();
   const lastSearchTimeRef = useRef<number>(0);
+  const { debounceTime, k, maxDistanceMeters } = useMemo(
+    () => normalizeOptions(options, defaultOptions),
+    [options]
+  );
   const {
     converter,
     headingOffset,
     imageRecords,
-    setSelectedImageDistance,
     setSelectedImage,
+    selectedImageDistanceRef,
     selectedImage,
     footprintCenterpointsRBushByCardinals,
     isObliqueMode,
+    lockFootprint,
     suspendSelectionSearch,
     requestedHeadingRef,
   } = useOblique();
@@ -68,26 +73,27 @@ export function useObliqueNearestImage(
   const lastKeyRef = useRef<string | null>(null);
   const lastResultsRef = useRef<NearestObliqueImageRecord[] | null>(null);
 
-  const orbitPoint = useOrbitPoint(isObliqueMode);
-
-  // On-demand nearest-image search. Optionally override search heading
   const refreshSearch = useCallback(
-    (args?: RequestNearestArgs): NearestObliqueImageRecord[] | undefined => {
-      // Check if the search is enabled; allow override via args.force
-      const force = !!args?.force;
-      if (!isObliqueMode || (suspendSelectionSearch && !force)) {
+    (args?: RefreshSearchArgs): NearestObliqueImageRecord[] | undefined => {
+      // Check if the search is enabled
+      if (
+        !isObliqueMode ||
+        (lockFootprint && !args?.computeOnly) ||
+        (suspendSelectionSearch && !args?.computeOnly)
+      ) {
         debug && console.debug("refreshSearch skipped - disabled");
         return;
       }
 
-      const viewer = viewerRef.current;
-      if (
-        !isValidViewer() ||
-        !imageRecords ||
-        !imageRecords.size ||
-        !converter
-      ) {
+      if (!imageRecords || !imageRecords.size || !converter) {
         return;
+      }
+
+      const scene = getScene();
+      if (!isValidScene(scene)) return;
+
+      if (scene.globe && scene.globe.depthTestAgainstTerrain !== true) {
+        scene.globe.depthTestAgainstTerrain = true;
       }
 
       const now = Date.now();
@@ -109,20 +115,14 @@ export function useObliqueNearestImage(
       const usedOverride = typeof overrideHeading === "number";
       const timeDelta = now - lastSearchTimeRef.current;
       const bypassDebounce = !!args?.immediate;
-      if (
-        !usedOverride &&
-        !bypassDebounce &&
-        timeDelta < (options.debounceTime || defaultOptions.debounceTime)
-      ) {
+      if (!usedOverride && !bypassDebounce && timeDelta < debounceTime) {
         debug && console.debug("Skipping refreshSearch");
         return;
       }
       lastSearchTimeRef.current = now;
 
-      debug && console.debug(" refreshSearch");
-
       try {
-        const camera = viewer.camera;
+        const camera = scene.camera;
         const cartographic = camera.positionCartographic;
         if (!cartographic) return;
 
@@ -135,16 +135,11 @@ export function useObliqueNearestImage(
         const cameraCardinal =
           getCardinalDirectionFromHeading(effectiveHeading);
 
-        // Fallback to computing orbit point directly if shared orbit point isn't initialized yet
-        const orbit = orbitPoint ?? getOrbitPoint(ctx);
+        const orbit = pickSceneCenter(scene);
         const orbitPointCoords = orbit
           ? calculateImageCoordsFromCartesian(orbit, converter)
           : null;
 
-        // Calculate the point on ground based on camera pitch and heading
-        // For nearest search we use orbit center as query point; ground/radius calcs omitted here
-
-        // The orbit point coordinates are fetched by the useOrbitPoint hook
         if (!orbitPointCoords) return;
 
         // Create the search point in local CRS coordinates, relative to orbit point
@@ -153,13 +148,10 @@ export function useObliqueNearestImage(
           x: orbitPointCoords[0],
           y: orbitPointCoords[1],
         };
-        const k = options.k || defaultOptions.k;
+
         const frameId =
-          (
-            viewer as unknown as {
-              scene?: { frameState?: { frameNumber?: number } };
-            }
-          )?.scene?.frameState?.frameNumber ?? null;
+          (scene as { frameState?: { frameNumber?: number } }).frameState
+            ?.frameNumber ?? null;
         const key = `${Math.round(orbitPointTargetCrs.x)}:${Math.round(
           orbitPointTargetCrs.y
         )}:${cameraCardinal}:${k}:${
@@ -175,14 +167,12 @@ export function useObliqueNearestImage(
           return lastResultsRef.current;
         }
 
-        // Find and set nearest images
         let filteredImages: NearestObliqueImageRecord[] = [];
 
         const centerpoints = footprintCenterpointsRBushByCardinals;
 
         if (centerpoints && centerpoints.has(cameraCardinal)) {
           const sectorTree = centerpoints.get(cameraCardinal);
-          debug && console.debug("sectorTree", sectorTree);
           if (sectorTree) {
             try {
               // Use the pre-built spatial index for this sector
@@ -203,6 +193,19 @@ export function useObliqueNearestImage(
                   const distanceToCamera = Math.sqrt(
                     dxCam * dxCam + dyCam * dyCam
                   );
+
+                  // Discard images too far from camera (race condition protection)
+                  if (distanceToCamera > maxDistanceMeters) {
+                    debug &&
+                      console.debug(
+                        `Discarding image ${
+                          item.id
+                        }: distance ${distanceToCamera.toFixed(
+                          0
+                        )}m > ${maxDistanceMeters}m`
+                      );
+                    return null;
+                  }
 
                   const dxGround = orbitPointTargetCrs.x - item.x;
                   const dyGround = orbitPointTargetCrs.y - item.y;
@@ -253,10 +256,10 @@ export function useObliqueNearestImage(
             if (selectedImage?.record?.id !== next.record.id) {
               setSelectedImage(next);
             }
-            setSelectedImageDistance(next.distanceOnGround);
+            selectedImageDistanceRef.current = next.distanceOnGround;
           } else {
             if (selectedImage !== null) setSelectedImage(null);
-            setSelectedImageDistance(null);
+            selectedImageDistanceRef.current = null;
           }
         }
 
@@ -266,59 +269,109 @@ export function useObliqueNearestImage(
       }
     },
     [
-      viewerRef,
+      getScene,
       imageRecords,
       converter,
       headingOffset,
-      options.k,
-      options.debounceTime,
-      orbitPoint,
+      debounceTime,
+      k,
+      maxDistanceMeters,
       footprintCenterpointsRBushByCardinals,
-      setSelectedImageDistance,
       setSelectedImage,
+      selectedImageDistanceRef,
       isObliqueMode,
+      lockFootprint,
       suspendSelectionSearch,
       requestedHeadingRef,
       selectedImage,
       debug,
     ]
-  ); // Include all dependencies for proper updates
+  );
 
-  // Expose the on-request API via context as early as possible
-  // Note: selection refresh is now managed by ObliqueProvider.
-
-  // Optional continuous updates via camera.changed listener
+  // Attach camera listeners for automatic updates when in oblique mode
+  // Initial search waits until the initial camera view has been applied and rendered.
   const timerIdRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const refreshSearchRef = useRef(refreshSearch);
+  refreshSearchRef.current = refreshSearch;
+  const initialSearchDoneRef = useRef(false);
+  const initialSearchInFlightRef = useRef(false);
+
   useEffect(() => {
-    if (!options.continuous) return;
-    const viewer = viewerRef.current;
     if (
       !isObliqueMode ||
+      lockFootprint ||
       suspendSelectionSearch ||
-      !isValidViewer() ||
       !imageRecords ||
-      !imageRecords.size
+      !imageRecords.size ||
+      !initialViewApplied
     ) {
       return;
     }
 
-    // Initial update
-    refreshSearch({ immediate: true });
+    let cancelled = false;
+
+    const scene = getScene();
+    if (!isValidScene(scene)) return;
 
     const handleCameraMove = () => {
-      if (suspendSelectionSearch) return;
       if (timerIdRef.current) clearTimeout(timerIdRef.current);
       timerIdRef.current = setTimeout(() => {
-        if (!sceneHasTweens(viewer) && !suspendSelectionSearch) {
-          refreshSearch();
+        if (!sceneHasTweens(scene)) {
+          refreshSearchRef.current();
         }
-      }, options.debounceTime || defaultOptions.debounceTime);
+      }, debounceTime);
     };
 
-    viewer.camera.changed.addEventListener(handleCameraMove);
+    scene.camera.changed.addEventListener(handleCameraMove);
+    scene.camera.moveEnd.addEventListener(handleCameraMove);
+
+    if (!initialSearchDoneRef.current && !initialSearchInFlightRef.current) {
+      initialSearchInFlightRef.current = true;
+      (async () => {
+        try {
+          await waitForCondition(
+            scene,
+            (scene) => {
+              if (
+                cancelled ||
+                !isValidScene(scene) ||
+                initialSearchDoneRef.current
+              ) {
+                return true;
+              }
+
+              // Ensure picking works before we commit selection
+              const center = pickSceneCenter(scene);
+              if (!center) return false;
+
+              const computed = refreshSearchRef.current({
+                immediate: true,
+                computeOnly: true,
+              });
+              if (!computed || computed.length === 0) return false;
+
+              const committed = refreshSearchRef.current({ immediate: true });
+              if (committed && committed.length > 0) {
+                initialSearchDoneRef.current = true;
+                return true;
+              }
+
+              return false;
+            },
+            600,
+            "postRender"
+          );
+        } finally {
+          initialSearchInFlightRef.current = false;
+        }
+      })();
+    }
+
     return () => {
-      if (viewer && !viewer.isDestroyed()) {
-        viewer.camera.changed.removeEventListener(handleCameraMove);
+      cancelled = true;
+      if (!scene.isDestroyed()) {
+        scene.camera.changed.removeEventListener(handleCameraMove);
+        scene.camera.moveEnd.removeEventListener(handleCameraMove);
       }
       if (timerIdRef.current) {
         clearTimeout(timerIdRef.current);
@@ -326,16 +379,15 @@ export function useObliqueNearestImage(
       }
     };
   }, [
-    options.continuous,
-    viewerRef,
+    getScene,
     imageRecords,
-    refreshSearch,
-    options.debounceTime,
     isObliqueMode,
+    initialViewApplied,
+    lockFootprint,
+    debounceTime,
     suspendSelectionSearch,
   ]);
 
-  // Only return the on-request search callback
   return refreshSearch;
 }
 

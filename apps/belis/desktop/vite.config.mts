@@ -7,11 +7,11 @@ import { viteStaticCopy } from 'vite-plugin-static-copy'
 
 export default defineConfig({
   root: __dirname,
-  cacheDir: '../../../node_modules/.vite/apps/belis/online',
+  cacheDir: '../../../node_modules/.vite/apps/belis/desktop',
 
   server: {
     port: 4200,
-    host: 'localhost',
+    host: true,
     fs: {
       allow: ['../../..'],
     },
@@ -52,10 +52,25 @@ export default defineConfig({
   },
 
   build: {
-    outDir: '../../../dist/apps/belis/online',
+    outDir: '../../../dist/apps/belis/desktop',
+    emptyOutDir: true,
     reportCompressedSize: true,
+    target: 'es2022',
     commonjsOptions: {
       transformMixedEsModules: true,
+    },
+  },
+
+  optimizeDeps: {
+    include: ['maplibre-gl'],
+    esbuildOptions: {
+      target: 'es2022',
+    },
+  },
+
+  esbuild: {
+    supported: {
+      'class-static-field': true,
     },
   },
 

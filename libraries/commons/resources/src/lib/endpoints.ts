@@ -18,6 +18,7 @@ export enum ENDPOINT {
   NO2 = "no2",
   QUARTIERE = "quartiere",
   POIS = "pois",
+  TOILETTEN = "toiletten",
   VORHABEN = "vorhabenkarte",
 }
 
@@ -27,6 +28,7 @@ export const NAMED_CATEGORIES: Partial<NamedCategory> = Object.freeze({
   [ENDPOINT.POIS]: "POIS",
   [ENDPOINT.BPKLIMASTANDORTE]: "Klimastandorte",
   [ENDPOINT.KITAS]: "Kitas",
+  [ENDPOINT.TOILETTEN]: "Toiletten",
   [ENDPOINT.BEZIRKE]: "Bezirke",
   [ENDPOINT.QUARTIERE]: "Quartiere",
   [ENDPOINT.ADRESSEN]: "Adressen",
@@ -50,6 +52,7 @@ export const DEFAULT_GAZ_SOURCES: ENDPOINT[] = [
   ENDPOINT.QUARTIERE,
   ENDPOINT.POIS,
   ENDPOINT.KITAS,
+  ENDPOINT.TOILETTEN,
   // ENDPOINT.VORHABEN,
 ];
 
@@ -120,6 +123,7 @@ export const defaultGazDataConfig = {
     return createConfig(endpoint, { crs: DEFAULT_PROJ, host: DEFAULT_HOST });
   }),
   prefix: gazDataPrefix,
+  landParcelUrl: "https://wunda-geoportal.cismet.de/data/4326/fstck.json",
 };
 
 export const isEndpoint = (value: string): value is ENDPOINT => {

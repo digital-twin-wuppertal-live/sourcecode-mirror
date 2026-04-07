@@ -430,9 +430,8 @@ export const createOrUpdateVisibleCategory = (
     dropdownContainerRef.current.appendChild(categoryWrapper);
   } else {
     const stickyTitle = document.getElementById("advance-title-text");
-    const category = getCategoryNameInFirstSearchItem();
-    if (stickyTitle) {
-      stickyTitle.innerText = category ? category : firstCategoryText;
+    if (stickyTitle && firstCategoryText) {
+      stickyTitle.innerText = firstCategoryText;
     }
   }
 };
@@ -440,7 +439,7 @@ export const createOrUpdateVisibleCategory = (
 export const getCategoryNameInFirstSearchItem = () => {
   const itemWithCategory = document.querySelectorAll("[data-category]");
   const firstTitle = itemWithCategory[0] as HTMLElement;
-  const category = firstTitle.dataset.category;
+  const category = firstTitle?.dataset?.category;
 
   return category;
 };
@@ -474,7 +473,7 @@ export const useCreateGazetteerSelectorForLeaflet = ({
 
   const { setSelection } = useSelection();
 
-  const onGazetteerSelection = (selection) => {
+  const onGazetteerSelection = (selection, skipMapMovement = false) => {
     before();
     if (!selection) {
       setSelection(null);
@@ -482,7 +481,7 @@ export const useCreateGazetteerSelectorForLeaflet = ({
     }
     const selectionMetaData = {
       selectedFrom: "gazetteer",
-      selectionTimestamp: Date.now(),
+      selectionTimestamp: skipMapMovement ? null : Date.now(),
       isAreaSelection: isAreaType(selection.type),
     };
     setSelection(Object.assign({}, selection, selectionMetaData));

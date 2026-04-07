@@ -1,12 +1,7 @@
 import { useContext, useEffect, useState, useRef } from "react";
 import { useDispatch, useSelector } from "react-redux";
 
-import { isEqual } from "lodash";
-import envelope from "@turf/envelope";
-
-// import InfoBox from "react-cismap/topicmaps/InfoBox";
 import InfoBoxFotoPreview from "react-cismap/topicmaps/InfoBoxFotoPreview";
-import { getActionLinksForFeature } from "react-cismap/tools/uiHelper";
 import { TopicMapContext } from "react-cismap/contexts/TopicMapContextProvider";
 import { LightBoxDispatchContext } from "react-cismap/contexts/LightBoxContextProvider";
 
@@ -28,8 +23,7 @@ import {
   setPreferredVectorLayerId,
 } from "../../store/slices/features";
 import { getLayers } from "../../store/slices/mapping";
-import { getCoordinates } from "../GeoportalMap/topicmap.utils";
-import { truncateString, updateUrlWithCoordinates } from "./featureInfoHelper";
+import { truncateString } from "./featureInfoHelper";
 
 import "../infoBox.css";
 import LoadingInfoBox from "./LoadingInfoBox";
@@ -40,20 +34,40 @@ import {
   isHtmlString,
   updateUrl,
 } from "@carma-commons/utils";
-import { InfoBox, InfoBoxHeader, utils } from "@carma-appframeworks/portals";
+import {
+  InfoBox,
+  InfoBoxHeader,
+  utils,
+  getActionLinksForFeature,
+} from "@carma-appframeworks/portals";
 import { parseColor } from "../../helper/color";
+import { useFeatureFlags } from "@carma-providers/feature-flag";
+import { addCustomFeatureFlags } from "../../store/slices/layers";
+import type { FeatureInfo } from "@carma/types";
+import { selectionPadding } from "../../constants/selection";
 
 interface InfoBoxProps {
   pos?: [number, number];
+  onZoomToFeature?: (feature: FeatureInfo) => void;
+  displayOrbit?: boolean;
+  isOrbiting?: boolean;
+  onOrbitToggle?: () => void;
 }
 
-const FeatureInfoBox = ({ pos }: InfoBoxProps) => {
+const FeatureInfoBox = ({
+  pos,
+  onZoomToFeature,
+  displayOrbit = false,
+  isOrbiting = false,
+  onOrbitToggle,
+}: InfoBoxProps) => {
   const [open, setOpen] = useState(false);
   const [shouldRenderLoadingInfobox, setShouldRenderLoadingInfobox] =
     useState(false);
   const [headerColor, setHeaderColor] = useState<string>("");
   const [parsedHeader, setParsedHeader] = useState<string>("");
   const dispatch = useDispatch();
+  const flags = useFeatureFlags();
 
   const loadingFeatureInfo = useSelector(getLoading);
   const selectedFeature = useSelector(getSelectedFeature);
@@ -121,7 +135,7 @@ const FeatureInfoBox = ({ pos }: InfoBoxProps) => {
 
   const canZoomToFeature = (selectedFeature) => {
     if (
-      selectedFeature.properties?.wmsProps?.bounds ||
+      selectedFeature.properties?.sourceProps?.bounds ||
       selectedFeature.geometry
     ) {
       return true;
@@ -129,16 +143,51 @@ const FeatureInfoBox = ({ pos }: InfoBoxProps) => {
     return false;
   };
 
+  useEffect(() => {
+    if (selectedFeature?.properties?.ffmodal) {
+      dispatch(
+        addCustomFeatureFlags({
+          [selectedFeature.properties.ffmodal]: {
+            alias: selectedFeature.properties.ffmodal,
+            default: false,
+          },
+        })
+      );
+    }
+  }, [selectedFeature, dispatch]);
+
+  const shouldDisplaySecondaryInfo = (() => {
+    if (!selectedFeature?.properties) return false;
+
+    if (selectedFeature.properties.modal) return true;
+
+    // if ffmodal is used check for the it as a feature flag
+    if (selectedFeature.properties.ffmodal) {
+      return !!flags[selectedFeature.properties.ffmodal];
+    }
+    return false;
+  })();
+
   if (selectedFeature && canZoomToFeature(selectedFeature)) {
     links = getActionLinksForFeature(selectedFeature, {
-      displaySecondaryInfoAction: !!selectedFeature?.properties?.modal,
+      displaySecondaryInfoAction: shouldDisplaySecondaryInfo,
       setVisibleStateOfSecondaryInfo: () => {
         setOpen(true);
       },
       displayZoomToFeature: true,
       zoomToFeature: () => {
-        utils.zoomToFeature(selectedFeature, routedMapRef, [60, 60]);
+        utils.zoomToFeature({
+          selectedFeature,
+          leafletMap: routedMapRef?.leafletMap?.leafletElement,
+          padding: selectionPadding,
+        });
+        if (onZoomToFeature) {
+          onZoomToFeature(selectedFeature as FeatureInfo);
+        }
       },
+      displayOrbit,
+      isOrbiting,
+      onOrbitToggle,
     });
   }
 
@@ -159,8 +208,11 @@ const FeatureInfoBox = ({ pos }: InfoBoxProps) => {
   }, [loadingFeatureInfo]);
 
   useEffect(() => {
-    if (selectedFeature && selectedFeature.properties.wmsProps) {
-      console.log("feature properties:", selectedFeature.properties.wmsProps);
+    if (selectedFeature && selectedFeature.properties.sourceProps) {
+      console.log(
+        "feature properties:",
+        selectedFeature.properties.sourceProps
+      );
     }
 
     const updateHeaderAndColor = async () => {
@@ -168,7 +220,7 @@ const FeatureInfoBox = ({ pos }: InfoBoxProps) => {
       if (selectedFeature?.properties?._header) {
         const header = await utils.parseHeader(
           selectedFeature.properties._header,
-          selectedFeature.properties.wmsProps ?? {}
+          selectedFeature.properties.sourceProps ?? {}
         );
         setParsedHeader(header || "Informationen");
       } else {
@@ -179,7 +231,7 @@ const FeatureInfoBox = ({ pos }: InfoBoxProps) => {
       if (selectedFeature?.properties?.accentColor) {
         const color = await parseColor(
           selectedFeature.properties.accentColor,
-          selectedFeature.properties.wmsProps ?? {}
+          selectedFeature.properties.sourceProps ?? {}
         );
         setHeaderColor(color || "#0078a8");
       } else {
@@ -219,15 +271,21 @@ const FeatureInfoBox = ({ pos }: InfoBoxProps) => {
         }}
       >
         <InfoBoxHeader
-          content={feature.properties.header || feature.properties._header}
+          content={
+            feature.properties.header ||
+            feature.properties._header ||
+            "Informationen"
+          }
           headerColor={"grey"}
-          properties={feature.properties.wmsProps}
+          properties={feature.properties.sourceProps}
         ></InfoBoxHeader>
       </div>
     );
   });
 
-  const Modal = additionalInfoFactory(selectedFeature?.properties?.modal);
+  const Modal = additionalInfoFactory(
+    selectedFeature?.properties?.ffmodal ?? selectedFeature?.properties?.modal
+  );
 
   if (!headerColor) {
     return <></>;
@@ -287,9 +345,12 @@ const FeatureInfoBox = ({ pos }: InfoBoxProps) => {
       {open && Modal && (
         <Modal
           setOpen={() => setOpen(false)}
-          feature={{
-            properties: selectedFeature.properties.wmsProps,
-          }}
+          feature={
+            selectedFeature.properties.sourceProps?.properties ||
+            selectedFeature.properties.sourceProps?.targetProperties
+              ? selectedFeature.properties.sourceProps
+              : { properties: selectedFeature.properties.sourceProps }
+          }
           versionString={getApplicationVersion(versionData)}
           Footer={genericSecondaryInfoFooterFactory({
             skipTeilzwilling: true,

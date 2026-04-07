@@ -5,27 +5,26 @@ import type {
   Cesium3DTileset,
   CesiumTerrainProvider,
   EllipsoidTerrainProvider,
-  EntityCollection,
   ImageryLayer,
   Scene,
-  Viewer,
-} from "cesium";
-import { ViewerAnimationMap } from "./utils/viewerAnimationMap";
+} from "@carma/cesium";
+// legacy types, prefer using scene, graphic primitives and CesiumWidget where possible
+// eslint-disable-next-line carma/no-direct-cesium
+import type { EntityCollection, Viewer } from "cesium";
+
+import { SceneAnimationMap } from "./utils/sceneAnimationMap";
 
 export interface CesiumContextType {
   viewerRef: MutableRefObject<Viewer | null>;
-  viewerAnimationMapRef: MutableRefObject<ViewerAnimationMap | null>;
+  sceneAnimationMapRef: MutableRefObject<SceneAnimationMap | null>;
   shouldSuspendPitchLimiterRef: MutableRefObject<boolean>;
   shouldSuspendCameraLimitersRef: MutableRefObject<boolean>;
   isViewerReady: boolean;
   setIsViewerReady: (flag: boolean) => void;
   providersReady: boolean;
-  // null: not started determining; false: determining/applying; true: settled
-  initialCameraSettled: boolean | null;
-  setInitialCameraSettled: (flag: boolean | null) => void;
-  // Monotonic counter that increments each time an initial camera apply sequence starts
-  initialCameraEpoch: number;
-  bumpInitialCameraEpoch: () => void;
+  // Track when initial camera view from URL has been applied
+  initialViewApplied: boolean;
+  setInitialViewApplied: (flag: boolean) => void;
   requestRender: (opts?: {
     delay?: number; // ms
     repeat?: number; // times

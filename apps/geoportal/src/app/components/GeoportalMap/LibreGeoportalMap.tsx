@@ -411,6 +411,7 @@ const LibreGeoportalMap = ({
                   dispatch,
                   selectionHandler,
                   map: map.current,
+                  store: store,
                 }
               );
             }
@@ -686,7 +687,7 @@ const LibreGeoportalMap = ({
         const hits = globalHits[selectedFeature.id];
         if (hits) {
           hits.forEach((hit) => {
-            if (hit.id === selectedFeature.properties.wmsProps.vectorId) {
+            if (hit.id === selectedFeature.properties.sourceProps.vectorId) {
               hit.setSelection(true, hit);
             } else {
               hit.setSelection(false, hit);

@@ -5,6 +5,11 @@ export {
   fovToCssPerspectiveByFov,
 } from "./cesiumCameraToCssTransform";
 export { guardCamera } from "./guardCamera";
+export {
+  cesiumCameraForceOblique,
+  testCameraObliqueCompliant,
+  type CameraForceObliqueOptions,
+} from "./cesiumCameraForceOblique";
 
 // Scene utilities
 export { guardScene } from "./guardScene";
@@ -16,16 +21,19 @@ export {
   cesiumAnimateFov,
   type CesiumAnimateFovOptions,
 } from "./cesiumAnimateFov";
-export {
-  getOrbitPoint,
-  getHeadingPitchForMouseEvent,
-} from "./cesiumAnimateOrbits";
+export { getHeadingPitchForMouseEvent } from "./cesiumAnimateOrbits";
 export { animateInterpolateHeadingPitchRange } from "./cesiumAnimations";
+export { animateOpacity } from "./animateOpacity";
 export {
-  type ViewerAnimationMap,
-  cancelViewerAnimation,
-  initViewerAnimationMap,
-} from "./viewerAnimationMap";
+  applyGeometryInstanceOpacity,
+  readGeometryInstanceOpacity,
+} from "./geometryInstanceOpacity";
+export type { GeometryInstanceRef } from "./geometryInstanceOpacity";
+export {
+  type SceneAnimationMap,
+  cancelSceneAnimation,
+  initSceneAnimationMap,
+} from "./sceneAnimationMap";
 
 export {
   distanceFromZoomLevel,
@@ -34,7 +42,7 @@ export {
 } from "./positions";
 
 // Pickers and pixels
-export { pickScenePositions } from "./pick-position/pick-scene-positions";
+export * from "./pick-position";
 
 // Elevation
 export {
@@ -44,6 +52,12 @@ export {
   type ElevationResult,
 } from "./elevation";
 export { guardSampleTerrainMostDetailedAsync } from "./guardSampleTerrainMostDetailedAsync";
+export {
+  addElevationsToGeoJson,
+  geoJsonHasMissingElevations,
+  type GeoJsonElevationOptions,
+  type GeoJsonElevationResult,
+} from "./geojson-elevation";
 
 // Ground primitives
 export {
@@ -52,6 +66,58 @@ export {
   removeGroundPrimitiveById,
 } from "./cesiumGroundPrimitives";
 export { guardPrimitiveCollection } from "./guardPrimitiveCollection";
+
+// Adhoc primitives
+export { createSelectionEdgePrimitive } from "./adhoc-primitives/create-selection-edge-primitive";
+export {
+  createWallPrimitives,
+  type WallPrimitivesResult,
+  type WallPrimitiveSegment,
+} from "./adhoc-primitives/create-wall-primitives";
+export { getBoundingSphereFromCoordinates } from "@carma/cesium";
+export {
+  getBoundingSphereFromGeoJson,
+  getBoundingSphereFromGeoJsonGeometry,
+  getCoordinatesFromGeoJson,
+  getGeoJsonGeometryCacheKey,
+  getCoordinatesFromGeoJsonGeometry,
+  getProviderScopedCache,
+  getTerrainAwareBoundingSphereFromFeature,
+  getTerrainAwareBoundingSphereFromGeoJsonGeometry,
+} from "./getBoundingSphereFromGeoJsonGeometry";
+export {
+  createExtrudedWallVisualizer,
+  type ExtrudedWallVisualizer,
+  type ExtrudedWallVisualizerOptions,
+} from "./createExtrudedWallVisualizer";
+export {
+  createGroundPolylineVisualizer,
+  type GroundPolylineVisualizer,
+  type GroundPolylineVisualizerOptions,
+} from "./createGroundPolylineVisualizer";
+export {
+  createGroundPolygonVisualizer,
+  type GroundPolygonVisualizer,
+  type GroundPolygonVisualizerOptions,
+} from "./createGroundPolygonVisualizer";
+export {
+  createLineVisualizer,
+  type LineVisualizer,
+  type LineVisualizerOptions,
+} from "./createLineVisualizer";
+export {
+  createRotationAxisVisualizer,
+  type RotationAxisVisualizer,
+  type RotationAxisVisualizerOptions,
+} from "./createRotationAxisVisualizer";
+export { createModelPrimitiveFromConfig } from "./createModelPrimitiveFromConfig";
+export { DEFAULT_MODEL_HIGHLIGHT_SHADER } from "./modelHighlightShader";
+export {
+  buildModelKey,
+  extractPickedProperties,
+  getPrimitiveSelectionId,
+  isModelPick,
+} from "./modelManager";
 
 // Tileset
 export { guardTileset } from "./guardTileset";
@@ -70,14 +136,6 @@ export {
   triggerCesiumRenderError,
   triggerCesiumShowErrorPanel,
 } from "./cesiumErrorHandling";
-
-// Hash params codec
-export {
-  encodeCesiumCamera,
-  decodeCesiumCamera,
-  cesiumCameraParamKeys,
-  cesiumClearParamKeys,
-} from "./cesiumHashParamsCodec";
 
 // Instance validation gates
 export {

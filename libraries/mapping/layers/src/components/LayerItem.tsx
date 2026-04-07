@@ -29,6 +29,7 @@ import { getSelectedLayer, setSelectedLayer } from "../slices/mapLayers";
 import { setTriggerRefetch } from "../slices/ui";
 import ImageCollage from "./ImageCollage";
 import type { ActiveLayers } from "./NewLibModal";
+import ThumbnailDisplay from "./ThumbnailDisplay";
 
 interface LayerItemProps {
   setAdditionalLayers: any;
@@ -81,6 +82,7 @@ const LayerItem = ({
   const showInfo = selectedLayer?.id === layer.id;
   const canShowInfo =
     layer.type === "layer" ||
+    layer.type === "object" ||
     (layer.type === "link" && layer.description) ||
     (layer.type === "collection" && layer.description);
   const canFavoriteItem =
@@ -214,7 +216,6 @@ const LayerItem = ({
         onMouseEnter={() => setHovered(true)}
         onMouseLeave={() => setHovered(false)}
         onClick={() => {
-          console.log("xxx", layer);
           if (canShowInfo) {
             dispatch(setSelectedLayer(showInfo ? null : layer));
           }
@@ -236,17 +237,13 @@ const LayerItem = ({
           {showWithoutThumbnail ||
           (layer.id.includes("custom") && !layer.thumbnail) ? (
             <div style={{ height: "100%", width: "100%" }}>
-              <img
-                src={extServiceBackgroundImage}
-                alt={title}
-                loading="lazy"
-                style={{ objectPosition: "50% 35%" }}
-                className={`object-cover relative h-full overflow-clip w-[calc(130%+7.2px)] ${
-                  hovered && "scale-110"
-                } transition-all duration-200`}
+              <ThumbnailDisplay
+                url={extServiceBackgroundImage}
+                hovered={hovered}
                 onLoad={(e) => {
                   setIsLoading(false);
                 }}
+                loading="lazy"
               />
               <div className="absolute inset-0 flex items-start justify-center pt-[5%]">
                 <span className="text-black/40 text-2xl font-bold">
@@ -255,16 +252,14 @@ const LayerItem = ({
               </div>
             </div>
           ) : layer.type !== "collection" || layer.thumbnail ? (
-            <img
-              src={updateUrl(layer.thumbnail)}
-              alt={title}
-              loading="lazy"
-              className={`object-cover relative h-full overflow-clip w-[calc(130%+7.2px)] ${
-                hovered && "scale-110"
-              } transition-all duration-200`}
+            <ThumbnailDisplay
+              url={layer.thumbnail}
+              updateUrl
+              hovered={hovered}
               onLoad={(e) => {
                 setIsLoading(false);
               }}
+              loading="lazy"
             />
           ) : layer.type === "collection" ? (
             <ImageCollage layer={layer} />
@@ -432,7 +427,10 @@ const LayerItem = ({
           open={openDeleteModal}
           onCancel={() => setOpenDeleteModal(false)}
         >
-          <div className="flex flex-col gap-2 p-4">
+          <div
+            data-test-id="confirm-delete-collection-dialog"
+            className="flex flex-col gap-2 p-4"
+          >
             <h3 className="text-lg">
               Zusammenstellung {title} wirklich löschen?
             </h3>
@@ -446,6 +444,7 @@ const LayerItem = ({
               <Button
                 danger
                 loading={loading}
+                data-test-id="confirm-delete-collection-submit"
                 onClick={() => {
                   setOpenDeleteModal(false);
                   if (layer.serviceName.includes("discover")) {

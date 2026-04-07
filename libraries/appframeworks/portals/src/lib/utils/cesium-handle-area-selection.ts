@@ -1,8 +1,6 @@
 import {
   BoundingSphere,
-  Cartesian3,
   Cartographic,
-  CesiumTerrainProvider,
   ClassificationType,
   Color,
   ColorGeometryInstanceAttribute,
@@ -11,8 +9,9 @@ import {
   HeadingPitchRange,
   PerspectiveFrustum,
   PolygonGeometry,
-  Scene,
-} from "cesium";
+  getBoundingSphereFromCoordinates,
+} from "@carma/cesium";
+import type { CesiumTerrainProvider, Scene } from "@carma/cesium";
 
 import {
   getElevationAsync,
@@ -55,16 +54,6 @@ const getFullViewDistance = (
   distance = effectiveRadius / tanHalfNarrowestFov;
 
   return distance;
-};
-
-const getBoundingSphereFromCoordinatesAndHeight = (
-  coordinates: number[][],
-  height: number = DEFAULT_BOUNDING_SPHERE_ELEVATION
-): BoundingSphere => {
-  const points = coordinates.map((coord) =>
-    Cartesian3.fromDegrees(coord[0], coord[1], coord[2] ?? height)
-  );
-  return BoundingSphere.fromPoints(points);
 };
 
 const handlePolygonSelection = (
@@ -136,10 +125,10 @@ const handlePolygonSelection = (
 
   // Always handle flyTo logic (independent of marker update)
   if (!skipFlyTo) {
-    const boundingSphere = getBoundingSphereFromCoordinatesAndHeight(
-      polygon[0],
-      groundPosition?.height
-    );
+    const height = groundPosition?.height;
+    const boundingSphere = getBoundingSphereFromCoordinates(polygon[0], {
+      defaultHeight: height ?? DEFAULT_BOUNDING_SPHERE_ELEVATION,
+    });
 
     const fullViewDistance = getFullViewDistance(scene, boundingSphere);
     console.debug(

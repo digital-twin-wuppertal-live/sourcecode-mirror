@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
+
 import {
   applyRollToHeadingForCameraNearNadir,
   Cartesian3,
@@ -8,22 +9,19 @@ import {
   ScreenSpaceEventHandler,
   ScreenSpaceEventType,
 } from "@carma/cesium";
-
 import type { Radians, Meters } from "@carma/units/types";
 
 import { useCesiumContext } from "../../../hooks/useCesiumContext";
-
 import {
   animateCamera,
   getHeadingPitchForMouseEvent,
-  getOrbitPoint,
   PITCH,
 } from "../../../utils/cesiumAnimateOrbits";
 import { guardCamera } from "../../../utils/guardCamera";
 import { isValidScreenSpaceEventHandler } from "../../../utils/instanceGates";
-import { cancelViewerAnimation } from "../../../utils/viewerAnimationMap";
+import { pickSceneCenter } from "../../../utils/pick-position/pick-scene-positions";
+import { cancelSceneAnimation } from "../../../utils/sceneAnimationMap";
 import { Needle } from "./Needle";
-
 interface RotateButtonProps {
   minPitch?: Radians;
   maxPitch?: Radians;
@@ -52,7 +50,7 @@ export const PitchingCompass: React.FC<RotateButtonProps> = ({
   headingFactor = 1,
 }) => {
   const cesiumCtx = useCesiumContext();
-  const { viewerAnimationMapRef } = cesiumCtx;
+  const { sceneAnimationMapRef } = cesiumCtx;
   const [isControlMouseDown, setIsControlMouseDown] = useState(false);
   const [initialMouseX, setInitialMouseX] = useState(0);
   const [initialMouseY, setInitialMouseY] = useState(0);
@@ -68,8 +66,9 @@ export const PitchingCompass: React.FC<RotateButtonProps> = ({
   const handleMouseDown = useCallback(
     (event: React.MouseEvent<HTMLDivElement>) => {
       shouldSuspendPitchLimiterRef.current = true;
-      cesiumCtx.withCamera((camera, viewer) => {
-        cancelViewerAnimation(viewer, viewerAnimationMapRef.current);
+      cesiumCtx.withScene((scene) => {
+        const camera = scene.camera;
+        cancelSceneAnimation(scene, sceneAnimationMapRef.current);
         setIsControlMouseDown(true);
         setInitialMouseX(event.clientX);
         setInitialMouseY(event.clientY);
@@ -80,28 +79,29 @@ export const PitchingCompass: React.FC<RotateButtonProps> = ({
           camera.heading as Radians
         );
 
-        const target = getOrbitPoint(cesiumCtx);
+        const target = pickSceneCenter(scene);
         if (target) {
           const range = Cartesian3.distance(target, camera.positionWC);
           setInitialRange(range as Meters);
         }
       });
     },
-    [cesiumCtx, shouldSuspendPitchLimiterRef, viewerAnimationMapRef]
+    [cesiumCtx, shouldSuspendPitchLimiterRef, sceneAnimationMapRef]
   );
 
   const handleMouseUp = useCallback(() => {
     shouldSuspendPitchLimiterRef.current = false;
     setIsControlMouseDown(false);
-    cesiumCtx.withCamera((camera) => {
-      camera.lookAtTransform(Matrix4.IDENTITY);
+    cesiumCtx.withScene((scene) => {
+      scene.camera.lookAtTransform(Matrix4.IDENTITY);
     });
   }, [cesiumCtx, shouldSuspendPitchLimiterRef]);
 
   const handleMouseMove = useCallback(
     (event: MouseEvent) => {
       if (!isControlMouseDown) return;
-      cesiumCtx.withCamera((camera) => {
+      cesiumCtx.withScene((scene) => {
+        const camera = scene.camera;
         const { pitch, heading } = getHeadingPitchForMouseEvent(
           event,
           initialMouseX,
@@ -114,7 +114,7 @@ export const PitchingCompass: React.FC<RotateButtonProps> = ({
           maxPitch
         );
 
-        const target = getOrbitPoint(cesiumCtx);
+        const target = pickSceneCenter(scene);
         if (target && initialRange !== null) {
           guardCamera(camera).lookAt(
             target,
@@ -141,12 +141,12 @@ export const PitchingCompass: React.FC<RotateButtonProps> = ({
 
   const handleButtonClick = useCallback(() => {
     // sets heading to 0 and pitch to pitchOblique
-    cesiumCtx.withCamera((camera, viewer) => {
-      const orbitPoint = getOrbitPoint(cesiumCtx);
-      if (!orbitPoint || !viewerAnimationMapRef.current) return;
+    cesiumCtx.withScene((scene) => {
+      const orbitPoint = pickSceneCenter(scene);
+      if (!orbitPoint || !sceneAnimationMapRef.current) return;
       animateCamera(
-        viewer,
-        viewerAnimationMapRef.current,
+        scene,
+        sceneAnimationMapRef.current,
         orbitPoint,
         0,
         pitchOblique,
@@ -159,17 +159,17 @@ export const PitchingCompass: React.FC<RotateButtonProps> = ({
     durationReset,
     initialRange,
     pitchOblique,
-    viewerAnimationMapRef,
+    sceneAnimationMapRef,
   ]);
 
   const handleDoubleClick = useCallback(() => {
     // sets heading to 0 and pitch to PITCH.ORTHO
-    cesiumCtx.withCamera((camera, viewer) => {
-      const orbitPoint = getOrbitPoint(cesiumCtx);
-      if (!orbitPoint || !viewerAnimationMapRef.current) return;
+    cesiumCtx.withScene((scene) => {
+      const orbitPoint = pickSceneCenter(scene);
+      if (!orbitPoint || !sceneAnimationMapRef.current) return;
       animateCamera(
-        viewer,
-        viewerAnimationMapRef.current,
+        scene,
+        sceneAnimationMapRef.current,
         orbitPoint,
         0,
         PITCH.ORTHO,
@@ -177,38 +177,28 @@ export const PitchingCompass: React.FC<RotateButtonProps> = ({
         durationReset
       );
     });
-  }, [cesiumCtx, durationReset, initialRange, viewerAnimationMapRef]);
+  }, [cesiumCtx, durationReset, initialRange, sceneAnimationMapRef]);
+
+  const registerNeedleOrientation = useCallback(
+    (setOrientation: (p: Radians, h: Radians) => void) => {
+      needleOrientationRef.current = setOrientation;
+    },
+    []
+  );
 
   useEffect(() => {
-    const animationMap = viewerAnimationMapRef.current;
+    const animationMap = sceneAnimationMapRef.current;
     let cleanup;
-    cesiumCtx.withCamera((camera, viewer) => {
-      const getCameraOrientation = () => {
-        cesiumCtx.withCamera((camera) => {
-          needleOrientationRef.current?.(
-            camera.pitch as Radians,
-            camera.heading as Radians
-          );
-        });
-      };
-
+    cesiumCtx.withScene((scene) => {
+      const camera = scene.camera;
       try {
-        const handler = new ScreenSpaceEventHandler(viewer.canvas);
+        const handler = new ScreenSpaceEventHandler(scene.canvas);
         handler.setInputAction(() => {
-          cesiumCtx.withViewer((viewer) => {
-            cancelViewerAnimation(viewer, animationMap);
-          });
+          cancelSceneAnimation(scene, animationMap);
         }, ScreenSpaceEventType.LEFT_DOWN);
-
-        guardCamera(camera, "compass setup").changed.addEventListener(
-          getCameraOrientation
-        );
 
         cleanup = () => {
           isValidScreenSpaceEventHandler(handler) && handler.destroy();
-          guardCamera(camera, "compass cleanup").changed.removeEventListener(
-            getCameraOrientation
-          );
         };
       } catch (error) {
         console.warn("Error setting up screen space event handler:", error);
@@ -217,7 +207,7 @@ export const PitchingCompass: React.FC<RotateButtonProps> = ({
     return () => {
       cleanup?.();
     };
-  }, [cesiumCtx, viewerAnimationMapRef]);
+  }, [cesiumCtx, sceneAnimationMapRef]);
 
   useEffect(() => {
     window.addEventListener("mousemove", handleMouseMove);
@@ -230,23 +220,21 @@ export const PitchingCompass: React.FC<RotateButtonProps> = ({
 
   useEffect(() => {
     let cleanup;
-    cesiumCtx.withCamera((camera) => {
+    cesiumCtx.withScene((scene) => {
+      const camera = scene.camera;
       const updateOrientation = () => {
-        cesiumCtx.withCamera((camera) => {
-          // correct heading for compass needle
-          needleOrientationRef.current?.(
-            camera.pitch as Radians,
-            applyRollToHeadingForCameraNearNadir(camera)
-          );
-        });
+        // correct heading for compass needle
+        needleOrientationRef.current?.(
+          camera.pitch as Radians,
+          applyRollToHeadingForCameraNearNadir(camera)
+        );
       };
+      updateOrientation();
       camera.percentageChanged = 0.01;
       guardCamera(camera).changed.addEventListener(updateOrientation);
 
       cleanup = () => {
-        cesiumCtx.withCamera((camera) => {
-          guardCamera(camera).changed.removeEventListener(updateOrientation);
-        });
+        guardCamera(camera).changed.removeEventListener(updateOrientation);
       };
     });
     return () => cleanup?.();
@@ -272,7 +260,7 @@ export const PitchingCompass: React.FC<RotateButtonProps> = ({
         alignItems: "center",
       }}
     >
-      <Needle register={(fn) => (needleOrientationRef.current = fn)} />
+      <Needle register={registerNeedleOrientation} />
     </div>
   );
 };

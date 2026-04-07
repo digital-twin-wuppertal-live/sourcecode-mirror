@@ -4,10 +4,7 @@ import slugify from "slugify";
 
 import type { BackgroundLayer, Layer } from "@carma/types";
 
-import {
-  functionToFeature,
-  objectToFeature,
-} from "@carma-appframeworks/portals";
+import { functionToFeature, objectToFeature } from "@carma-mapping/utils";
 import { defaultLayerConfig } from "../../config";
 import { LibreGeoportalMapOptions } from "./LibreGeoportalMap";
 
@@ -236,7 +233,12 @@ export const layersToMapLibreStyle = async (
       const vectorStyle = layer.props.style;
 
       if (vectorStyle) {
-        const response = await fetch(vectorStyle);
+        let response;
+        if (typeof vectorStyle === "string") {
+          response = await fetch(vectorStyle);
+        } else {
+          response = vectorStyle;
+        }
         const additionalStyle = await response.json();
         const layerId = layer.id;
         let spriteId = layerId.replace(":", "_");

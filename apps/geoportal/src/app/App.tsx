@@ -51,9 +51,15 @@ import { APP_KEY, layerMap } from "./config";
 import { geoportalMapStyleConfig } from "./config/mapStyleConfig";
 
 import { CESIUM_CONFIG, CONFIG_BASE_URL } from "./config/app.config";
+import store from "./store";
 import { featureFlagConfig } from "./config/featureFlags";
 
 import { OBLIQUE_CONFIG, CAMERA_ID_TO_DIRECTION } from "./oblique/config";
+import {
+  getHashParams,
+  HASH_LAUNCH_MODE,
+  resolveHashLaunchMode,
+} from "@carma-commons/utils";
 
 // Stable config objects
 const MEASUREMENTS_BASE_CONFIG = {
@@ -62,6 +68,8 @@ const MEASUREMENTS_BASE_CONFIG = {
   snappingOnUpdate: false,
   localStorageKey: "@" + APP_KEY + ".app.measurements",
 };
+
+import { useAdhocFeatureRehydrate } from "./hooks/use-adhoc-feature-rehydrate";
 
 import { getCustomFeatureFlags } from "./store/slices/layers";
 import {
@@ -79,10 +87,26 @@ import "react-cismap/topicMaps.css";
 import "./index.css";
 // import { setDrawingShape } from "./store/slices/measurements";
 
+const readInitialFrameworkFromHash = (): "leaflet" | "cesium" => {
+  if (typeof window === "undefined") {
+    return "leaflet";
+  }
+
+  const mode = resolveHashLaunchMode(getHashParams(), {
+    defaultMode: HASH_LAUNCH_MODE.TWO_D,
+  });
+  return mode === HASH_LAUNCH_MODE.THREE_D ? "cesium" : "leaflet";
+};
+
 function CesiumDevConsoleIntegration() {
   const flags = useFeatureFlags();
   // Explicitly pass through flag; hook no longer performs URL inference
   useCesiumDevConsoleTrigger({ isDeveloperMode: flags.isDeveloperMode });
+  return null;
+}
+
+function AdhocFeatureRehydration() {
+  useAdhocFeatureRehydrate();
   return null;
 }
 
@@ -105,7 +129,7 @@ function MeasurementsWrapper({
       ...baseConfig,
       snappingEnabled: flags.isSnappingEnabled ?? baseConfig.snappingEnabled,
     }),
-    [flags.isSnappingEnabled]
+    [baseConfig, flags.isSnappingEnabled]
   );
 
   return (
@@ -150,6 +174,7 @@ function App({ published }: { published?: boolean }) {
     () => ({ background: backgroundSettings }),
     []
   );
+  const initialFramework = readInitialFrameworkFromHash();
 
   if (isLoadingConfig === null) {
     // wait for the loading state to be determined to prevent re-rendering
@@ -162,11 +187,12 @@ function App({ published }: { published?: boolean }) {
       <FeatureFlagProvider config={featureFlagsMergedConfig}>
         <MatomoTracker>
           <CesiumDevConsoleIntegration />
-          <MapFrameworkSwitcherProvider initialFramework="leaflet">
+          <MapFrameworkSwitcherProvider initialFramework={initialFramework}>
             <CarmaMapProviderWrapper
               cesiumOptions={CESIUM_CONFIG}
               overlayOptions={overlayOptions}
               mapStyleConfig={geoportalMapStyleConfig}
+              store={store}
             >
               <ObliqueProvider
                 config={OBLIQUE_CONFIG}
@@ -178,6 +204,7 @@ function App({ published }: { published?: boolean }) {
                   baseConfig={MEASUREMENTS_BASE_CONFIG}
                 >
                   <ErrorBoundary FallbackComponent={AppErrorFallback}>
+                    <AdhocFeatureRehydration />
                     <div className={TAILWIND_CLASSNAMES_FULLSCREEN_FIXED}>
                       {isLoadingConfig && (
                         <div

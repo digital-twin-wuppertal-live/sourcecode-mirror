@@ -1,6 +1,6 @@
 /* eslint-disable jsx-a11y/no-noninteractive-element-interactions */
 /* eslint-disable jsx-a11y/click-events-have-key-events */
-import { useDispatch, useSelector } from "react-redux";
+import { useDispatch } from "react-redux";
 
 import { useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
@@ -9,15 +9,16 @@ import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 
 import type { Layer } from "@carma/types";
 
-import { getSelectedFeature } from "../../store/slices/features";
-import {
-  getBackgroundLayer,
-  removeLayer,
-  setSelectedLayerIndex,
-} from "../../store/slices/mapping";
+import { removeLayer, setSelectedLayerIndex } from "../../store/slices/mapping";
 import OpacitySlider from "./OpacitySlider";
 import VisibilityToggle from "./VisibilityToggle";
-import { LayerIcon } from "@carma-mapping/components";
+import {
+  LayerIcon,
+  useMapFrameworkSwitcherContext,
+} from "@carma-mapping/components";
+import { useAdhocFeatureDisplay } from "@carma-appframeworks/portals";
+import { isAdhocVectorLayer } from "../../helper/adhoc-feature-utils";
+import { cesiumBackgroundlayerNames } from "../../config";
 
 interface LayerRowProps {
   layer: Layer;
@@ -28,6 +29,8 @@ interface LayerRowProps {
 
 const LayerRow = ({ layer, id, isBackgroundLayer, index }: LayerRowProps) => {
   const dispatch = useDispatch();
+  const { clearFeatureCollections } = useAdhocFeatureDisplay();
+  const { isCesium } = useMapFrameworkSwitcherContext();
   const icon = layer?.other?.icon;
   const { attributes, listeners, setNodeRef, transform, transition } =
     useSortable({
@@ -35,9 +38,6 @@ const LayerRow = ({ layer, id, isBackgroundLayer, index }: LayerRowProps) => {
     });
 
   const style = { transform: CSS.Translate.toString(transform) };
-
-  const backgroundLayer = useSelector(getBackgroundLayer);
-  const selectedFeature = useSelector(getSelectedFeature);
 
   return (
     <div
@@ -66,7 +66,9 @@ const LayerRow = ({ layer, id, isBackgroundLayer, index }: LayerRowProps) => {
             }
           }}
         >
-          {layer.title}
+          {isCesium && isBackgroundLayer
+            ? cesiumBackgroundlayerNames[layer.id]
+            : layer.title}
         </p>
       </div>
       <OpacitySlider
@@ -86,6 +88,12 @@ const LayerRow = ({ layer, id, isBackgroundLayer, index }: LayerRowProps) => {
         }`}
         onClick={(e) => {
           dispatch(removeLayer(id));
+          if (isAdhocVectorLayer(layer)) {
+            clearFeatureCollections([id]);
+            console.debug("[ADHOC|REMOVE] row clearFeatureCollections", {
+              collectionId: id,
+            });
+          }
         }}
       >
         <FontAwesomeIcon icon={faX} />

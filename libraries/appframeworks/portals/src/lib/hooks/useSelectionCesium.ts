@@ -124,7 +124,7 @@ export const useSelectionCesium = (
   const { isValidViewer, getScene, getSurfaceProvider, getTerrainProvider } =
     useCesiumContext();
 
-  const { selection } = useSelection();
+  const { selection, selectionFlyToCameraHeightRef } = useSelection();
   const lastSelectionKeyRef = useRef<number | null>(null);
   const lastSelectionTimestampRef = useRef<number | null>(null);
   const shouldAddSelectionInCesiumRef = useRef<boolean>(false);
@@ -160,6 +160,7 @@ export const useSelectionCesium = (
       const selectionKey = selection.sorter ?? null;
       const selectionTimestamp = selection.selectionTimestamp ?? null;
       const selectionMapMode = selection.selectedFromMapMode ?? null;
+      const isRestoredSelection = selectionTimestamp == null;
 
       const isDuplicateSelection =
         lastSelectionKeyRef.current === selectionKey &&
@@ -253,8 +254,9 @@ export const useSelectionCesium = (
       // Skip flyTo only for selections from Leaflet that are NOT re-selections
       // Re-selections in Cesium should always fly to show the area again
       const skipFlyTo =
-        selection.selectedFromMapMode === SelectionMapMode.MODE_2D &&
-        !isReselection;
+        isRestoredSelection ||
+        (selection.selectedFromMapMode === SelectionMapMode.MODE_2D &&
+          !isReselection);
 
       const setMarkerDataWithMeta = (data: MarkerPrimitiveData | null) => {
         if (data) {
@@ -278,10 +280,11 @@ export const useSelectionCesium = (
         durationFactor,
         skipFlyTo,
         skipMarkerUpdate,
+        flyToCameraHeight: selectionFlyToCameraHeightRef.current,
       };
 
-      if (polygon) {
-        // Area selection - clean up marker first
+      if (polygon && selection.isAreaSelection) {
+        // Pure area selection - highlight bounds, no marker
         if (!skipMarkerUpdate && selectedMarkerData) {
           removeCesiumMarker(scene, selectedMarkerData);
           scene.requestRender();
@@ -298,7 +301,7 @@ export const useSelectionCesium = (
         // Clear flag after adding selection
         shouldAddSelectionInCesiumRef.current = false;
       } else {
-        // Point selection - clean up area primitives first
+        // Point selection (with or without polygon) - add marker, no polygon highlight
         if (!skipMarkerUpdate) {
           removeGroundPrimitiveById(scene, SELECTED_POLYGON_ID);
           removeGroundPrimitiveById(scene, INVERTED_SELECTED_POLYGON_ID);
@@ -342,5 +345,6 @@ export const useSelectionCesium = (
     duration,
     durationFactor,
     selectedMarkerData,
+    selectionFlyToCameraHeightRef,
   ]);
 };

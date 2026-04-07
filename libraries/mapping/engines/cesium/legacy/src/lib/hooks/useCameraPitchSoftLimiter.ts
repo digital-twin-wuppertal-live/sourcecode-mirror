@@ -1,16 +1,16 @@
 import { useCallback, useEffect } from "react";
 import { useDispatch, useSelector } from "react-redux";
-import { BoundingSphere, Cartesian3, Math as CesiumMath } from "cesium";
 
-import { useCesiumViewer } from "./useCesiumViewer";
-import { useCesiumContext } from "./useCesiumContext";
+import { BoundingSphere, Cartesian3, CesiumMath } from "@carma/cesium";
+
 import {
   selectScreenSpaceCameraControllerEnableCollisionDetection,
   setIsAnimating,
   clearIsAnimating,
 } from "../slices/cesium";
 import { pickScenePositions } from "../utils/pick-position/pick-scene-positions";
-
+import { useCesiumContext } from "./useCesiumContext";
+import { useCesiumViewer } from "./useCesiumViewer";
 const CENTER_TEST_POSITION: [number, number] = [0.5, 0.5];
 
 const useCameraPitchSoftLimiter = (
@@ -32,7 +32,8 @@ const useCameraPitchSoftLimiter = (
   const collisions = useSelector(
     selectScreenSpaceCameraControllerEnableCollisionDetection
   );
-  const { getScene, shouldSuspendCameraLimitersRef } = useCesiumContext();
+  const { getScene, shouldSuspendCameraLimitersRef, initialViewApplied } =
+    useCesiumContext();
 
   const onComplete = useCallback(
     () => dispatch(clearIsAnimating()),
@@ -54,6 +55,7 @@ const useCameraPitchSoftLimiter = (
 
       const moveEndListener = async () => {
         if (shouldSuspendCameraLimitersRef?.current) return;
+        if (!initialViewApplied) return;
         const scene = getScene();
         if (!scene) {
           console.warn(
@@ -100,6 +102,7 @@ const useCameraPitchSoftLimiter = (
                 },
                 duration: 1.5,
                 complete: onComplete,
+                cancel: onComplete,
               }
             );
           }
@@ -117,9 +120,11 @@ const useCameraPitchSoftLimiter = (
     pitchLimiter,
     onComplete,
     dispatch,
+    getScene,
     minPitchDeg,
     resetPitchOffsetDeg,
     debug,
+    initialViewApplied,
     shouldSuspendCameraLimitersRef,
   ]);
 };

@@ -1,7 +1,7 @@
 /* eslint-disable jsx-a11y/no-static-element-interactions */
 /* eslint-disable jsx-a11y/click-events-have-key-events */
 
-import { useContext, useEffect } from "react";
+import { useContext, useEffect, useState } from "react";
 import { useDispatch, useSelector } from "react-redux";
 
 import {
@@ -46,6 +46,8 @@ import GeoportalLayerButton from "./GeoportalLayerButton";
 import SecondaryView from "./SecondaryView";
 
 import "./button.css";
+import { useMapFrameworkSwitcherContext } from "@carma-mapping/components";
+import InteractionView from "./InteractionView";
 
 const LayerWrapper = () => {
   const dispatch: AppDispatch = useDispatch();
@@ -60,6 +62,10 @@ const LayerWrapper = () => {
   const showLeftScrollButton = useSelector(getShowLeftScrollButton);
   const showRightScrollButton = useSelector(getShowRightScrollButton);
 
+  const { isLeaflet } = useMapFrameworkSwitcherContext();
+
+  const [isDragging, setIsDragging] = useState(false);
+
   const { isOver, setNodeRef } = useDroppable({
     id: "droppable",
   });
@@ -70,6 +76,7 @@ const LayerWrapper = () => {
   const getLayerPos = (id) => layers.findIndex((layer) => layer.id === id);
 
   const handleDragEnd = (event) => {
+    setIsDragging(false);
     routedMapRef?.leafletMap?.leafletElement.dragging.enable();
     const { active, over } = event;
     if (active.id !== over.id) {
@@ -107,16 +114,17 @@ const LayerWrapper = () => {
       <DndContext
         onDragEnd={handleDragEnd}
         sensors={sensors}
-        onDragStart={() =>
-          routedMapRef?.leafletMap?.leafletElement.dragging.disable()
-        }
+        onDragStart={() => {
+          setIsDragging(true);
+          routedMapRef?.leafletMap?.leafletElement.dragging.disable();
+        }}
         modifiers={[restrictToHorizontalAxis]}
       >
         <div
           ref={setNodeRef}
           style={style}
           id="buttonWrapper"
-          className="w-full h-9 z-[999]"
+          className="relative w-full h-9 z-[999]"
           onClick={() => {
             console.debug("onClick buttonWrapper");
             dispatch(setSelectedLayerIndexNoSelection());
@@ -157,17 +165,22 @@ const LayerWrapper = () => {
             )}
             <div className="w-full flex justify-center items-center h-full gap-2">
               <GeoportalLayerButton
-                icon="background"
                 layer={backgroundLayer}
                 index={-1}
                 id={backgroundLayer.id}
                 title=""
                 background
               />
+
               {size.width > 640 && (
                 <div
                   id="scrollWrapper"
-                  className="flex overflow-x-hidden items-center h-20 gap-2"
+                  className="flex overflow-x-auto items-center h-20 gap-2 scrollbar-hide"
+                  onWheel={(e) => {
+                    if (e.deltaY !== 0) {
+                      e.currentTarget.scrollLeft += e.deltaY;
+                    }
+                  }}
                 >
                   <SortableContext
                     items={layers}
@@ -179,16 +192,8 @@ const LayerWrapper = () => {
                         id={layer.id}
                         key={layer.id}
                         index={i}
-                        icon={
-                          layer.title.includes("Orthofoto")
-                            ? "ortho"
-                            : layer.title === "Bäume"
-                            ? "bäume"
-                            : layer.title.includes("gärten")
-                            ? "gärten"
-                            : undefined
-                        }
                         layer={layer}
+                        hide={layer.type !== "object" && !isLeaflet}
                       />
                     ))}
                   </SortableContext>
@@ -199,6 +204,7 @@ const LayerWrapper = () => {
         </div>
       </DndContext>
 
+      <InteractionView isDragging={isDragging} />
       {!isNoSelectionIndex && <SecondaryView />}
     </>
   );

@@ -15,7 +15,7 @@
 }
 
 /* Make lists look good again */
-ul {
+ul:not(.ant-list-items) {
   list-style: disc !important;
   display: block;
   list-style-type: disc;
@@ -210,4 +210,120 @@ iframe {
 
 .map-info-box-belis-wrapper * div {
   pointer-events: none !important;
+}
+
+/* Prevent Tailwind from breaking Leaflet */
+.leaflet-pane,
+.leaflet-tile,
+.leaflet-marker-icon,
+.leaflet-marker-shadow,
+.leaflet-tile-container,
+.leaflet-pane > svg,
+.leaflet-pane > canvas,
+.leaflet-zoom-box,
+.leaflet-image-layer,
+.leaflet-layer {
+  position: absolute;
+  left: 0;
+  top: 0;
+}
+
+.leaflet-container {
+  overflow: hidden;
+}
+
+.leaflet-tile,
+.leaflet-marker-icon,
+.leaflet-marker-shadow {
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.leaflet-tile::selection {
+  background: transparent;
+}
+
+/* Fix map styles. Proper z-index stacking for Leaflet panes */
+.leaflet-pane {
+  z-index: 400;
+}
+.leaflet-tile-pane {
+  z-index: 200;
+}
+.leaflet-overlay-pane {
+  z-index: 400;
+}
+.leaflet-shadow-pane {
+  z-index: 500;
+}
+.leaflet-marker-pane {
+  z-index: 600;
+}
+.leaflet-tooltip-pane {
+  z-index: 650;
+}
+.leaflet-popup-pane {
+  z-index: 700;
+}
+.leaflet-map-pane canvas {
+  z-index: 100;
+}
+.leaflet-map-pane svg {
+  z-index: 200;
+}
+
+/* Ensure SVG paths (lines/polylines) are clickable and show selection */
+.leaflet-overlay-pane svg path {
+  pointer-events: auto;
+}
+
+/* Ensure stroke color is visible on selection */
+.leaflet-interactive {
+  pointer-events: auto;
+}
+
+/* Straßenschlüssel Tree styling */
+.strassen-tree .ant-tree-treenode-selected .ant-tree-node-content-wrapper {
+  background-color: #e6f4ff !important;
+  border-left: 3px solid #1677ff;
+  margin-left: -3px;
+  padding-left: 7px;
+  border-radius: 0 !important;
+}
+
+.strassen-tree .ant-tree-node-content-wrapper:hover {
+  background-color: #f5f5f5 !important;
+}
+
+.strassen-tree .ant-tree-node-content-wrapper {
+  padding: 4px 8px;
+  border-radius: 0 !important;
+}
+
+.strassen-tree .ant-tree-title {
+  font-size: 14px;
+  font-weight: 400;
+  color: #262626;
+}
+
+/* Straßenschlüssel grouping selector */
+.strassen-grouping-select .ant-select-selector {
+  font-size: 12px !important;
+}
+
+.strassen-grouping-select .ant-select-selection-item {
+  font-size: 12px !important;
+}
+
+.strassen-grouping-select-dropdown .ant-select-item {
+  font-size: 12px !important;
+}
+
+/* Fix input background to be white in production */
+.ant-input {
+  background-color: #ffffff !important;
+}
+
+.ant-input:not(:disabled) {
+  background-color: #ffffff !important;
 }

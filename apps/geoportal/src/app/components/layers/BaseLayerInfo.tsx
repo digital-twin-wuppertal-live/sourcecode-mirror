@@ -7,7 +7,7 @@ import {
 } from "@dnd-kit/sortable";
 import { Tabs } from "antd";
 import { useDispatch, useSelector } from "react-redux";
-import { layerMap } from "../../config";
+import { cesiumDescriptions, layerMap } from "../../config";
 import {
   getBackgroundLayer,
   getLayers,
@@ -18,21 +18,26 @@ import {
 import LayerRow from "./LayerRow";
 import "./text.css";
 import LayerInfoWrapper from "./LayerInfoWrapper";
+import { filter3dLayers } from "../../helper/adhoc-feature-utils";
+import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
+import { faX } from "@fortawesome/free-solid-svg-icons";
+import { useState } from "react";
+import { useMapFrameworkSwitcherContext } from "@carma-mapping/components";
 
 const BaseLayerInfo = () => {
+  const [activeTab, setActiveTab] = useState("1");
   const dispatch = useDispatch();
 
   const selectedMapLayer = useSelector(getSelectedMapLayer);
   const selectedLuftbildLayer = useSelector(getSelectedLuftbildLayer);
   const backgroundLayer = useSelector(getBackgroundLayer);
   const layers = useSelector(getLayers);
+  const { isCesium } = useMapFrameworkSwitcherContext();
 
   const reversedLayers = layers
     .slice()
     .reverse()
-    .map((element, index) => {
-      return element;
-    });
+    .filter((layer) => (isCesium ? filter3dLayers(layer) : true));
 
   const getLayerPos = (id) => layers.findIndex((layer) => layer.id === id);
 
@@ -48,10 +53,15 @@ const BaseLayerInfo = () => {
   };
 
   const getBackgroundDescription = () => {
+    const { isCesium } = useMapFrameworkSwitcherContext();
     if (backgroundLayer.id === "karte") {
-      return layerMap[selectedMapLayer.id].description;
+      return isCesium
+        ? "LoD2-Gebäudemodell"
+        : layerMap[selectedMapLayer.id].description;
     } else {
-      return layerMap[selectedLuftbildLayer.id].description;
+      return isCesium
+        ? "3D-Mesh"
+        : layerMap[selectedLuftbildLayer.id].description;
     }
   };
 
@@ -64,6 +74,20 @@ const BaseLayerInfo = () => {
           <div className="flex flex-col h-full overflow-auto gap-2">
             <Tabs
               animated={false}
+              activeKey={activeTab}
+              onChange={setActiveTab}
+              tabBarExtraContent={{
+                right:
+                  activeTab === "1" ? (
+                    <button
+                      onClick={() => dispatch(setLayers([]))}
+                      className="text-gray-600 hover:text-gray-500 p-2"
+                    >
+                      Alle Karteninhalte entfernen
+                      <FontAwesomeIcon icon={faX} className="ml-2" />
+                    </button>
+                  ) : null,
+              }}
               items={[
                 {
                   key: "1",
@@ -73,7 +97,7 @@ const BaseLayerInfo = () => {
                       onDragEnd={handleDragEnd}
                       modifiers={[restrictToVerticalAxis]}
                     >
-                      <div className="h-full overflow-auto max-h-full flex flex-col gap-2">
+                      <div className="h-full overflow-auto max-h-full flex flex-col gap-2 pr-1">
                         <SortableContext
                           items={layers}
                           strategy={verticalListSortingStrategy}
@@ -102,22 +126,32 @@ const BaseLayerInfo = () => {
                   label: "Informationen",
                   children: (
                     <div className="h-full overflow-auto flex flex-col">
-                      <h5 className="font-semibold text-lg mb-1">Eignung</h5>
-                      <div
-                        className="text-base"
-                        dangerouslySetInnerHTML={{
-                          __html: backgroundLayer.eignung,
-                        }}
-                      />
-                      <h5 className="font-semibold text-lg mb-1 mt-2">
-                        Inhalt
-                      </h5>
-                      <div
-                        className="text-base"
-                        dangerouslySetInnerHTML={{
-                          __html: backgroundLayer.inhalt,
-                        }}
-                      />
+                      <>
+                        <h5 className="font-semibold text-lg mb-1">
+                          {isCesium ? "Hintergrundmodell" : "Hintergrundkarte"}:
+                          Eignung
+                        </h5>
+                        <div
+                          className="text-base"
+                          dangerouslySetInnerHTML={{
+                            __html: isCesium
+                              ? cesiumDescriptions[backgroundLayer.id]?.eignung
+                              : backgroundLayer.eignung,
+                          }}
+                        />
+                        <h5 className="font-semibold text-lg mb-1 mt-2">
+                          {isCesium ? "Hintergrundmodell" : "Hintergrundkarte"}:
+                          Inhalt
+                        </h5>
+                        <div
+                          className="text-base"
+                          dangerouslySetInnerHTML={{
+                            __html: isCesium
+                              ? cesiumDescriptions[backgroundLayer.id]?.inhalt
+                              : backgroundLayer.inhalt,
+                          }}
+                        />
+                      </>
                     </div>
                   ),
                 },

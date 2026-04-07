@@ -6,8 +6,7 @@ import { faLayerGroup, faMap } from "@fortawesome/free-solid-svg-icons";
 import { iconColorMap, iconMap } from "./iconMapping";
 
 const ICON_PREFIX =
-  import.meta.env.VITE_WUPP_ASSET_BASEURL +
-  "/geoportal/geoportal_icon_legends/";
+  "https://geo.wuppertal.de/geoportal/geoportal_icon_legends/";
 
 interface LayerIconProps {
   layer: Layer;
@@ -15,11 +14,23 @@ interface LayerIconProps {
   fallbackIcon?: string;
   isBaseLayer?: boolean;
   id?: string;
+  className?: string;
+  displayUrl?: boolean;
+  onError?: (title: string, url: string) => void;
 }
 
 const isUrl = (str: string | undefined): boolean => {
   if (!str) return false;
   return str.startsWith("http://") || str.startsWith("https://");
+};
+
+const iconPathAliases: Record<string, string> = {
+  verkehr: "mobi",
+};
+
+const mapIconPath = (path: string): string => {
+  const lower = path.toLowerCase();
+  return iconPathAliases[lower] ?? lower;
 };
 
 export const LayerIcon = ({
@@ -28,12 +39,20 @@ export const LayerIcon = ({
   fallbackIcon,
   isBaseLayer,
   id,
+  className,
+  displayUrl = false,
+  onError,
 }: LayerIconProps) => {
   const [imgError, setImgError] = useState(!layer.other?.icon);
 
   const iconName =
     layer.other?.icon ||
-    layer.other?.path?.toLowerCase() + "/" + layer.other?.name;
+    layer.conf?.icon ||
+    (layer.other?.path && layer.other?.name
+      ? mapIconPath(layer.other?.originalPath ?? layer.other.path) +
+        "/" +
+        layer.other.name
+      : undefined);
 
   const isIconUrl = isUrl(layer.other?.icon);
   const iconSrc = isIconUrl
@@ -46,7 +65,12 @@ export const LayerIcon = ({
     if (iconSrc) {
       const img = new Image();
       img.onload = () => setImgError(false);
-      img.onerror = () => setImgError(true);
+      img.onerror = () => {
+        setImgError(true);
+        if (onError) {
+          onError(layer.title, iconSrc);
+        }
+      };
       img.src = iconSrc;
     }
   }, [iconSrc]);
@@ -57,7 +81,7 @@ export const LayerIcon = ({
         <FontAwesomeLikeIcon
           src={iconSrc}
           alt="Layer Icon"
-          className="text-base"
+          className={className + " text-base"}
           id={id}
         />
       ) : (
@@ -69,10 +93,26 @@ export const LayerIcon = ({
               ? faLayerGroup
               : faMap
           }
-          className="text-base"
+          className={className + " text-base"}
           style={{ color: fallbackIcon ? iconColorMap[fallbackIcon] : "" }}
           id={id}
         />
+      )}
+      {displayUrl && iconSrc && (
+        <div
+          style={{
+            fontSize: 11,
+            fontFamily: "monospace",
+            color: "#718096",
+            wordBreak: "break-all",
+            marginTop: 8,
+            padding: "2px 6px",
+            backgroundColor: "#f0f2f5",
+            borderRadius: 4,
+          }}
+        >
+          {iconSrc}
+        </div>
       )}
     </>
   );
