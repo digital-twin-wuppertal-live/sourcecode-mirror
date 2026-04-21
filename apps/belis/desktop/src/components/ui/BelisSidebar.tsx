@@ -1,9 +1,14 @@
-import { useEffect, useState, useMemo, useRef, useCallback } from "react";
+import { useCallback, useEffect, useState, useMemo, useRef } from "react";
+import { useKeyboardListNavigation } from "../../hooks/useKeyboardListNavigation";
 import type { MapGeoJSONFeatureWithOriginal as SidebarFeature } from "@carma-mapping/utils";
 export type { SidebarFeature };
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { faSpinner } from "@fortawesome/free-solid-svg-icons";
 import toTitleCase from "../../helper/toTitleCase";
+import AuswahlBlock from "./AuswahlBlock";
+
+export const SELECTED_ROW_STYLE =
+  "bg-blue-50 hover:bg-blue-50 border-l-2 border-l-blue-500";
 
 export interface ListItemData {
   main: string;
@@ -183,6 +188,14 @@ export interface BelisSidebarProps {
     string,
     (feature: SidebarFeature) => ListItemData
   >;
+  /** Namespaced MVT source for querying features (needed by AuswahlBlock). */
+  namespacedSource?: string;
+  /** Current adjusted highlights list (needed by AuswahlBlock). */
+  adjustedHighlights?: SidebarFeature[] | null;
+  /** Setter for adjusted highlights (needed by AuswahlBlock). */
+  setAdjustedHighlights?: React.Dispatch<
+    React.SetStateAction<SidebarFeature[] | null>
+  >;
 }
 
 const BelisSidebar = ({
@@ -205,6 +218,9 @@ const BelisSidebar = ({
   draftsCount,
   onFeatureDismiss,
   listItemExtractors,
+  namespacedSource,
+  adjustedHighlights,
+  setAdjustedHighlights,
 }: BelisSidebarProps) => {
   // Filter features by active source layers
   const filteredFeatures = useMemo(() => {
@@ -501,23 +517,15 @@ const BelisSidebar = ({
 
   const listRef = useRef<HTMLDivElement>(null);
 
-  const handleKeyDown = useCallback(
-    (e: React.KeyboardEvent) => {
-      if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
-      e.preventDefault();
-      if (flatFeatures.length === 0) return;
+  const selectedIdx = useMemo(
+    () => flatFeatures.findIndex((f) => isFeatureSelected(f)),
+    [flatFeatures, isFeatureSelected]
+  );
 
-      const currentIdx = flatFeatures.findIndex((f) => isFeatureSelected(f));
-      let nextIdx: number;
-      if (e.key === "ArrowDown") {
-        nextIdx = currentIdx < 0 ? 0 : (currentIdx + 1) % flatFeatures.length;
-      } else {
-        nextIdx =
-          currentIdx < 0
-            ? flatFeatures.length - 1
-            : (currentIdx - 1 + flatFeatures.length) % flatFeatures.length;
-      }
-      const next = flatFeatures[nextIdx];
+  const { onKeyDown: handleKeyDown } = useKeyboardListNavigation({
+    items: flatFeatures,
+    selectedIndex: selectedIdx,
+    onSelect: (next) => {
       selectionFromListRef.current = {
         source: next.source,
         sourceLayer: next.sourceLayer,
@@ -528,8 +536,7 @@ const BelisSidebar = ({
         next
       );
     },
-    [flatFeatures, onFeatureSelect, isFeatureSelected]
-  );
+  });
 
   const getListItem = (feature: SidebarFeature): ListItemData => {
     const layerKey = feature.sourceLayer || feature.source || "";
@@ -617,6 +624,16 @@ const BelisSidebar = ({
           <FontAwesomeIcon icon={faSpinner} spin className="text-gray-400" />
         )}
       </div>
+      {namespacedSource && setAdjustedHighlights && (
+        <AuswahlBlock
+          namespacedSource={namespacedSource}
+          adjustedHighlights={adjustedHighlights ?? null}
+          setAdjustedHighlights={setAdjustedHighlights}
+          getListItem={getListItem}
+          onFeatureSelect={onFeatureSelect}
+          activeSourceLayers={activeSourceLayers}
+        />
+      )}
       <div className="flex-1 overflow-y-auto overflow-x-hidden">
         {totalCount === 0 && !isLoading ? (
           <div className="p-4 text-gray-500 text-center text-sm">
@@ -656,7 +673,7 @@ const BelisSidebar = ({
                             : "pl-4"
                         } ${
                           selected
-                            ? "bg-blue-50 hover:bg-blue-50 border-l-2 border-l-blue-500"
+                            ? SELECTED_ROW_STYLE
                             : "hover:bg-gray-50"
                         }`}
                       >

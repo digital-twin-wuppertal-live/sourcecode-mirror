@@ -10,7 +10,7 @@ import {
 import { Tag } from "antd";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { Modal, Accordion } from "react-bootstrap";
-import { useContext, useEffect, useState } from "react";
+import { useContext, useEffect, useMemo, useState } from "react";
 import { LightBoxDispatchContext } from "react-cismap/contexts/LightBoxContextProvider";
 import Panel from "react-cismap/commons/Panel";
 import PhotoGallery from "../vorhabenkarte/PhotoGallery";
@@ -81,7 +81,7 @@ export type LightboxDispatch = {
 };
 
 const SecondaryInfoModal = ({
-  feature: featureInput = {},
+  feature: rawFeatureInput = {},
   setOpen = () => {},
   versionString = "???",
   Footer = genericSecondaryInfoFooterFactory({ skipTeilzwilling: true }),
@@ -91,13 +91,32 @@ const SecondaryInfoModal = ({
   versionString?: string;
   Footer?: React.ComponentType<any>;
 }) => {
+  // Forwarded selections (vector-tile icons via selectionForwardingTo) arrive
+  // with the payload under `targetProperties` and no `.properties` wrapper.
+  // Normalize so downstream code can read `featureInput.properties.*`.
+  const featureInput = useMemo(
+    () =>
+      rawFeatureInput?.targetProperties
+        ? {
+            ...rawFeatureInput,
+            properties: {
+              ...rawFeatureInput.targetProperties,
+              ...rawFeatureInput.properties,
+            },
+          }
+        : rawFeatureInput,
+    [rawFeatureInput]
+  );
+
   const [feature, setFeature] = useState<FeatureType | undefined>();
   const [completeFeature, setCompleteFeature] = useState<boolean | undefined>();
   const [isLoading, setIsLoading] = useState<boolean>(false);
   //check whether the feature is fully equipped or if it is a basefeature from a vectorlayer
 
   useEffect(() => {
-    if (featureInput?.properties?.fid) {
+    const props =
+      featureInput?.targetProperties || featureInput?.properties || featureInput;
+    if (props?.fid) {
       // Vector tile feature - need to fetch data
       setCompleteFeature(false);
       setFeature(undefined);
@@ -149,8 +168,7 @@ const SecondaryInfoModal = ({
             properties: {
               ...item,
               info: {
-                title: item.abgeschlossen ? text + " (abgeschlossen)" : text,
-
+                title: text,
                 header: item.thema.name,
               },
               tel: item.kontakt.telefon,
@@ -437,7 +455,14 @@ const SecondaryInfoModal = ({
             {(documents.length > 0 || linksArray.length > 0) && (
               <Accordion style={{ marginBottom: 6 }} defaultActiveKey={"2"}>
                 <Panel header="Anhang" eventKey="2" bsStyle="warning">
-                  <ul style={{ marginLeft: "-22px" }}>
+                  <ul
+                    style={{
+                      listStyle: "disc",
+                      paddingLeft: 18,
+                      marginLeft: 0,
+                      marginBlock: "1em",
+                    }}
+                  >
                     {documents.map((res, idx) => {
                       return (
                         <li key={idx}>

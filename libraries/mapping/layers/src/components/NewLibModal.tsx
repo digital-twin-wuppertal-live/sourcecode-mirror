@@ -25,8 +25,7 @@ import type {
   Item,
   Layer,
   SavedLayerConfig,
-} from "@carma/types";
-import { utils } from "@carma-appframeworks/portals";
+} from "../lib/contracts/carma-layers.d";
 import { useAuth } from "@carma-providers/auth";
 import {
   useFeatureFlags,
@@ -39,11 +38,10 @@ import LayerTabs from "./LayerTabs";
 import { SidebarItem } from "./SidebarItems";
 
 import ItemGrid from "./ItemGrid";
-import { discoverConfig } from "../helper/discover";
+import { discoverConfig, fetchDiscoverItems } from "../helper/discover";
 
 import "./input.css";
 import "./modal.css";
-import { md5ActionFetchDAQ, md5FetchJSON } from "@carma-commons/utils";
 import ItemSkeleton from "./ItemSkeleton";
 import {
   addReplaceLayers,
@@ -74,22 +72,13 @@ type LayerCategories = {
   id?: string;
 };
 
-type DiscoverResult = {
-  time: string | null;
-  data: {
-    config: string;
-    id: number;
-    name: string;
-  }[];
-};
-
 export type ActiveLayers = [BackgroundLayer, ...Layer[]];
 
 export interface LibModalProps {
   open: boolean;
   setOpen: (open: boolean) => void;
   setAdditionalLayers: any;
-  favorites?: Item[];
+  favorites?: Array<Item | SavedLayerConfig>;
   addFavorite: (layer: Item) => void;
   removeFavorite: (layer: Item) => void;
   updateFavorite?: (layer: Item) => void;
@@ -166,25 +155,17 @@ export const NewLibModal = ({
 
   const { jwt, setJWT } = useAuth();
 
-  const fetchDiscoverItems = () => {
+  const handleFetchDiscoverItems = () => {
     if (discoverProps) {
       setLoadingData(true);
-      const { appKey, apiUrl, daqKey } = discoverProps;
-      md5ActionFetchDAQ(appKey, apiUrl, jwt || "", daqKey)
-        .then((result) => {
-          const typedResult = result as DiscoverResult;
-          setDiscoverItems(typedResult.data);
+      fetchDiscoverItems(discoverProps, jwt || undefined)
+        .then((data) => {
+          setDiscoverItems(data);
           setLoadingData(false);
           dispatch(setTriggerRefetch(false));
         })
-        .catch(async (e) => {
-          if (!jwt) {
-            const result = await md5FetchJSON(
-              "gp_entdecken",
-              "https://wupp-topicmaps-data.cismet.de/data/gp_entdecken.json"
-            );
-            setDiscoverItems(result);
-          } else if (e.status === 401) {
+        .catch((e) => {
+          if (jwt && e.status === 401) {
             unauthorizedCallback?.();
             setJWT("");
           }
@@ -195,7 +176,7 @@ export const NewLibModal = ({
 
   useEffect(() => {
     if (open || triggerRefetch) {
-      fetchDiscoverItems();
+      handleFetchDiscoverItems();
     }
   }, [open, triggerRefetch, jwt]);
 

@@ -10,6 +10,7 @@ import type {
   LibreLayer,
   FilterCategory,
 } from "@carma-mapping/engines/maplibre";
+import type { ExpressionSpecification } from "maplibre-gl";
 
 export interface LayerEntry {
   title: string;
@@ -157,23 +158,33 @@ export const additionalLayerConfigs: Record<string, LayerEntry> = {
 export const BELIS_STYLE_URL = "https://tiles.cismet.de/belis/styleY.json";
 export const BELIS_ORIGINAL_SOURCE = "belis-source";
 
-/** Arbeitsaufträge data layer */
-export const ARBEITSAUFTRAEGE_STYLE_URL =
-  "https://tiles.cismet.de/belis/arbeitsauftraege.style.json";
-export const ARBEITSAUFTRAEGE_SOURCE_LAYER = "arbeitsauftraege";
-
-export const arbeitsauftraegeDataLayer: LibreLayer = {
-  type: "vector",
-  name: "Arbeitsaufträge",
-  style: ARBEITSAUFTRAEGE_STYLE_URL,
-  opacity: 1,
-};
-
 export const leuchtenDataLayer: LibreLayer = {
   type: "vector",
   name: "Leuchten",
   style: BELIS_STYLE_URL,
   opacity: 1,
+};
+
+/** Arbeitsaufträge GeoJSON layer styles (client-side rendering) */
+export const AA_LAYER_STYLES = {
+  fill: {
+    "fill-color": "#E74C4C",
+    "fill-opacity": 0.45,
+  },
+  outline: {
+    "line-color": "#C0392B",
+    "line-width": 2,
+  },
+  selection: {
+    "line-color": "#3A7CEB",
+    "line-width": 5,
+    "line-opacity": [
+      "case",
+      ["boolean", ["feature-state", "selected"], false],
+      1,
+      0,
+    ] as ExpressionSpecification,
+  },
 };
 
 export const BELIS_SOURCE_LAYERS = [

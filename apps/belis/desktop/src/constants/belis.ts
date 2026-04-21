@@ -16,6 +16,14 @@ export const DELETE_ENDPOINT =
   DOMAIN +
   ".DeleteObject/tasks?resultingInstanceType=result";
 
+export const buildActionEndpoint = (actionName: string) =>
+  REST_SERVICE +
+  "/actions/" +
+  DOMAIN +
+  "." +
+  actionName +
+  "/tasks?resultingInstanceType=result";
+
 export const UPLOAD_DOCUMENT_ENDPOINT =
   REST_SERVICE +
   "/actions/" +
@@ -150,6 +158,24 @@ export const arbeitsauftraegeByTeamQuery = gql`
   ${queries.arbeitsauftraege_by_team}
 `;
 
+export const arbeitsauftraegeByIdsQuery = gql`
+  ${queries.arbeitsauftraege_by_ids}
+`;
+
 export const arbeitsauftragByIdQuery = gql`
   ${queries.arbeitsauftragById}
 `;
+
+/**
+ * Shared animation duration for mini-map view transitions (ms).
+ * Matches the default used by useDatasheetMiniMap for the Fachobjekte
+ * mini-map, so the Arbeitsaufträge mini-map feels equally snappy.
+ */
+export const MINI_MAP_TRANSITION_MS = 200;
+
+/**
+ * Fixed zoom level for the Fachobjekte mini-map. On each feature selection
+ * the mini-map eases to this zoom; the user can temporarily adjust via
+ * mousewheel, but the next feature selection resets to this value.
+ */
+export const MINI_MAP_TARGET_ZOOM = 20;

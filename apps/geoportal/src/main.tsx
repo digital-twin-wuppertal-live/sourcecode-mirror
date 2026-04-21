@@ -4,18 +4,19 @@ import { RouterProvider, createHashRouter } from "react-router-dom";
 import { persistStore } from "redux-persist";
 import { PersistGate } from "redux-persist/integration/react";
 
-import { setupCesiumEnvironment } from "@carma-mapping/engines/cesium";
+import { AdhocFeatureDisplayProvider } from "@carma-appframeworks/portals";
 import {
-  suppressReactCismapErrors,
-  preventPinchZoom,
   cjsGlobalShim,
+  preventPinchZoom,
+  suppressReactCismapErrors,
 } from "@carma-commons/utils";
+import { setupCesiumEnvironment } from "@carma-mapping/engines/cesium/core";
+import { ImageList, ServiceList } from "@carma-mapping/layers";
 
+import { CESIUM_CONFIG } from "./app/config/app.config";
 import App from "./app/App";
 import store from "./app/store";
-import { CESIUM_CONFIG } from "./app/config/app.config";
-import { AdhocFeatureDisplayProvider } from "@carma-appframeworks/portals";
-import { ImageList } from "@carma-mapping/layers";
+import { apiUrl } from "./app/constants/discover";
 
 cjsGlobalShim();
 // Set up Cesium environment (CESIUM_BASE_URL) via engine helper
@@ -50,6 +51,35 @@ root.render(
             {
               path: "/about/images",
               element: <ImageList />,
+            },
+            {
+              path: "/about/images.md",
+              element: <ImageList markdown />,
+            },
+            {
+              path: "/about/services",
+              element: (
+                <ServiceList
+                  discoverProps={{
+                    appKey: "Geoportal.Online.Wuppertal",
+                    apiUrl: apiUrl,
+                    daqKey: "gp_entdecken",
+                  }}
+                />
+              ),
+            },
+            {
+              path: "/about/services.md",
+              element: (
+                <ServiceList
+                  discoverProps={{
+                    appKey: "Geoportal.Online.Wuppertal",
+                    apiUrl: apiUrl,
+                    daqKey: "gp_entdecken",
+                  }}
+                  markdown
+                />
+              ),
             },
           ])}
         />

@@ -20,16 +20,16 @@ import {
   backgroundLayerConfigs,
   additionalLayerConfigs,
   leuchtenDataLayer,
-  arbeitsauftraegeDataLayer,
   BELIS_STYLE_URL,
   BELIS_ORIGINAL_SOURCE,
   BELIS_SOURCE_LAYERS,
-  ARBEITSAUFTRAEGE_STYLE_URL,
+  AA_LAYER_STYLES,
 } from "../../config/mapLayerConfigs";
 import type { LibreLayer } from "@carma-mapping/engines/maplibre";
 import { AppDispatch, type RootState } from "../../store";
 import BelisSidebar from "../ui/BelisSidebar";
 import ArbeitsauftraegeSidebar from "../ui/ArbeitsauftraegeSidebar";
+import { AA_SORT_BY_PROTOKOLLE_DESC } from "../../helper/aaSortHelpers";
 import {
   useVisibleMapFeatures,
   functionToInfo,
@@ -50,8 +50,7 @@ import {
 } from "@carma-mapping/engines/maplibre";
 import type maplibregl from "maplibre-gl";
 import BelisDatasheetView from "../ui/BelisDatasheetView";
-import ArbeitsauftragForm from "../ui/featuresForm/ArbeitsauftragForm";
-import ArbeitsprotokollForm from "../ui/featuresForm/ArbeitsprotokollForm";
+import ArbeitsauftraegeFormsWrapper from "../ui/featuresForm/ArbeitsauftraegeFormsWrapper";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { faMap } from "@fortawesome/free-solid-svg-icons";
 import {
@@ -59,6 +58,7 @@ import {
   fetchFeatureById,
   fetchArbeitsauftragById,
   fetchArbeitsauftraegeByTeam,
+  fetchArbeitsauftraegeByIds,
 } from "../../helper/apiMethods";
 import { getJWT } from "../../store/slices/auth";
 import { flattenGqlRecord } from "../../helper/flattenGqlRecord";
@@ -75,17 +75,40 @@ import {
   getActiveAATab,
   getSelectedAPId,
   getSelectedTeamId,
+  getAAFeatures,
   setSelectedAPId,
   setApOpenedFrom,
+  setActiveAATab,
   getApOpenedFrom,
   clearSelection,
   getAALoading,
+  getDraftMode,
+  getGraphqlLoading,
 } from "../../store/slices/arbeitsauftraege";
-import { getSelectedTeamName } from "../../store/selectors";
-import { buildApGeoJson } from "../../helper/buildApGeoJson";
-import { debugLayers, apInfoboxMapping } from "../../config/debugLayers";
+import {
+  buildApGeoJson,
+  extractGeometry,
+  getHeaderColorFromStatus,
+} from "../../helper/buildApGeoJson";
+import {
+  debugLayers,
+  apInfoboxMapping,
+  aaInfoboxMapping,
+} from "../../config/debugLayers";
+import { protocolsLayers as protocolsLayersNew } from "../../config/protocolsLayers";
+import {
+  MINI_MAP_TARGET_ZOOM,
+  MINI_MAP_TRANSITION_MS,
+} from "../../constants/belis";
+
+// Toggle between the preliminary debug layer styles and the new protocols styles.
+const USE_DEBUG_LAYERS_FOR_PROTOCOLS_LAYERS = false;
+const protocolsLayers = !USE_DEBUG_LAYERS_FOR_PROTOCOLS_LAYERS
+  ? protocolsLayersNew
+  : debugLayers;
 import type { ArbeitsauftragTileFeature } from "../../store/slices/arbeitsauftraege";
 import { transformGqlToTileFeatures } from "../../helper/transformArbeitsauftraege";
+import { fitAABounds } from "../../helper/fitAABounds";
 
 const LIST_WIDTH = 300;
 
@@ -97,8 +120,42 @@ import type { SidebarFeature } from "../ui/BelisSidebar";
 import {
   getAllDraftFeatures,
   getDraftFeaturesCount,
+  getGlobalEditMode,
 } from "../../store/slices/featuresForms";
+import {
+  getAllAADrafts,
+  getAllAPDrafts,
+  getAPDeletions,
+} from "../../store/slices/arbeitsauftraegeDrafts";
 import { prepareDraftFeatures } from "../../helper/prepareDraftFeatures";
+// import { useAaLassoSelection } from "../../hooks/useAaLassoSelection";
+
+function buildAAFeatureCollection(
+  features: ArbeitsauftragTileFeature[]
+): GeoJSON.FeatureCollection {
+  return {
+    type: "FeatureCollection",
+    features: features
+      .filter((f) => f.geometry != null)
+      .map((f) => ({
+        type: "Feature" as const,
+        id: f.id,
+        properties: {
+          id: f.id,
+          nummer: f.nummer,
+          team: f.team,
+          angelegt_am: f.angelegt_am,
+          angelegt_von: f.angelegt_von,
+          total_protokolle: f.total_protokolle,
+          pct_offen: f.pct_offen,
+          pct_in_bearbeitung: f.pct_in_bearbeitung,
+          pct_erledigt: f.pct_erledigt,
+          pct_fehlmeldung: f.pct_fehlmeldung,
+        },
+        geometry: f.geometry!,
+      })),
+  };
+}
 
 type SidebarMode = "fachobjekte" | "highlights" | "drafts";
 
@@ -109,6 +166,7 @@ interface BelisMapLibWrapperProps {
   lassoActive: boolean;
   onLassoDeactivate?: () => void;
   sidebarVariant: "fachobjekte" | "arbeitsauftraege";
+  onHighlightsChange?: (highlights: SidebarFeature[] | null) => void;
 }
 
 const BelisMapLibWrapper = ({
@@ -118,6 +176,7 @@ const BelisMapLibWrapper = ({
   lassoActive,
   onLassoDeactivate,
   sidebarVariant,
+  onHighlightsChange,
 }: BelisMapLibWrapperProps) => {
   const dispatch: AppDispatch = useDispatch();
   const store = useStore<RootState>();
@@ -131,6 +190,26 @@ const BelisMapLibWrapper = ({
   const reduxGeometryRef = useRef<any>(null);
   reduxGeometryRef.current = reduxSelectedFeature?.geometry ?? null;
   const { map } = useLibreContext();
+
+  // Track whether the map style has finished loading so effects that call
+  // addSource / addLayer don't fire too early ("Style is not done loading").
+  const [mapReady, setMapReady] = useState(false);
+  useEffect(() => {
+    if (!map) {
+      setMapReady(false);
+      return;
+    }
+    if (map.isStyleLoaded()) {
+      setMapReady(true);
+      return;
+    }
+    const onLoad = () => setMapReady(true);
+    map.once("load", onLoad);
+    return () => {
+      map.off("load", onLoad);
+    };
+  }, [map]);
+
   const {
     selectedFeature,
     rawFeature,
@@ -186,20 +265,33 @@ const BelisMapLibWrapper = ({
     BELIS_STYLE_URL
   )}::${BELIS_ORIGINAL_SOURCE}`;
 
-  // Arbeitsauftraege: separate namespaced source (same tile set, different style URL)
-  const arbeitsauftraegeNamespacedSource = `${slugifyUrl(
-    ARBEITSAUFTRAEGE_STYLE_URL
-  )}::${BELIS_ORIGINAL_SOURCE}`;
   const selectedAAId = useSelector(getSelectedAAId);
   const selectedAAData = useSelector(getSelectedAAData);
   const activeAATab = useSelector(getActiveAATab);
   const selectedAPId = useSelector(getSelectedAPId);
   const apOpenedFrom = useSelector(getApOpenedFrom);
   const aaLoading = useSelector(getAALoading);
+  const aaGraphqlLoading = useSelector(getGraphqlLoading);
+  const globalEditMode = useSelector(getGlobalEditMode);
 
-  // Team filter: resolve selectedTeamId → team name for map layer filtering
   const selectedTeamId = useSelector(getSelectedTeamId);
-  const selectedTeamName = useSelector(getSelectedTeamName);
+  const aaFeatures = useSelector(getAAFeatures);
+  const aaDrafts = useSelector(getAllAADrafts);
+  const apDrafts = useSelector(getAllAPDrafts);
+  const apDeletions = useSelector(getAPDeletions);
+  const draftMode = useSelector(getDraftMode);
+
+  const draftAAIdSet = useMemo(() => {
+    if (!draftMode) return null;
+    const ids = new Set(Object.keys(aaDrafts).map(Number));
+    for (const draft of Object.values(apDrafts)) {
+      if (draft.aaId) ids.add(Number(draft.aaId));
+    }
+    for (const aaId of Object.values(apDeletions)) {
+      ids.add(Number(aaId));
+    }
+    return ids;
+  }, [draftMode, aaDrafts, apDrafts, apDeletions]);
 
   const highlightSources = useMemo(
     () => [
@@ -224,6 +316,11 @@ const BelisMapLibWrapper = ({
   useEffect(() => {
     setAdjustedHighlights(highlightResults);
   }, [highlightResults]);
+
+  // Notify parent about highlight changes
+  useEffect(() => {
+    onHighlightsChange?.(adjustedHighlights);
+  }, [adjustedHighlights, onHighlightsChange]);
 
   const handleHighlightToggle = useCallback(
     (feature: maplibregl.MapGeoJSONFeature) => {
@@ -385,6 +482,16 @@ const BelisMapLibWrapper = ({
     onDeactivate: onLassoDeactivate,
     onToggle: handleHighlightToggle,
   });
+
+  // AA lasso selection (disabled – button now only logs "hallo world")
+  // useAaLassoSelection({
+  //   map,
+  //   active: aaLassoActive,
+  //   onDeactivate: onAaLassoDeactivate,
+  //   onFeaturesSelected: (features) => {
+  //     dispatch(setLassoSelectedFeatures(features));
+  //   },
+  // });
 
   const showRaw = useMemo(() => {
     const hashQuery = window.location.hash.split("?")[1] || "";
@@ -559,7 +666,8 @@ const BelisMapLibWrapper = ({
 
   useEffect(() => {
     const fetchData = async () => {
-      if (!jwt) return;
+      // Only fetch Fachobjekte details — AA/AP have their own fetch pipeline
+      if (!jwt || sidebarVariant !== "fachobjekte") return;
 
       // Resolve sourceLayer + id from either the processed feature or the raw selection identifier
       let sourceLayer: string | undefined;
@@ -627,7 +735,13 @@ const BelisMapLibWrapper = ({
     };
 
     fetchData();
-  }, [selectedFeature, selectedFeatureId, jwt, featureDataVersion]);
+  }, [
+    selectedFeature,
+    selectedFeatureId,
+    jwt,
+    featureDataVersion,
+    sidebarVariant,
+  ]);
 
   // Close the datasheet when the selection is cleared in fachobjekte mode
   useEffect(() => {
@@ -701,6 +815,9 @@ const BelisMapLibWrapper = ({
   const [overrideSelectedFeature, setOverrideSelectedFeature] =
     useState<any>(null);
   useEffect(() => {
+    // Only run in Fachobjekte mode — AA/AP manage their own overrides
+    if (sidebarVariant !== "fachobjekte") return;
+
     const sourceLayer = selectedFeatureId?.sourceLayer ?? "";
     if (
       selectedFeature ||
@@ -773,6 +890,7 @@ const BelisMapLibWrapper = ({
     selectedFeatureId,
     infoboxMappingCode,
     rawFeature,
+    sidebarVariant,
   ]);
 
   // Visually select the MVT feature on the map when using the override path.
@@ -866,7 +984,6 @@ const BelisMapLibWrapper = ({
 
     // Data layers (always loaded — visibility toggled per route)
     layers.push(leuchtenDataLayer);
-    layers.push(arbeitsauftraegeDataLayer);
 
     return layers;
   }, [
@@ -876,36 +993,6 @@ const BelisMapLibWrapper = ({
     additionalLayerOpacities,
     inPaleMode,
   ]);
-
-  // Toggle AA layer visibility based on active route (hide when AP tab is active)
-  useEffect(() => {
-    if (!map) return;
-    const toggle = () => {
-      const visible =
-        sidebarVariant === "arbeitsauftraege" && activeAATab !== "ap";
-      for (const layer of map.getStyle()?.layers ?? []) {
-        if (
-          "source" in layer &&
-          layer.source === arbeitsauftraegeNamespacedSource
-        ) {
-          try {
-            map.setLayoutProperty(
-              layer.id,
-              "visibility",
-              visible ? "visible" : "none"
-            );
-          } catch {
-            /* layer may not be ready */
-          }
-        }
-      }
-    };
-    toggle();
-    map.on("styledata", toggle);
-    return () => {
-      map.off("styledata", toggle);
-    };
-  }, [sidebarVariant, activeAATab, map, arbeitsauftraegeNamespacedSource]);
 
   // Hide Fachobjekte layers when entering Arbeitsaufträge mode.
   // When returning to Fachobjekte, do nothing: useLayerFilter in MainPage
@@ -1010,6 +1097,22 @@ const BelisMapLibWrapper = ({
     }
   }, [sidebarVariant]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Clear map selection when the user switches to a different team so the
+  // info box doesn't show stale data from the previous team.
+  const prevTeamIdRef = useRef(selectedTeamId);
+  const teamVersionRef = useRef(0);
+  useEffect(() => {
+    const prev = prevTeamIdRef.current;
+    prevTeamIdRef.current = selectedTeamId;
+    // Only clear when switching from one real team to another real team.
+    // Skip null ↔ value transitions (draft mode enter/exit).
+    if (prev != null && selectedTeamId != null && prev !== selectedTeamId) {
+      teamVersionRef.current += 1;
+      clearMapSelection();
+      setOverrideSelectedFeature(null);
+    }
+  }, [selectedTeamId]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // --- Arbeitsauftraege: GraphQL fetch when team is selected ---
   useEffect(() => {
     if (sidebarVariant !== "arbeitsauftraege" || selectedTeamId == null || !jwt)
@@ -1017,20 +1120,27 @@ const BelisMapLibWrapper = ({
 
     let cancelled = false;
 
+    // Clear old features immediately so stale data is not shown on the map
+    // while new data is being fetched for the newly selected team.
+    dispatch(setAAFeatures([]));
+
     const fetchData = async () => {
       dispatch(setGraphqlLoading(true));
       dispatch(setGraphqlError(null));
       try {
         const raw = await fetchArbeitsauftraegeByTeam(jwt, selectedTeamId);
         if (cancelled) return;
-        const features = transformGqlToTileFeatures(raw as Record<string, unknown>[]);
+        const features = transformGqlToTileFeatures(
+          raw as Record<string, unknown>[]
+        );
         dispatch(setAAFeatures(features));
+        if (activeAATab !== "ap") {
+          fitAABounds(features, map);
+        }
       } catch (err) {
         if (cancelled) return;
         dispatch(
-          setGraphqlError(
-            err instanceof Error ? err.message : "Unknown error"
-          )
+          setGraphqlError(err instanceof Error ? err.message : "Unknown error")
         );
       } finally {
         if (!cancelled) dispatch(setGraphqlLoading(false));
@@ -1042,91 +1152,50 @@ const BelisMapLibWrapper = ({
     return () => {
       cancelled = true;
     };
-  }, [sidebarVariant, selectedTeamId, jwt, dispatch]);
+  }, [sidebarVariant, selectedTeamId, jwt, dispatch, featureDataVersion]);
 
-  // --- Arbeitsauftraege: extract tile features into Redux (fallback when no team) ---
+  // --- Arbeitsauftraege: GraphQL fetch draft AAs by IDs when in draft mode ---
   useEffect(() => {
-    if (sidebarVariant !== "arbeitsauftraege" || !map) return;
-    // When a team is selected, GraphQL handles sidebar data
-    if (selectedTeamId != null) return;
+    if (
+      sidebarVariant !== "arbeitsauftraege" ||
+      !draftMode ||
+      !draftAAIdSet ||
+      !jwt
+    )
+      return;
+    const ids = [...draftAAIdSet];
+    if (ids.length === 0) {
+      return;
+    }
 
-    const extractFeatures = () => {
+    let cancelled = false;
+
+    const fetchData = async () => {
+      dispatch(setGraphqlLoading(true));
+      dispatch(setGraphqlError(null));
       try {
-        const raw = map.querySourceFeatures(arbeitsauftraegeNamespacedSource, {
-          sourceLayer: "arbeitsauftraege",
-        });
-        const seen = new Map<number, ArbeitsauftragTileFeature>();
-        for (const f of raw) {
-          const id = Number(f.properties?.id);
-          if (id != null && !seen.has(id)) {
-            seen.set(id, {
-              id,
-              nummer: (f.properties?.nummer as string) ?? "",
-              team: (f.properties?.team as string) ?? "",
-              angelegt_am: (f.properties?.angelegt_am as string) ?? "",
-              angelegt_von: (f.properties?.angelegt_von as string) ?? "",
-              total_protokolle: Number(f.properties?.total_protokolle) || 0,
-              pct_offen: Number(f.properties?.pct_offen) || 0,
-              pct_in_bearbeitung: Number(f.properties?.pct_in_bearbeitung) || 0,
-              pct_erledigt: Number(f.properties?.pct_erledigt) || 0,
-              pct_fehlmeldung: Number(f.properties?.pct_fehlmeldung) || 0,
-              geometry: f.geometry,
-            });
-          }
-        }
-        dispatch(setAAFeatures([...seen.values()]));
-      } catch {
-        // source may not be loaded yet
+        const raw = await fetchArbeitsauftraegeByIds(jwt, ids);
+        if (cancelled) return;
+        const features = transformGqlToTileFeatures(
+          raw as Record<string, unknown>[]
+        );
+        dispatch(setAAFeatures(features));
+      } catch (err) {
+        if (cancelled) return;
+        dispatch(
+          setGraphqlError(err instanceof Error ? err.message : "Unknown error")
+        );
+      } finally {
+        if (!cancelled) dispatch(setGraphqlLoading(false));
       }
     };
 
-    map.on("sourcedata", extractFeatures);
-    map.on("moveend", extractFeatures);
-    // Initial extraction
-    extractFeatures();
+    void fetchData();
 
     return () => {
-      map.off("sourcedata", extractFeatures);
-      map.off("moveend", extractFeatures);
+      cancelled = true;
     };
-  }, [sidebarVariant, map, selectedTeamId, arbeitsauftraegeNamespacedSource, dispatch]);
-
-  // --- Arbeitsauftraege: filter map layers by selected team ---
-  useEffect(() => {
-    if (sidebarVariant !== "arbeitsauftraege" || !map) return;
-
-    const applyTeamFilter = () => {
-      const style = map.getStyle();
-      if (!style?.layers) return;
-      for (const layer of style.layers) {
-        if (
-          "source" in layer &&
-          layer.source === arbeitsauftraegeNamespacedSource
-        ) {
-          try {
-            if (selectedTeamName) {
-              map.setFilter(layer.id, [
-                "==",
-                ["get", "team"],
-                selectedTeamName,
-              ]);
-            } else {
-              map.setFilter(layer.id, null);
-            }
-          } catch {
-            // layer may not be ready yet
-          }
-        }
-      }
-    };
-
-    applyTeamFilter();
-    map.on("styledata", applyTeamFilter);
-
-    return () => {
-      map.off("styledata", applyTeamFilter);
-    };
-  }, [sidebarVariant, map, selectedTeamName, arbeitsauftraegeNamespacedSource]);
+  }, [sidebarVariant, draftMode, draftAAIdSet, jwt, dispatch]);
 
   // --- Arbeitsauftraege: selection feature-state on map ---
   const prevAAIdRef = useRef<number | null>(null);
@@ -1137,11 +1206,7 @@ const BelisMapLibWrapper = ({
     if (prevId != null && prevId !== selectedAAId) {
       try {
         map.setFeatureState(
-          {
-            source: arbeitsauftraegeNamespacedSource,
-            sourceLayer: "arbeitsauftraege",
-            id: prevId,
-          },
+          { source: AA_SOURCE, id: prevId },
           { selected: false }
         );
       } catch {
@@ -1151,11 +1216,7 @@ const BelisMapLibWrapper = ({
     if (selectedAAId != null) {
       try {
         map.setFeatureState(
-          {
-            source: arbeitsauftraegeNamespacedSource,
-            sourceLayer: "arbeitsauftraege",
-            id: selectedAAId,
-          },
+          { source: AA_SOURCE, id: selectedAAId },
           { selected: true }
         );
       } catch {
@@ -1163,7 +1224,20 @@ const BelisMapLibWrapper = ({
       }
     }
     prevAAIdRef.current = selectedAAId;
-  }, [sidebarVariant, map, selectedAAId, arbeitsauftraegeNamespacedSource]);
+  }, [sidebarVariant, map, selectedAAId]);
+
+  // --- Arbeitsauftraege: clear stale selection when AA disappears from features ---
+  useEffect(() => {
+    if (
+      sidebarVariant !== "arbeitsauftraege" ||
+      selectedAAId == null ||
+      aaGraphqlLoading // don't clear while features are being fetched (team switch / refetch)
+    )
+      return;
+    if (!aaFeatures.some((f) => f.id === selectedAAId)) {
+      dispatch(clearSelection());
+    }
+  }, [sidebarVariant, aaFeatures, selectedAAId, aaGraphqlLoading, dispatch]);
 
   // --- Arbeitsauftraege: fetch GraphQL detail on selection ---
   useEffect(() => {
@@ -1177,7 +1251,7 @@ const BelisMapLibWrapper = ({
       .then((data) => dispatch(setSelectedAAData(data)))
       .catch((err: Error) => dispatch(setAAError(err.message)))
       .finally(() => dispatch(setAALoading(false)));
-  }, [selectedAAId, jwt, dispatch]);
+  }, [selectedAAId, jwt, dispatch, featureDataVersion]);
 
   // --- Arbeitsauftraege: clear selection on empty map click ---
   useEffect(() => {
@@ -1200,14 +1274,11 @@ const BelisMapLibWrapper = ({
 
       // In AA mode: clear on empty click
       const hasRelevant = hits.some(
-        (h) =>
-          h.sourceLayer === "arbeitsauftraege" ||
-          h.layer?.id === "arbeitsauftraege_fill" ||
-          h.layer?.id === "arbeitsauftraege_outline" ||
-          h.source === AP_SOURCE
+        (h) => h.source === AA_SOURCE || h.source === AP_SOURCE
       );
       if (!hasRelevant) {
         dispatch(clearSelection());
+        setOverrideSelectedFeature(null);
       }
     };
 
@@ -1216,6 +1287,96 @@ const BelisMapLibWrapper = ({
       map.off("click", handleClick);
     };
   }, [sidebarVariant, activeAATab, map, dispatch]);
+
+  // --- Arbeitsauftraege: AA GeoJSON layer constants ---
+  const AA_SOURCE = "aa-features-source";
+  const AA_FILL_LAYER = "aa-geojson-fill";
+  const AA_OUTLINE_LAYER = "aa-geojson-outline";
+  const AA_SELECTION_LAYER = "aa-geojson-selection";
+
+  // --- Arbeitsauftraege: render AA convex hull polygons from client-side GeoJSON ---
+  useEffect(() => {
+    if (!map || !mapReady) return;
+
+    const addedLayerIds: string[] = [];
+
+    const removeLayers = () => {
+      try {
+        for (const id of addedLayerIds) {
+          if (map.getLayer(id)) map.removeLayer(id);
+        }
+        if (map.getSource(AA_SOURCE)) map.removeSource(AA_SOURCE);
+      } catch {
+        // layers/source may not exist
+      }
+    };
+
+    const shouldShow =
+      sidebarVariant === "arbeitsauftraege" && activeAATab !== "ap";
+
+    if (!shouldShow) {
+      removeLayers();
+      return removeLayers;
+    }
+
+    const visibleAA = draftAAIdSet
+      ? aaFeatures.filter((f) => draftAAIdSet.has(f.id))
+      : aaFeatures;
+    const geojson = buildAAFeatureCollection(visibleAA);
+
+    const existing = map.getSource(AA_SOURCE) as
+      | maplibregl.GeoJSONSource
+      | undefined;
+    if (existing) {
+      existing.setData(geojson);
+    } else {
+      map.addSource(AA_SOURCE, {
+        type: "geojson",
+        data: geojson,
+        promoteId: "id",
+      });
+    }
+
+    if (!map.getLayer(AA_FILL_LAYER)) {
+      map.addLayer({
+        id: AA_FILL_LAYER,
+        type: "fill",
+        source: AA_SOURCE,
+        paint: AA_LAYER_STYLES.fill,
+      });
+      addedLayerIds.push(AA_FILL_LAYER);
+    }
+
+    if (!map.getLayer(AA_OUTLINE_LAYER)) {
+      map.addLayer({
+        id: AA_OUTLINE_LAYER,
+        type: "line",
+        source: AA_SOURCE,
+        layout: {
+          "line-join": "round",
+          "line-cap": "round",
+        },
+        paint: AA_LAYER_STYLES.outline,
+      });
+      addedLayerIds.push(AA_OUTLINE_LAYER);
+    }
+
+    if (!map.getLayer(AA_SELECTION_LAYER)) {
+      map.addLayer({
+        id: AA_SELECTION_LAYER,
+        type: "line",
+        source: AA_SOURCE,
+        layout: {
+          "line-join": "round",
+          "line-cap": "round",
+        },
+        paint: AA_LAYER_STYLES.selection,
+      });
+      addedLayerIds.push(AA_SELECTION_LAYER);
+    }
+
+    return removeLayers;
+  }, [map, mapReady, sidebarVariant, activeAATab, aaFeatures, draftAAIdSet]);
 
   // --- Arbeitsauftraege: show AP Fachobjekte on map when AP tab is active ---
   // Map debug layer source-layer names to featureType property values in AP GeoJSON
@@ -1230,8 +1391,92 @@ const BelisMapLibWrapper = ({
     abzweigdosen: "abzweigdose",
   };
 
+  // Build GeoJSON from AP drafts + deletion-marked APs for draft mode map rendering
+  const apDraftGeoJson = useMemo((): GeoJSON.FeatureCollection => {
+    const currentAAId = selectedAAId != null ? String(selectedAAId) : null;
+    if (!currentAAId) return { type: "FeatureCollection", features: [] };
+
+    const features: GeoJSON.Feature[] = [];
+    const seenIds = new Set<number>();
+
+    for (const [id, d] of Object.entries(apDrafts)) {
+      if (d.aaId !== currentAAId) continue;
+      seenIds.add(Number(id));
+      let geometry = d.geometry ?? null;
+      let featureType = d.featureType ?? "tdta_standort_mast";
+
+      // Fallback: extract geometry from serverData snapshot
+      if (!geometry && d.serverData) {
+        const extracted = extractGeometry(
+          d.serverData as Record<string, unknown>
+        );
+        if (extracted) {
+          geometry = extracted.geometry;
+          featureType = extracted.featureType;
+        }
+      }
+
+      if (!geometry) continue;
+
+      features.push({
+        type: "Feature" as const,
+        geometry,
+        properties: {
+          id: Number(id),
+          featureType,
+          protokollnummer: d.meta?.protokollnummer ?? id,
+          shortname: d.meta?.shortname ?? d.meta?.fachobjektType ?? "",
+          veranlassung: d.meta?.veranlassung ?? "",
+          headerColor: d.meta?.headerColor ?? "#9CA3AF",
+          datum: d.meta?.datum ?? "",
+        },
+      });
+    }
+
+    // Add deletion-marked APs not already in apDrafts, using server data
+    if (selectedAAData?.ar_protokolleArray) {
+      for (const [apId, aaId] of Object.entries(apDeletions)) {
+        if (aaId !== currentAAId) continue;
+        if (seenIds.has(Number(apId))) continue;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const entry = selectedAAData.ar_protokolleArray.find(
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          (e: Record<string, any>) => e.arbeitsprotokoll?.id === Number(apId)
+        );
+        const protokoll = entry?.arbeitsprotokoll;
+        if (!protokoll) continue;
+        const result = extractGeometry(protokoll);
+        if (!result) continue;
+
+        features.push({
+          type: "Feature" as const,
+          geometry: result.geometry,
+          properties: {
+            id: Number(apId),
+            featureType: result.featureType,
+            protokollnummer: protokoll.protokollnummer ?? apId,
+            shortname: protokoll.shortname ?? result.featureType,
+            veranlassung: protokoll.veranlassung?.bezeichnung ?? "",
+            headerColor: getHeaderColorFromStatus(
+              protokoll.arbeitsprotokollstatus ?? null
+            ),
+            datum: protokoll.datum
+              ? new Date(protokoll.datum).toLocaleDateString("de-DE", {
+                  day: "2-digit",
+                  month: "2-digit",
+                  year: "numeric",
+                })
+              : "",
+          },
+        });
+      }
+    }
+
+    return { type: "FeatureCollection", features };
+  }, [apDrafts, apDeletions, selectedAAData, selectedAAId]);
+
   useEffect(() => {
-    if (!map) return;
+    if (!map || !mapReady) return;
 
     const addedLayerIds: string[] = [];
 
@@ -1246,17 +1491,25 @@ const BelisMapLibWrapper = ({
       }
     };
 
-    const shouldShow =
+    // Show AP features when: normal mode with AP tab + selected AA, or draft mode with AP tab
+    const shouldShowNormal =
       sidebarVariant === "arbeitsauftraege" &&
       activeAATab === "ap" &&
+      !draftMode &&
       selectedAAData != null;
+    const shouldShowDraft =
+      sidebarVariant === "arbeitsauftraege" &&
+      activeAATab === "ap" &&
+      draftMode;
 
-    if (!shouldShow) {
+    if (!shouldShowNormal && !shouldShowDraft) {
       removeLayers();
       return removeLayers;
     }
 
-    const geojson = buildApGeoJson(selectedAAData);
+    const geojson = shouldShowDraft
+      ? apDraftGeoJson
+      : buildApGeoJson(selectedAAData);
 
     // Add or update the GeoJSON source
     const existing = map.getSource(AP_SOURCE) as
@@ -1309,8 +1562,8 @@ const BelisMapLibWrapper = ({
       }
     }
 
-    // Add layers derived from debugLayers, rewritten for the AP GeoJSON source
-    for (const layer of debugLayers) {
+    // Add layers derived from protocolsLayers, rewritten for the AP GeoJSON source
+    for (const layer of protocolsLayers) {
       const sourceLayer =
         "source-layer" in layer
           ? ((layer as Record<string, unknown>)["source-layer"] as string)
@@ -1338,10 +1591,58 @@ const BelisMapLibWrapper = ({
     }
 
     return removeLayers;
-  }, [map, sidebarVariant, activeAATab, selectedAAData]);
+  }, [
+    map,
+    mapReady,
+    sidebarVariant,
+    activeAATab,
+    selectedAAData,
+    draftMode,
+    apDraftGeoJson,
+  ]);
 
   // Mini-map state
   const [miniMap, setMiniMap] = useState<maplibregl.Map | null>(null);
+  const [miniMapDebugInfo, setMiniMapDebugInfo] = useState<{
+    zoom: number;
+    center: [number, number];
+  } | null>(null);
+  useEffect(() => {
+    if (!miniMap) {
+      setMiniMapDebugInfo(null);
+      return;
+    }
+    const update = () => {
+      const c = miniMap.getCenter();
+      setMiniMapDebugInfo({
+        zoom: miniMap.getZoom(),
+        center: [c.lng, c.lat],
+      });
+    };
+    update();
+    miniMap.on("moveend", update);
+    miniMap.on("zoomend", update);
+    return () => {
+      miniMap.off("moveend", update);
+      miniMap.off("zoomend", update);
+    };
+  }, [miniMap]);
+  const [miniMapReady, setMiniMapReady] = useState(false);
+  useEffect(() => {
+    if (!miniMap) {
+      setMiniMapReady(false);
+      return;
+    }
+    if (miniMap.isStyleLoaded()) {
+      setMiniMapReady(true);
+      return;
+    }
+    const onLoad = () => setMiniMapReady(true);
+    miniMap.once("load", onLoad);
+    return () => {
+      miniMap.off("load", onLoad);
+    };
+  }, [miniMap]);
   const mapContainerRef = useRef<HTMLDivElement>(null);
 
   const {
@@ -1351,25 +1652,46 @@ const BelisMapLibWrapper = ({
     miniMapContainerRef,
   } = useDatasheetMiniMap({
     mainMap: map,
-    miniMap,
+    // #606: Pass null to disable the hook's center/zoom sync effects in AA mode,
+    // so the AP overlay's fitBounds (below) controls the minimap view instead.
+    miniMap:
+      sidebarVariant === "arbeitsauftraege" && selectedAAData ? null : miniMap,
     containerRef: mapContainerRef,
     debug: MINI_MAP_DEBUGGING,
+    // Share the same animation duration as the AA fitBounds calls below.
+    transitionMs: MINI_MAP_TRANSITION_MS,
+    // Fixed zoom: every feature selection eases to this level; user can
+    // adjust temporarily via mousewheel, but the next selection resets.
+    targetZoom: MINI_MAP_TARGET_ZOOM,
   });
 
   const handleMiniMapReady = useCallback((m: maplibregl.Map) => {
+    // Disable terrain on the minimap. Terrain causes getZoom() to report
+    // incorrect values because MapLibre recalculates zoom from the
+    // camera-to-terrain-surface distance instead of the requested zoom.
+    const disableTerrain = () => {
+      try {
+        m.setTerrain(null);
+      } catch {
+        /* style not ready */
+      }
+    };
+    if (m.isStyleLoaded()) {
+      disableTerrain();
+    } else {
+      m.once("styledata", disableTerrain);
+    }
     setMiniMap(m);
   }, []);
 
-  // --- Mini-map: toggle AA vector-tile layer visibility (hide when AP tab) ---
+  // Hide Fachobjekte layers on the mini map when in Arbeitsaufträge mode,
+  // and restore them when switching back.
   useEffect(() => {
-    if (!miniMap || sidebarVariant !== "arbeitsauftraege") return;
-    const toggle = () => {
-      const visible = activeAATab !== "ap";
+    if (!miniMap || !miniMapReady) return;
+
+    const setVisibility = (visible: boolean) => {
       for (const layer of miniMap.getStyle()?.layers ?? []) {
-        if (
-          "source" in layer &&
-          layer.source === arbeitsauftraegeNamespacedSource
-        ) {
+        if ("source" in layer && layer.source === namespacedSource) {
           try {
             miniMap.setLayoutProperty(
               layer.id,
@@ -1382,17 +1704,105 @@ const BelisMapLibWrapper = ({
         }
       }
     };
-    toggle();
-    miniMap.on("styledata", toggle);
-    return () => {
-      miniMap.off("styledata", toggle);
+
+    if (sidebarVariant === "arbeitsauftraege") {
+      setVisibility(false);
+      const hide = () => setVisibility(false);
+      miniMap.on("styledata", hide);
+      return () => {
+        miniMap.off("styledata", hide);
+      };
+    } else {
+      setVisibility(true);
+    }
+  }, [sidebarVariant, miniMap, miniMapReady, namespacedSource]);
+
+  // --- Mini-map: render AA convex hull polygons from client-side GeoJSON ---
+  // AA convex-hull polygons are no longer shown on the mini map;
+  // the AP overlay is displayed instead regardless of the active tab.
+  const MINI_AA_FILL = "mini-aa-fill";
+  const MINI_AA_OUTLINE = "mini-aa-outline";
+  useEffect(() => {
+    if (!miniMap || !miniMapReady) return;
+
+    const addedLayerIds: string[] = [];
+
+    const removeLayers = () => {
+      try {
+        for (const id of addedLayerIds) {
+          if (miniMap.getLayer(id)) miniMap.removeLayer(id);
+        }
+        if (miniMap.getSource(AA_SOURCE)) miniMap.removeSource(AA_SOURCE);
+      } catch {
+        // ignore
+      }
     };
-  }, [sidebarVariant, activeAATab, miniMap, arbeitsauftraegeNamespacedSource]);
+
+    removeLayers();
+    return removeLayers;
+
+    /* AA overlay disabled — keeping dead code below for reference
+    const shouldShow =
+      sidebarVariant === "arbeitsauftraege" && activeAATab !== "ap";
+
+    if (!shouldShow) {
+      removeLayers();
+      return removeLayers;
+    }
+    */
+
+    const visibleAA = draftAAIdSet
+      ? aaFeatures.filter((f) => draftAAIdSet.has(f.id))
+      : aaFeatures;
+    const geojson = buildAAFeatureCollection(visibleAA);
+
+    const existing = miniMap.getSource(AA_SOURCE) as
+      | maplibregl.GeoJSONSource
+      | undefined;
+    if (existing) {
+      existing.setData(geojson);
+    } else {
+      miniMap.addSource(AA_SOURCE, {
+        type: "geojson",
+        data: geojson,
+        promoteId: "id",
+      });
+    }
+
+    if (!miniMap.getLayer(MINI_AA_FILL)) {
+      miniMap.addLayer({
+        id: MINI_AA_FILL,
+        type: "fill",
+        source: AA_SOURCE,
+        paint: { "fill-color": "#E74C4C", "fill-opacity": 0.45 },
+      });
+      addedLayerIds.push(MINI_AA_FILL);
+    }
+
+    if (!miniMap.getLayer(MINI_AA_OUTLINE)) {
+      miniMap.addLayer({
+        id: MINI_AA_OUTLINE,
+        type: "line",
+        source: AA_SOURCE,
+        paint: { "line-color": "#C0392B", "line-width": 1 },
+      });
+      addedLayerIds.push(MINI_AA_OUTLINE);
+    }
+
+    return removeLayers;
+  }, [
+    miniMap,
+    miniMapReady,
+    sidebarVariant,
+    activeAATab,
+    aaFeatures,
+    draftAAIdSet,
+  ]);
 
   // --- Mini-map: add AP GeoJSON overlay when in AP tab ---
   const MINI_AP_LAYER_PREFIX = "mini-ap-";
   useEffect(() => {
-    if (!miniMap) return;
+    if (!miniMap || !miniMapReady) return;
 
     const addedLayerIds: string[] = [];
 
@@ -1408,9 +1818,7 @@ const BelisMapLibWrapper = ({
     };
 
     const shouldShow =
-      sidebarVariant === "arbeitsauftraege" &&
-      activeAATab === "ap" &&
-      selectedAAData != null;
+      sidebarVariant === "arbeitsauftraege" && selectedAAData != null;
 
     if (!shouldShow) {
       removeLayers();
@@ -1432,7 +1840,7 @@ const BelisMapLibWrapper = ({
       });
     }
 
-    for (const layer of debugLayers) {
+    for (const layer of protocolsLayers) {
       const sourceLayer =
         "source-layer" in layer
           ? ((layer as Record<string, unknown>)["source-layer"] as string)
@@ -1457,10 +1865,52 @@ const BelisMapLibWrapper = ({
       addedLayerIds.push(apLayerId);
     }
 
-    return removeLayers;
-  }, [miniMap, sidebarVariant, activeAATab, selectedAAData]);
+    // Fit mini map to all AP features
+    if (geojson.features.length > 0) {
+      let minLng = Infinity,
+        minLat = Infinity,
+        maxLng = -Infinity,
+        maxLat = -Infinity;
+      for (const feature of geojson.features) {
+        const geom = feature.geometry;
+        if (!geom) continue;
+        const flatCoords: number[][] =
+          geom.type === "Point"
+            ? [(geom as GeoJSON.Point).coordinates]
+            : geom.type === "LineString"
+            ? (geom as GeoJSON.LineString).coordinates
+            : geom.type === "MultiLineString"
+            ? (geom as GeoJSON.MultiLineString).coordinates.flat()
+            : [];
+        for (const [lng, lat] of flatCoords) {
+          if (lng < minLng) minLng = lng;
+          if (lat < minLat) minLat = lat;
+          if (lng > maxLng) maxLng = lng;
+          if (lat > maxLat) maxLat = lat;
+        }
+      }
+      if (minLng !== Infinity) {
+        miniMap.fitBounds(
+          [
+            [minLng, minLat],
+            [maxLng, maxLat],
+          ],
+          // Match the Fachobjekte mini-map's transition so switching AP rows
+          // feels as snappy. Without `duration`, MapLibre defaults to 1000ms,
+          // which felt sluggish vs. useDatasheetMiniMap's 200ms easeTo.
+          {
+            padding: 40,
+            maxZoom: MINI_MAP_TARGET_ZOOM,
+            duration: MINI_MAP_TRANSITION_MS,
+          }
+        );
+      }
+    }
 
-  // --- Mini-map: sync AP feature-state selection ---
+    return removeLayers;
+  }, [miniMap, miniMapReady, sidebarVariant, activeAATab, selectedAAData]);
+
+  // --- Mini-map: sync AP feature-state selection + fly to selected AP ---
   const prevMiniAPIdRef = useRef<number | null>(null);
   useEffect(() => {
     if (!miniMap) return;
@@ -1490,7 +1940,117 @@ const BelisMapLibWrapper = ({
     } catch {
       // source may not exist yet
     }
-  }, [miniMap, selectedAPId]);
+
+    // Fly the mini map to the selected AP feature
+    const geojson = draftMode
+      ? apDraftGeoJson
+      : selectedAAData
+      ? buildApGeoJson(selectedAAData)
+      : null;
+    const feature = geojson?.features.find(
+      (f) => f.properties?.id === selectedAPId
+    );
+    if (feature?.geometry) {
+      const geom = feature.geometry;
+      const flatCoords: number[][] =
+        geom.type === "Point"
+          ? [(geom as GeoJSON.Point).coordinates]
+          : geom.type === "LineString"
+          ? (geom as GeoJSON.LineString).coordinates
+          : geom.type === "MultiLineString"
+          ? (geom as GeoJSON.MultiLineString).coordinates.flat()
+          : [];
+      if (flatCoords.length > 0) {
+        let minLng = Infinity,
+          minLat = Infinity,
+          maxLng = -Infinity,
+          maxLat = -Infinity;
+        for (const [lng, lat] of flatCoords) {
+          if (lng < minLng) minLng = lng;
+          if (lat < minLat) minLat = lat;
+          if (lng > maxLng) maxLng = lng;
+          if (lat > maxLat) maxLat = lat;
+        }
+        miniMap.fitBounds(
+          [
+            [minLng, minLat],
+            [maxLng, maxLat],
+          ],
+          // Match the Fachobjekte mini-map's transition so switching AP rows
+          // feels as snappy. Without `duration`, MapLibre defaults to 1000ms,
+          // which felt sluggish vs. useDatasheetMiniMap's 200ms easeTo.
+          {
+            padding: 40,
+            maxZoom: MINI_MAP_TARGET_ZOOM,
+            duration: MINI_MAP_TRANSITION_MS,
+          }
+        );
+      }
+    }
+  }, [miniMap, selectedAPId, selectedAAData, draftMode, apDraftGeoJson]);
+
+  // --- Mini-map: mousewheel zoom in AA mode ---
+  // The useDatasheetMiniMap hook's wheel handler is disabled in AA mode
+  // (miniMap is passed as null), so we add our own here.
+  useEffect(() => {
+    const el = miniMapContainerRef.current;
+    if (!el || !miniMap || sidebarVariant !== "arbeitsauftraege") return;
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      const delta = -e.deltaY / 300;
+      const current = miniMap.getZoom();
+      miniMap.jumpTo({ zoom: Math.max(1, Math.min(22, current + delta)) });
+    };
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => {
+      el.removeEventListener("wheel", onWheel);
+    };
+  }, [miniMap, sidebarVariant, miniMapContainerRef]);
+
+  // Build infobox override for AA features.
+  // Always uses the override path because the AA GeoJSON source has no
+  // createInfoBoxInfo metadata — selectFeature() would produce an empty infobox.
+  // Visual highlighting on the map is handled by the feature-state effect (selectedAAId).
+  const handleAAFeatureSelect = useCallback(
+    (aaId: number) => {
+      // Clear any existing map selection so the override takes precedence
+      clearMapSelection();
+
+      const aaFeature = aaFeatures.find((f) => f.id === aaId);
+      if (!aaFeature) return;
+
+      const mappingCode = aaInfoboxMapping.join("\n");
+      const versionAtStart = teamVersionRef.current;
+      objectToInfo(aaFeature as unknown as Record<string, unknown>, mappingCode)
+        .then((info) => {
+          // Team changed while async — discard stale result
+          if (teamVersionRef.current !== versionAtStart) return;
+          if (info) {
+            const genericLinks: {
+              iconname: string;
+              tooltip: string;
+              action?: () => void;
+            }[] = [];
+            if ((info as Record<string, unknown>).datasheet && openDatasheet) {
+              genericLinks.push({
+                iconname: "info",
+                tooltip: "Datenblatt",
+                action: openDatasheet,
+              });
+            }
+            setOverrideSelectedFeature({
+              properties: { ...info, genericLinks },
+              geometry: aaFeature.geometry,
+              carmaInfo: { sourceLayer: "arbeitsauftraege" },
+            });
+          }
+        })
+        .catch(() => {
+          // ignore
+        });
+    },
+    [aaFeatures, clearMapSelection]
+  );
 
   // #554: Deterministic click selection: prefer standorte over leuchten
   // (Previous logic preferred leuchten, sorted by leuchtennummer:)
@@ -1506,16 +2066,12 @@ const BelisMapLibWrapper = ({
     (hits: maplibregl.MapGeoJSONFeature[]) => {
       // Arbeitsauftraege: intercept clicks on AA polygon layers
       if (sidebarVariant === "arbeitsauftraege") {
-        const aaHit = hits.find(
-          (h) =>
-            h.sourceLayer === "arbeitsauftraege" ||
-            h.layer?.id === "arbeitsauftraege_fill" ||
-            h.layer?.id === "arbeitsauftraege_outline"
-        );
+        const aaHit = hits.find((h) => h.source === AA_SOURCE);
         if (aaHit) {
           const aaId = Number(aaHit.properties?.id ?? aaHit.id);
           if (aaId != null) {
             dispatch(setSelectedAAId(aaId));
+            handleAAFeatureSelect(aaId);
           }
           // Return undefined to prevent normal selection flow
           return undefined;
@@ -1551,33 +2107,7 @@ const BelisMapLibWrapper = ({
       }
       return candidates[0];
     },
-    [map, sidebarVariant, dispatch]
-  );
-
-  // Sidebar click → trigger the same LibreMap selection pipeline that map clicks use.
-  // Finds the MVT feature in loaded tiles and calls selectFeature() so the infobox appears.
-  const handleAAFeatureSelect = useCallback(
-    (aaId: number) => {
-      if (!map) return;
-      const sourceFeatures = map.querySourceFeatures(
-        arbeitsauftraegeNamespacedSource,
-        { sourceLayer: "arbeitsauftraege" }
-      );
-      const match = sourceFeatures.find(
-        (f) => f.id === aaId || f.properties?.id === aaId
-      );
-      if (match) {
-        selectFeature(
-          {
-            source: arbeitsauftraegeNamespacedSource,
-            sourceLayer: "arbeitsauftraege",
-            id: match.id,
-          },
-          match as any
-        );
-      }
-    },
-    [map, arbeitsauftraegeNamespacedSource, selectFeature]
+    [map, sidebarVariant, dispatch, handleAAFeatureSelect]
   );
 
   // --- Arbeitsauftraege: clear/restore map selection when switching tabs ---
@@ -1586,8 +2116,18 @@ const BelisMapLibWrapper = ({
 
     if (activeAATab === "ap") {
       clearMapSelection();
-    } else if (activeAATab === "aa" && selectedAAId != null) {
-      handleAAFeatureSelect(selectedAAId);
+      // AP infobox effect will set the override; only clear if no AP is selected
+      if (selectedAPId == null) {
+        setOverrideSelectedFeature(null);
+      }
+    } else if (activeAATab === "aa") {
+      fitAABounds(aaFeatures, map);
+      if (selectedAAId != null) {
+        // handleAAFeatureSelect sets the override — don't clear it first
+        handleAAFeatureSelect(selectedAAId);
+      } else {
+        setOverrideSelectedFeature(null);
+      }
     }
   }, [activeAATab]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -1627,13 +2167,25 @@ const BelisMapLibWrapper = ({
     // Skip when not in Arbeitsaufträge mode (prevents stale AP overrides in Fachobjekte)
     if (sidebarVariant !== "arbeitsauftraege") return;
 
-    if (activeAATab !== "ap" || selectedAPId == null || !selectedAAData) {
-      // Only clear if we're leaving AP mode (don't clobber fachobjekte overrides)
-      if (activeAATab === "ap") setOverrideSelectedFeature(null);
+    // Not on AP tab — return early without clearing (AA handler manages its own override;
+    // stale AP override is cleared in the tab-switching effect above)
+    if (activeAATab !== "ap") return;
+    if (selectedAPId == null) {
+      setOverrideSelectedFeature(null);
       return;
     }
 
-    const geojson = buildApGeoJson(selectedAAData);
+    // In draft mode use local draft GeoJSON; in normal mode require server data
+    const geojson = draftMode
+      ? apDraftGeoJson
+      : selectedAAData
+      ? buildApGeoJson(selectedAAData)
+      : null;
+    if (!geojson) {
+      setOverrideSelectedFeature(null);
+      return;
+    }
+
     const feature = geojson.features.find(
       (f) => f.properties?.id === selectedAPId
     );
@@ -1668,7 +2220,14 @@ const BelisMapLibWrapper = ({
         }
       })
       .catch(() => setOverrideSelectedFeature(null));
-  }, [activeAATab, selectedAPId, selectedAAData, sidebarVariant]);
+  }, [
+    activeAATab,
+    selectedAPId,
+    selectedAAData,
+    sidebarVariant,
+    draftMode,
+    apDraftGeoJson,
+  ]);
 
   const handleReturnToMap = useCallback(() => {
     map?.resize();
@@ -1767,6 +2326,14 @@ const BelisMapLibWrapper = ({
         <ArbeitsauftraegeSidebar
           width={LIST_WIDTH}
           onFeatureSelect={handleAAFeatureSelect}
+          // Sort options from ../../helper/aaSortHelpers:
+          // AA_SORT_BY_DATE_DESC / AA_SORT_BY_DATE_ASC     — by creation date
+          // AA_SORT_BY_NUMMER_ASC / AA_SORT_BY_NUMMER_DESC — by AA number
+          // AA_SORT_BY_PROTOKOLLE_DESC / _ASC              — by protocol count
+          // AA_SORT_BY_TEAM_ASC                            — by team name
+          // AA_SORT_BY_ERLEDIGT_DESC                       — by % completed
+          // or use { field: "...", direction: "asc"|"desc" } for custom config
+          sort={AA_SORT_BY_PROTOKOLLE_DESC}
           onProtokollSelect={() => {
             /* fly-to handled by selectedAPId effect */
           }}
@@ -1795,6 +2362,9 @@ const BelisMapLibWrapper = ({
           highlightCount={adjustedHighlights?.length ?? undefined}
           draftsCount={draftFeaturesCount}
           onFeatureDismiss={handleSidebarDismiss}
+          namespacedSource={namespacedSource}
+          adjustedHighlights={adjustedHighlights}
+          setAdjustedHighlights={setAdjustedHighlights}
         />
       )}
       <div
@@ -1842,14 +2412,45 @@ const BelisMapLibWrapper = ({
               overrideGlyphs="https://tiles.cismet.de/fonts/{fontstack}/{range}.pbf"
               backgroundLayers="basemap_grey@60"
               layerMode="imperative"
-              libreLayers={[
-                sidebarVariant === "arbeitsauftraege"
-                  ? arbeitsauftraegeDataLayer
-                  : leuchtenDataLayer,
-              ]}
+              libreLayers={[leuchtenDataLayer]}
               setLibreMap={handleMiniMapReady}
             />
           </LibreContextProvider>
+          {showRaw && miniMapDebugInfo && (
+            <div
+              style={{
+                position: "absolute",
+                top: 4,
+                left: 4,
+                zIndex: 10,
+                background: "rgba(255, 255, 0, 0.85)",
+                color: "#000",
+                fontSize: 10,
+                fontFamily: "monospace",
+                padding: "2px 5px",
+                borderRadius: 3,
+                pointerEvents: "none",
+                lineHeight: 1.4,
+              }}
+            >
+              z{miniMapDebugInfo.zoom.toFixed(1)}{" "}
+              {miniMapDebugInfo.center[0].toFixed(5)},
+              {miniMapDebugInfo.center[1].toFixed(5)}
+              {miniMap && (
+                <>
+                  {" "}
+                  {miniMap.getCanvas().width}x{miniMap.getCanvas().height}{" "}
+                  {(() => {
+                    try {
+                      return miniMap.getTerrain() ? "TER" : "";
+                    } catch {
+                      return "";
+                    }
+                  })()}
+                </>
+              )}
+            </div>
+          )}
         </div>
         <DatasheetLayout
           mainMap={
@@ -1871,7 +2472,53 @@ const BelisMapLibWrapper = ({
             />
           }
           datasheetContent={
-            sidebarVariant === "arbeitsauftraege" && selectedAAData ? (
+            // Draft mode: render AP form directly from persisted draft snapshot
+            draftMode &&
+            apOpenedFrom != null &&
+            selectedAPId != null &&
+            apDrafts[String(selectedAPId)]?.serverData ? (
+              (() => {
+                const draft = apDrafts[String(selectedAPId)];
+                return (
+                  <ArbeitsauftraegeFormsWrapper
+                    mode="ap"
+                    id={String(selectedAPId)}
+                    data={draft.serverData as Record<string, unknown>}
+                    readOnly={!globalEditMode}
+                    aaId={draft.aaId}
+                    geometry={draft.geometry}
+                    fachobjektType={draft.featureType}
+                    onBack={() => {
+                      dispatch(setApOpenedFrom(null));
+                      dispatch(setActiveAATab("aa"));
+                    }}
+                  />
+                );
+              })()
+            ) : draftMode &&
+              sidebarVariant === "arbeitsauftraege" &&
+              selectedAPId != null &&
+              !selectedAAData &&
+              apDrafts[String(selectedAPId)]?.serverData ? (
+              (() => {
+                const draft = apDrafts[String(selectedAPId)];
+                return (
+                  <ArbeitsauftraegeFormsWrapper
+                    mode="ap"
+                    id={String(selectedAPId)}
+                    data={draft.serverData as Record<string, unknown>}
+                    readOnly={!globalEditMode}
+                    aaId={draft.aaId}
+                    geometry={draft.geometry}
+                    fachobjektType={draft.featureType}
+                    onBack={() => {
+                      dispatch(setApOpenedFrom(null));
+                      dispatch(setActiveAATab("aa"));
+                    }}
+                  />
+                );
+              })()
+            ) : sidebarVariant === "arbeitsauftraege" && selectedAAData ? (
               (() => {
                 const selectedProtokoll =
                   apOpenedFrom != null && selectedAPId != null
@@ -1883,23 +2530,45 @@ const BelisMapLibWrapper = ({
                     : null;
 
                 if (selectedProtokoll) {
+                  // Extract AP geometry and featureType from the AP GeoJSON
+                  const apGeo = buildApGeoJson(selectedAAData);
+                  const apFeature = apGeo.features.find(
+                    (f) => f.properties?.id === selectedAPId
+                  );
                   return (
-                    <ArbeitsprotokollForm
+                    <ArbeitsauftraegeFormsWrapper
+                      mode="ap"
+                      id={
+                        selectedAPId != null ? String(selectedAPId) : undefined
+                      }
                       data={selectedProtokoll}
                       loading={aaLoading}
-                      onBack={
-                        apOpenedFrom === "auTable"
-                          ? () => dispatch(setApOpenedFrom(null))
-                          : undefined
+                      readOnly={!globalEditMode}
+                      aaId={
+                        selectedAAId != null ? String(selectedAAId) : undefined
                       }
+                      geometry={apFeature?.geometry ?? undefined}
+                      fachobjektType={
+                        apFeature?.properties?.featureType as string | undefined
+                      }
+                      onBack={() => {
+                        dispatch(setApOpenedFrom(null));
+                        dispatch(setActiveAATab("aa"));
+                      }}
                     />
                   );
                 }
 
                 return (
-                  <ArbeitsauftragForm
+                  <ArbeitsauftraegeFormsWrapper
+                    mode="aa"
+                    id={selectedAAId != null ? String(selectedAAId) : undefined}
                     data={selectedAAData}
                     loading={aaLoading}
+                    readOnly={!globalEditMode}
+                    geometry={
+                      aaFeatures.find((f) => f.id === selectedAAId)?.geometry
+                    }
                   />
                 );
               })()

@@ -9,9 +9,39 @@ interface ArbeitsauftragFormProps {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   data: Record<string, any>;
   loading?: boolean;
+  readOnly?: boolean;
+  onToggleReadOnly?: () => void;
+  onCancel?: () => void;
+  onSave?: () => void;
+  hasDraft?: boolean;
+  onFormInstance?: (form: import("antd").FormInstance) => void;
+  draftValues?: Record<string, unknown>;
+  onValuesChange?: (
+    changedValues: Record<string, unknown>,
+    allValues: Record<string, unknown>
+  ) => void;
+  onOriginalValues?: (values: Record<string, unknown>) => void;
+  customDraftsCount?: number;
+  onSaveAll?: () => void;
+  aaId?: string;
 }
 
-const ArbeitsauftragForm = ({ data, loading }: ArbeitsauftragFormProps) => {
+const ArbeitsauftragForm = ({
+  data,
+  loading,
+  readOnly = true,
+  onToggleReadOnly,
+  onCancel,
+  onSave,
+  hasDraft,
+  onFormInstance,
+  draftValues,
+  onValuesChange,
+  onOriginalValues,
+  customDraftsCount,
+  onSaveAll,
+  aaId,
+}: ArbeitsauftragFormProps) => {
   const jwt = useSelector(getJWT);
 
   // Collect documents from all protocols' veranlassung.ar_dokumenteArray
@@ -32,7 +62,7 @@ const ArbeitsauftragForm = ({ data, loading }: ArbeitsauftragFormProps) => {
     return docs;
   }, [data]);
 
-  const subtitle = data.nummer ? `AU-${data.nummer}` : "";
+  const subtitle = data.nummer ? `AA-${data.nummer}` : "";
 
   return (
     <FeatureFormLayout
@@ -40,11 +70,26 @@ const ArbeitsauftragForm = ({ data, loading }: ArbeitsauftragFormProps) => {
       subtitle={subtitle}
       documents={documents}
       jwt={jwt}
+      sideContent={""}
       debugData={data}
       loading={loading}
-      readOnly
+      readOnly={readOnly}
+      onToggleReadOnly={onToggleReadOnly}
+      onCancel={onCancel}
+      onSave={onSave}
+      hasDraft={hasDraft}
+      customDraftsCount={customDraftsCount}
+      onSaveAll={onSaveAll}
     >
-      <ArbeitsauftragFormFields data={data} />
+      <ArbeitsauftragFormFields
+        data={data}
+        readOnly={readOnly}
+        onFormInstance={onFormInstance}
+        draftValues={draftValues}
+        onValuesChange={onValuesChange}
+        onOriginalValues={onOriginalValues}
+        aaId={aaId}
+      />
     </FeatureFormLayout>
   );
 };

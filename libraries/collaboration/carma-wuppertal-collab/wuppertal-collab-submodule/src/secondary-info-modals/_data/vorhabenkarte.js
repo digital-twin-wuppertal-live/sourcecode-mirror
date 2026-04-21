@@ -383,6 +383,65 @@ const data = {
         "state": {
             "selected": false
         }
+    },
+    "Neugestaltung Ankunftsort Adlerbrücke (forwarded selection)": {
+        "fid": 31,
+        "thema_signatur": "Icon_Mobilitaet",
+        "thema_farbe": "#3c6db5",
+        "bounds": "[7.188691,51.266122,7.191141,51.267209]",
+        "carmaInfo": {
+            "selectionForwardingTo": [
+                "vorhabenComplexGeoms",
+                "vorhabenPoints"
+            ],
+            "staticProps": {},
+            "propertyTarget": "vorhabenkarte_source.vorhabenComplexGeoms",
+            "sourceLayer": "vorhabenPoints"
+        },
+        "targetProperties": {
+            "fid": 31,
+            "titel": "Neugestaltung Ankunftsort Adlerbrücke",
+            "abgeschlossen": false,
+            "buergerbeteiligung": false,
+            "bounds": "[7.188691,51.266122,7.191141,51.267209]",
+            "beschreibung": "Die Neugestaltung des Ankunftsortes Adlerbrücke / Engelsquartier ist im Zeitraum von 2019 -2025 in Zusammenarbeit mit lokalen und städtischen Akteuren umgesetztes Aufwertungsprojekt des öffentlichen Raumes. Die Wiederherstellung der historischen Adlerbrücke, sowie die schaffung eines Ankunftsortes im sogenannnten Engelsquartier bilden die äußeren Anker des Projektes. Die Errichtung eines signalisierten Fußgängerweges konnte im Engelsjahr 2020 bereits eingeweiht werden. In diesem Zuge wurden auch die Gehwege neu plattiert und die Bushaltestellen ausgebaut.",
+            "thema_id": 1,
+            "thema_name": "Mobilität & Verkehr",
+            "thema_farbe": "#3c6db5",
+            "thema_signatur": "Icon_Mobilitaet",
+            "thema_fuellung": 30
+        },
+        "vectorId": 31
+    },
+    "Neugestaltung Kinderspielplatz Allensteiner Straße (forwarded selection)": {
+        "fid": 18,
+        "thema_signatur": "Icon_Kinder_und_Jugend",
+        "thema_farbe": "#835183",
+        "bounds": "[7.214842,51.284844,7.215958,51.285605]",
+        "carmaInfo": {
+            "selectionForwardingTo": [
+                "vorhabenComplexGeoms",
+                "vorhabenPoints"
+            ],
+            "staticProps": {},
+            "propertyTarget": "vorhabenkarte_source.vorhabenComplexGeoms",
+            "sourceLayer": "vorhabenPoints"
+        },
+        "targetProperties": {
+            "fid": 18,
+            "titel": "Neugestaltung Kinderspielplatz Allensteiner Straße",
+            "abgeschlossen": false,
+            "buergerbeteiligung": true,
+            "bounds": "[7.214842,51.284844,7.215958,51.285605]",
+            "fotos": "[{\"url\":\"KSP_Allensteinerstrasse__alt.jpg\",\"anzeige\":\"KSP Allensteiner Straße\"}]",
+            "beschreibung": "Der Spielplatz an der Allensteiner Straße wird neu gestaltet. Durch die Umnutzung des Bolzplatzes und die Erschließung einer dahinter liegenden Fläche wird die Nutzfläche deutlich erweitert und einer sinnvollen Nutzung für die Zielgruppe Kinder bis 14 Jahre zugeführt. Ziel ist es, in den dicht bebauten Bereichen eine hohe Qualität auf engem Raum anzubieten. Auf der Fläche sollen u.a. ein Basketballfeld, Tischtennisplatten, ein Panna-Feld und Klettergeräte entstehen.",
+            "thema_id": 3,
+            "thema_name": "Kinder & Jugend",
+            "thema_farbe": "#835183",
+            "thema_signatur": "Icon_Kinder_und_Jugend",
+            "thema_fuellung": 20
+        },
+        "vectorId": 18
     }
 };
 

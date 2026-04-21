@@ -18,15 +18,30 @@ export interface ArbeitsauftragTileFeature {
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export type ArbeitsauftragDetail = Record<string, any>;
 
+export interface LassoSelectedFeature {
+  id: string | number | undefined;
+  source: string;
+  sourceLayer: string | undefined;
+  properties: Record<string, unknown>;
+  geometry: GeoJSON.Geometry;
+}
+
 type AATabKey = "aa" | "ap";
 
 type ApOpenedFrom = "sidebar" | "auTable" | null;
+
+export interface ProtokolleSort {
+  field: string;
+  order: "ascend" | "descend";
+}
 
 interface ArbeitsauftraegeState {
   features: ArbeitsauftragTileFeature[];
   selectedAAId: number | null;
   selectedAAData: ArbeitsauftragDetail | null;
   selectedTeamId: number | null;
+  previousTeamId: number | null;
+  searchActive: boolean;
   activeAATab: AATabKey;
   selectedAPId: number | null;
   apOpenedFrom: ApOpenedFrom;
@@ -34,6 +49,9 @@ interface ArbeitsauftraegeState {
   error: string | null;
   graphqlLoading: boolean;
   graphqlError: string | null;
+  draftMode: boolean;
+  lassoSelectedFeatures: LassoSelectedFeature[];
+  protokolleSort: ProtokolleSort | null;
 }
 
 const initialState: ArbeitsauftraegeState = {
@@ -41,6 +59,8 @@ const initialState: ArbeitsauftraegeState = {
   selectedAAId: null,
   selectedAAData: null,
   selectedTeamId: null,
+  previousTeamId: null,
+  searchActive: false,
   activeAATab: "aa",
   selectedAPId: null,
   apOpenedFrom: null,
@@ -48,6 +68,9 @@ const initialState: ArbeitsauftraegeState = {
   error: null,
   graphqlLoading: false,
   graphqlError: null,
+  draftMode: false,
+  lassoSelectedFeatures: [],
+  protokolleSort: null,
 };
 
 const slice = createSlice({
@@ -69,6 +92,13 @@ const slice = createSlice({
     },
     setSelectedTeamId(state, action) {
       state.selectedTeamId = action.payload;
+      // Only clear searchActive when user explicitly picks a team
+      if (action.payload != null) {
+        state.searchActive = false;
+      }
+    },
+    setSearchActive(state, action: { payload: boolean }) {
+      state.searchActive = action.payload;
     },
     setActiveAATab(state, action: { payload: AATabKey }) {
       state.activeAATab = action.payload;
@@ -97,6 +127,35 @@ const slice = createSlice({
       state.apOpenedFrom = null;
       state.error = null;
     },
+    setDraftMode(state, action: { payload: boolean }) {
+      if (action.payload && !state.draftMode) {
+        // Entering draft mode: save current team, clear filter
+        state.previousTeamId = state.selectedTeamId;
+        state.selectedTeamId = null;
+      } else if (!action.payload && state.draftMode) {
+        // Leaving draft mode: restore saved team if user hasn't manually changed it
+        if (state.selectedTeamId == null) {
+          state.selectedTeamId = state.previousTeamId;
+        }
+        state.previousTeamId = null;
+      }
+      state.draftMode = action.payload;
+    },
+    setPreviousTeamId(state, action: { payload: number | null }) {
+      state.previousTeamId = action.payload;
+    },
+    setLassoSelectedFeatures(
+      state,
+      action: { payload: LassoSelectedFeature[] }
+    ) {
+      state.lassoSelectedFeatures = action.payload;
+    },
+    clearLassoSelectedFeatures(state) {
+      state.lassoSelectedFeatures = [];
+    },
+    setProtokolleSort(state, action: { payload: ProtokolleSort | null }) {
+      state.protokolleSort = action.payload;
+    },
   },
 });
 
@@ -107,6 +166,7 @@ export const {
   setSelectedAAId,
   setSelectedAAData,
   setSelectedTeamId,
+  setSearchActive,
   setActiveAATab,
   setSelectedAPId,
   setApOpenedFrom,
@@ -115,6 +175,11 @@ export const {
   setGraphqlLoading,
   setGraphqlError,
   clearSelection,
+  setDraftMode,
+  setPreviousTeamId,
+  setLassoSelectedFeatures,
+  clearLassoSelectedFeatures,
+  setProtokolleSort,
 } = slice.actions;
 
 export const getAAFeatures = (state: RootState) =>
@@ -138,3 +203,13 @@ export const getGraphqlLoading = (state: RootState) =>
   state.arbeitsauftraege.graphqlLoading;
 export const getGraphqlError = (state: RootState) =>
   state.arbeitsauftraege.graphqlError;
+export const getSearchActive = (state: RootState) =>
+  state.arbeitsauftraege.searchActive;
+export const getDraftMode = (state: RootState) =>
+  state.arbeitsauftraege.draftMode;
+export const getPreviousTeamId = (state: RootState) =>
+  state.arbeitsauftraege.previousTeamId;
+export const getLassoSelectedFeatures = (state: RootState) =>
+  state.arbeitsauftraege.lassoSelectedFeatures;
+export const getProtokolleSort = (state: RootState) =>
+  state.arbeitsauftraege.protokolleSort;

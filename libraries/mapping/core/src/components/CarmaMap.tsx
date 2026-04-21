@@ -3,7 +3,7 @@ import {
   ControlButtonStyler,
   ControlLayout,
 } from "@carma-mapping/map-controls-layout";
-import { useCallback, useContext, useState } from "react";
+import { useCallback, useContext, useEffect, useState } from "react";
 import TopicMapComponent from "react-cismap/topicmaps/TopicMapComponent";
 import {
   FullscreenControl,
@@ -48,7 +48,13 @@ export type { VectorStyle, LibreLayer };
 
 interface CarmaMapProps extends LibreMapProps {
   mapEngine?: "leaflet" | "maplibre" | "cesium";
-  onClick?: () => void;
+  /**
+   * Application key used to scope localStorage keys (e.g. terrain setting).
+   * Without this, settings leak across apps on the same origin.
+   */
+  appKey?: string;
+  /** Show a crosshair overlay that jumps to the last click position (debug aid for 3D selection) */
+  clickCrosshairDebugMode?: boolean;
   modalMenu?: React.ReactNode;
   gazetteerSearchControl?: boolean;
   gazetteerSearchComponent?: React.ReactNode;
@@ -68,17 +74,21 @@ interface CarmaMapProps extends LibreMapProps {
   /** Non-interactive map: disables all controls, compass, interaction */
   miniMap?: boolean;
   /** Runtime parameters for 3D layers (e.g. radiusMix, useLoft) */
-  threeRuntimeParams?: Record<string, number>;
+  threeRuntimeParams?: Record<string, number | string>;
   /** Ref for 3D layer performance data */
   threePerfRef?: React.MutableRefObject<
     import("@carma-mapping/engines/threejs").ThreePerfData
   >;
 }
 
+const TERRAIN_STORAGE_KEY = "carma-map-terrain";
+
 const CarmaMapContent = (props: CarmaMapProps) => {
   const {
     mapEngine = "leaflet",
+    appKey,
     miniMap = false,
+    clickCrosshairDebugMode = false,
     locatorControl: locatorControlProp = true,
     fullScreenControl: fullScreenControlProp = true,
     zoomControls: zoomControlsProp = true,
@@ -91,6 +101,20 @@ const CarmaMapContent = (props: CarmaMapProps) => {
     children,
     embedded = false,
   } = props;
+
+  const terrainStorageKey = appKey
+    ? `${appKey}:${TERRAIN_STORAGE_KEY}`
+    : TERRAIN_STORAGE_KEY;
+
+  // Warn once if appKey is missing (settings leak across apps on the same origin)
+  useState(() => {
+    if (!appKey && !miniMap) {
+      console.warn(
+        "[CarmaMap] appKey prop is not set. localStorage settings (e.g. terrain) " +
+        "will leak across all apps on this origin. Pass appKey to scope them."
+      );
+    }
+  });
 
   // miniMap mode: disable all controls, compass, interaction, infobox
   const locatorControl = miniMap ? false : locatorControlProp;
@@ -107,15 +131,69 @@ const CarmaMapContent = (props: CarmaMapProps) => {
   const { selectedBackground, backgroundConfigurations, namedMapStyle } =
     useContext<typeof TopicMapStylingContext>(TopicMapStylingContext);
   const [libreMap, setLibreMap] = useState<maplibregl.Map | null>(null);
-  const [showTerrain, setShowTerrain] = useState(false);
+  const [showTerrain, setShowTerrain] = useState(() => {
+    try { return localStorage.getItem(terrainStorageKey) === "true"; } catch { return false; }
+  });
+  // Crosshair debug: store geographic position so the crosshair tracks
+  // correctly when terrain is toggled or camera moves
+  const [crosshairLngLat, setCrosshairLngLat] = useState<{
+    lng: number;
+    lat: number;
+  } | null>(null);
+  const [crosshairScreen, setCrosshairScreen] = useState<{
+    x: number;
+    y: number;
+  } | null>(null);
+  useEffect(() => {
+    if (!libreMap || !clickCrosshairDebugMode) return;
+    const handler = (e: maplibregl.MapMouseEvent) => {
+      setCrosshairLngLat({ lng: e.lngLat.lng, lat: e.lngLat.lat });
+    };
+    libreMap.on("click", handler);
+    return () => {
+      libreMap.off("click", handler);
+    };
+  }, [libreMap, clickCrosshairDebugMode]);
+
+  // RAF loop: continuously project stored lnglat to screen coords
+  // so crosshair tracks correctly during terrain toggle / camera move
+  useEffect(() => {
+    if (!libreMap || !crosshairLngLat || !clickCrosshairDebugMode) return;
+    let rafId: number;
+    const update = () => {
+      const pt = libreMap.project([crosshairLngLat.lng, crosshairLngLat.lat]);
+      const rect = libreMap.getCanvas().getBoundingClientRect();
+      setCrosshairScreen({ x: pt.x + rect.left, y: pt.y + rect.top });
+      rafId = requestAnimationFrame(update);
+    };
+    update();
+    return () => cancelAnimationFrame(rafId);
+  }, [libreMap, crosshairLngLat, clickCrosshairDebugMode]);
 
   // Stable callback to avoid re-creating LibreMap on every render
   const handleLibreMapReady = useCallback(
     (map: maplibregl.Map) => {
       setLibreMap(map);
       props.setLibreMap?.(map);
+
+      // Restore terrain if it was persisted as enabled
+      if (showTerrain && !map.terrain) {
+        const source = WUPPERTAL_CONFIG.terrain
+          ? slugifyUrl(WUPPERTAL_CONFIG.terrain.url)
+          : "terrainSource";
+        const apply = () => {
+          if (map.getSource(source)) {
+            map.setTerrain({ source, exaggeration: 1 });
+          }
+        };
+        if (map.isStyleLoaded()) {
+          apply();
+        } else {
+          map.once("styledata", apply);
+        }
+      }
     },
-    [props.setLibreMap]
+    [props.setLibreMap, showTerrain]
   );
 
   // Compute background layers - either from props or from context.
@@ -171,6 +249,7 @@ const CarmaMapContent = (props: CarmaMapProps) => {
                       if (libreMap?.terrain) {
                         libreMap.setTerrain(null);
                         setShowTerrain(false);
+                        localStorage.setItem(terrainStorageKey, "false");
                       } else if (libreMap) {
                         libreMap.setTerrain({
                           source: WUPPERTAL_CONFIG.terrain
@@ -179,6 +258,7 @@ const CarmaMapContent = (props: CarmaMapProps) => {
                           exaggeration: 1,
                         });
                         setShowTerrain(true);
+                        localStorage.setItem(terrainStorageKey, "true");
                       }
                     }}
                     className="font-semibold"
@@ -299,6 +379,36 @@ const CarmaMapContent = (props: CarmaMapProps) => {
             )}
             {modalMenu}
           </ControlLayout>
+
+          {clickCrosshairDebugMode && crosshairScreen && (
+            <>
+              {/* Red crosshair: actual click position (terrain-aware) */}
+              <div
+                style={{
+                  position: "fixed",
+                  left: `${crosshairScreen.x}px`,
+                  top: 0,
+                  width: 1,
+                  height: "100vh",
+                  background: "rgba(255,0,0,0.6)",
+                  pointerEvents: "none",
+                  zIndex: 999999,
+                }}
+              />
+              <div
+                style={{
+                  position: "fixed",
+                  left: 0,
+                  top: `${crosshairScreen.y}px`,
+                  height: 1,
+                  width: "100vw",
+                  background: "rgba(255,0,0,0.6)",
+                  pointerEvents: "none",
+                  zIndex: 999999,
+                }}
+              />
+            </>
+          )}
         </div>
       </MapFrameworkSwitcherProvider>
     </HashStateProvider>

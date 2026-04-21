@@ -26,6 +26,7 @@ import {
   EmptySearchComponent,
   LibFuzzySearch,
   defaultTypeInference,
+  type GazDataItem,
 } from "@carma-mapping/fuzzy-search";
 import { Control, ControlLayout } from "@carma-mapping/map-controls-layout";
 import {
@@ -39,13 +40,24 @@ import {
   TAILWIND_CLASSNAMES_FULLSCREEN_FIXED,
 } from "@carma-commons/utils";
 import { GenericInfoBoxFromFeature } from "@carma-appframeworks/portals";
-import SecondaryInfoModal, { LightboxDispatch } from "./SecondaryInfoModal";
+import { genericSecondaryInfoFooterFactory } from "@carma-collab/wuppertal/commons";
+
+import SIMComponentDictionary from "@carma-collab/wuppertal/secondary-info-modals";
+
+const SecondaryInfoModal = SIMComponentDictionary["vorhabenkarteSIM"];
+
+type LightboxDispatch = {
+  setPhotoUrls: (urls: string[]) => void;
+  setIndex: (i: number) => void;
+  setTitle: (t: string) => void;
+  setCaptions: (t: string[]) => void;
+  setVisible: (v: boolean) => void;
+};
 import { FeatureIconOverlay } from "./FeatureIconOverlay";
 import { TopicMapDispatchContext } from "react-cismap/contexts/TopicMapContextProvider";
 import { isAreaType } from "@carma-commons/resources";
 import { LightBoxDispatchContext } from "react-cismap/contexts/LightBoxContextProvider";
 import { useGazData } from "@carma-appframeworks/portals";
-import { type GazDataItem } from "@carma-commons/utils";
 import versionData from "../../version.json";
 import { useUrlFeatureSelection } from "@carma-appframeworks/portals";
 
@@ -232,6 +244,10 @@ const Map = () => {
               versionString={getApplicationVersion(versionData)}
               feature={selectedFeature}
               setOpen={setSecondaryInfoVisible}
+              Footer={genericSecondaryInfoFooterFactory({
+                skipTeilzwilling: false,
+              })}
+              skipTeilzwilling={false}
             />
           )}
           <TopicMapSelectionContent />

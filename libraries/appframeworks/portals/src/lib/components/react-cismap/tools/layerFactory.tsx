@@ -116,8 +116,6 @@ const createLayerFactoryFunction = (key, _conf = defaultLayerConf) => {
     ..._conf,
   };
 
-  console.log("xxx", key);
-
   switch ((conf.namedLayers[key] || {}).type) {
     case "empty":
       return () => {
@@ -454,6 +452,21 @@ export const defaultLayerConf = {
       type: "vector",
       style:
         "https://sgx.geodatenzentrum.de/gdz_basemapde_vektor/styles/bm_web_top.json",
+    },
+    our_basemap_grey: {
+      type: "vector",
+      style:
+        "https://tiles.cismet.de/basemap_de/basemap_grey.style.json",
+    },
+    our_basemap_color: {
+      type: "vector",
+      style:
+        "https://tiles.cismet.de/basemap_de/basemap_color.style.json",
+    },
+    our_basemap_relief: {
+      type: "vector",
+      style:
+        "https://tiles.cismet.de/basemap_de/basemap_relief.style.json",
     },
     amtlich: {
       type: "tiles",

@@ -1,12 +1,16 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import BelisMapLibWrapper from "./BelisMapWrapper";
 import { useSelector, useDispatch } from "react-redux";
 import { CustomCard } from "./CustomCard";
 import { useWindowSize } from "@react-hook/window-size";
 import type { AppDispatch } from "../../store";
 import { useDatasheet } from "@carma-mapping/engines/maplibre";
-import { Button, Spin, Switch, Tooltip } from "antd";
-import { EditOutlined, LockOutlined } from "@ant-design/icons";
+import { Badge, Button, Spin, Switch, Tooltip } from "antd";
+import {
+  EditOutlined,
+  LockOutlined,
+  SaveOutlined,
+} from "@ant-design/icons";
 import {
   getGlobalEditMode,
   toggleGlobalEditMode,
@@ -16,11 +20,15 @@ import {
   getSelectedTeamId,
   setSelectedTeamId,
   clearSelection,
+  getDraftMode,
+  setDraftMode,
 } from "../../store/slices/arbeitsauftraege";
+import { getTotalDraftCount } from "../../store/slices/arbeitsauftraegeDrafts";
 import { BELIS_FILTER_CATEGORIES } from "../../config/mapLayerConfigs";
 import LeitungstypDropdown from "../ui/LeitungstypDropdown";
 import TeamSelect from "../ui/TeamSelect";
 import SearchModal from "../ui/SearchModal";
+import ArbeitsauftragSearchModal from "../ui/ArbeitsauftragSearchModal";
 import StreetSearch from "../ui/StreetSearch";
 import type { SidebarFeature } from "../ui/BelisSidebar";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
@@ -45,6 +53,8 @@ const BelisMapPageShell = () => {
   const globalEditMode = useSelector(getGlobalEditMode);
 
   const selectedTeamId = useSelector(getSelectedTeamId);
+  const draftMode = useSelector(getDraftMode);
+  const totalDraftCount = useSelector(getTotalDraftCount);
 
   const { config } = useMapPage();
   const {
@@ -57,10 +67,19 @@ const BelisMapPageShell = () => {
   } = config;
 
   const [streets, setStreets] = useState<BelisStreet[]>([]);
+  const { setActiveHighlights } = useMapPage();
+
   const [highlightResults, setHighlightResults] = useState<
     SidebarFeature[] | null
   >(null);
   const [lassoActive, setLassoActive] = useState(false);
+
+  const handleHighlightsChange = useCallback(
+    (highlights: SidebarFeature[] | null) => {
+      setActiveHighlights(highlights);
+    },
+    [setActiveHighlights]
+  );
 
   const { isDatasheetOpen, closeDatasheet } = useDatasheet();
   const [windowWidth, windowHeight] = useWindowSize();
@@ -73,6 +92,13 @@ const BelisMapPageShell = () => {
     if (param !== null) return param === "true";
     return window.location.hostname === "localhost";
   }, []);
+
+  // Auto-exit draft mode when all drafts have been cancelled/removed
+  useEffect(() => {
+    if (draftMode && totalDraftCount === 0) {
+      dispatch(setDraftMode(false));
+    }
+  }, [draftMode, totalDraftCount, dispatch]);
 
   // Fetch streets data once
   useEffect(() => {
@@ -129,9 +155,40 @@ const BelisMapPageShell = () => {
         <CustomCard
           title={
             windowWidth > 1364 ? (
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 my-1">
                 <span>{isDatasheetOpen ? "Datenblatt" : title}</span>
                 {editModeButton}
+                {sidebarVariant === "arbeitsauftraege" &&
+                  totalDraftCount > 0 && (
+                    <Badge
+                      count={totalDraftCount}
+                      size="small"
+                      offset={[-2, 2]}
+                      style={{
+                        fontSize: 10,
+                        minWidth: 14,
+                        height: 14,
+                        lineHeight: "14px",
+                        padding: "0 3px",
+                      }}
+                    >
+                      <button
+                        onClick={() => dispatch(setDraftMode(!draftMode))}
+                        className={`flex items-center justify-center w-6 h-6 rounded transition-colors ${
+                          draftMode
+                            ? "bg-blue-600 text-white"
+                            : "bg-gray-200 text-gray-600 hover:bg-gray-300"
+                        }`}
+                        title={
+                          draftMode
+                            ? "Entwurfsmodus beenden"
+                            : "Entwürfe anzeigen"
+                        }
+                      >
+                        <SaveOutlined style={{ fontSize: 12 }} />
+                      </button>
+                    </Badge>
+                  )}
               </div>
             ) : undefined
           }
@@ -139,6 +196,38 @@ const BelisMapPageShell = () => {
           extra={
             <div className="flex items-center gap-4">
               {windowWidth <= 1364 && editModeButton}
+              {windowWidth <= 1364 &&
+                sidebarVariant === "arbeitsauftraege" &&
+                totalDraftCount > 0 && (
+                  <Badge
+                    count={totalDraftCount}
+                    size="small"
+                    offset={[-2, 2]}
+                    style={{
+                      fontSize: 10,
+                      minWidth: 14,
+                      height: 14,
+                      lineHeight: "14px",
+                      padding: "0 3px",
+                    }}
+                  >
+                    <button
+                      onClick={() => dispatch(setDraftMode(!draftMode))}
+                      className={`flex items-center justify-center w-6 h-6 rounded transition-colors ${
+                        draftMode
+                          ? "bg-blue-600 text-white"
+                          : "bg-gray-200 text-gray-600 hover:bg-gray-300"
+                      }`}
+                      title={
+                        draftMode
+                          ? "Entwurfsmodus beenden"
+                          : "Entwürfe anzeigen"
+                      }
+                    >
+                      <SaveOutlined style={{ fontSize: 12 }} />
+                    </button>
+                  </Badge>
+                )}
 
               {showSearch && (
                 <div className="flex items-center gap-2">
@@ -207,12 +296,14 @@ const BelisMapPageShell = () => {
               )}
 
               {filterConfig?.variant === "arbeitsauftraege" && (
-                <div className="ml-auto">
+                <div className="flex items-center gap-2 ml-auto">
+                  <ArbeitsauftragSearchModal onSearchDone={closeDatasheet} />
                   <TeamSelect
                     value={selectedTeamId}
                     onChange={(id) => {
                       dispatch(setSelectedTeamId(id));
                       dispatch(clearSelection());
+                      closeDatasheet();
                     }}
                   />
                 </div>
@@ -227,6 +318,7 @@ const BelisMapPageShell = () => {
             lassoActive={lassoActive}
             onLassoDeactivate={() => setLassoActive(false)}
             sidebarVariant={sidebarVariant}
+            onHighlightsChange={handleHighlightsChange}
           />
         </CustomCard>
       </div>

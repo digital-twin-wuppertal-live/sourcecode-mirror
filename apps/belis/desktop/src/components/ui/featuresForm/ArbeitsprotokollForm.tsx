@@ -1,5 +1,6 @@
 import { useMemo } from "react";
 import type { ReactNode } from "react";
+import { Timeline } from "antd";
 import { useSelector } from "react-redux";
 import { getFachobjektOfProtocol } from "@carma-appframeworks/belis";
 import FeatureFormLayout from "./FeatureFormLayout";
@@ -16,13 +17,42 @@ interface ArbeitsprotokollFormProps {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   data: Record<string, any>;
   loading?: boolean;
+  readOnly?: boolean;
+  onToggleReadOnly?: () => void;
+  onCancel?: () => void;
+  onSave?: () => void;
+  hasDraft?: boolean;
   onBack?: () => void;
+  onFormInstance?: (form: import("antd").FormInstance) => void;
+  draftValues?: Record<string, unknown>;
+  onValuesChange?: (
+    changedValues: Record<string, unknown>,
+    allValues: Record<string, unknown>
+  ) => void;
+  onOriginalValues?: (values: Record<string, unknown>) => void;
+  apId?: string;
+  aaId?: string;
+  customDraftsCount?: number;
+  onSaveAll?: () => void;
 }
 
 const ArbeitsprotokollForm = ({
   data,
   loading,
+  readOnly = true,
+  onToggleReadOnly,
+  onCancel,
+  onSave,
+  hasDraft,
   onBack,
+  onFormInstance,
+  draftValues,
+  onValuesChange,
+  onOriginalValues,
+  apId,
+  aaId,
+  customDraftsCount,
+  onSaveAll,
 }: ArbeitsprotokollFormProps) => {
   const jwt = useSelector(getJWT);
 
@@ -40,6 +70,47 @@ const ArbeitsprotokollForm = ({
     }
     return docs;
   }, [data]);
+
+  const aenderungItems = useMemo(() => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const arr: Record<string, any>[] = data?.arbeitsprotokollaktionArray ?? [];
+    return arr.map((entry) => ({
+      color: "blue" as const,
+      children: (
+        <div>
+          {entry.aenderung ?? ""}:{" "}
+          {entry.alt ? (
+            <>
+              von <span style={{ color: "grey" }}>{entry.alt}</span>{" "}
+            </>
+          ) : null}
+          zu <b>{entry.neu || "-"}</b>
+        </div>
+      ),
+    }));
+  }, [data]);
+
+  const timelineContent = (
+    <div>
+      <div
+        style={{
+          fontSize: 14,
+          fontWeight: 500,
+          color: "#374151",
+          marginBottom: 8,
+        }}
+      >
+        Änderungen ({aenderungItems.length})
+      </div>
+      {aenderungItems.length > 0 ? (
+        <Timeline style={{ paddingInlineStart: 0 }} items={aenderungItems} />
+      ) : (
+        <div style={{ color: "#8c8c8c", fontSize: 13, padding: "16px 0" }}>
+          Keine Änderungen vorhanden
+        </div>
+      )}
+    </div>
+  );
 
   const title = `Protokoll #${data.protokollnummer ?? ""}`;
   const subtitle = fachobjekt?.shortname ?? "";
@@ -126,15 +197,29 @@ const ArbeitsprotokollForm = ({
       subtitle={subtitle}
       documents={documents}
       jwt={jwt}
+      sideContent={timelineContent}
       debugData={data}
       loading={loading}
-      readOnly
+      readOnly={readOnly}
+      onToggleReadOnly={onToggleReadOnly}
+      onCancel={onCancel}
+      onSave={onSave}
+      hasDraft={hasDraft}
       onBack={onBack}
+      customDraftsCount={customDraftsCount}
+      onSaveAll={onSaveAll}
       additionalTabs={fachobjektTab ? [fachobjektTab] : []}
     >
       <ArbeitsprotokollFormFields
         data={data}
         fachobjektType={fachobjekt?.type}
+        readOnly={readOnly}
+        onFormInstance={onFormInstance}
+        draftValues={draftValues}
+        onValuesChange={onValuesChange}
+        onOriginalValues={onOriginalValues}
+        apId={apId}
+        aaId={aaId}
       />
     </FeatureFormLayout>
   );

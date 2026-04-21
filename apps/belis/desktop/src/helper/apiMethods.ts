@@ -14,6 +14,7 @@ import {
   SAVE_ENDPOINT,
   DELETE_ENDPOINT,
   UPLOAD_DOCUMENT_ENDPOINT,
+  buildActionEndpoint,
   teamQuery,
   tkeyBezirkQuery,
   tkeyDoppelkommandoQuery,
@@ -35,6 +36,7 @@ import {
   abzweigdoseByIdQuery,
   arbeitsauftragByIdQuery,
   arbeitsauftraegeByTeamQuery,
+  arbeitsauftraegeByIdsQuery,
 } from "../constants/belis";
 
 export const savebauart = async (jwt: string) => {
@@ -111,6 +113,43 @@ export const updateDataByClassName = async <T extends Record<string, unknown>>(
   if (!response.ok) {
     throw new Error(
       `saveObject(${className}) failed: ${response.status} ${text}`
+    );
+  }
+
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    return text;
+  }
+};
+
+export const executeAction = async (
+  jwt: string,
+  actionName: string,
+  params: Record<string, string>
+) => {
+  const formData = new FormData();
+  const taskparams = JSON.stringify({ parameters: params });
+
+  formData.append(
+    "taskparams",
+    new Blob([taskparams], { type: "application/json" }),
+    "taskparams"
+  );
+
+  const response = await fetch(buildActionEndpoint(actionName), {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${jwt}`,
+    },
+    body: formData,
+  });
+
+  const text = await response.text();
+
+  if (!response.ok) {
+    throw new Error(
+      `executeAction(${actionName}) failed: ${response.status} ${text}`
     );
   }
 
@@ -1311,6 +1350,45 @@ export const fetchArbeitsauftraegeByTeam = async (
   if (json.errors) {
     throw new Error(
       `fetchArbeitsauftraegeByTeam GraphQL errors: ${JSON.stringify(
+        json.errors
+      )}`
+    );
+  }
+
+  return json.data?.arbeitsauftrag ?? [];
+};
+
+export const fetchArbeitsauftraegeByIds = async (
+  jwt: string,
+  ids: number[]
+) => {
+  const response = await fetch(ENDPOINT, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${jwt}`,
+    },
+    body: JSON.stringify({
+      query: arbeitsauftraegeByIdsQuery,
+      variables: { ids },
+    }),
+  });
+
+  const text = await response.text();
+  if (!response.ok) {
+    throw new Error(
+      `fetchArbeitsauftraegeByIds failed: ${response.status} ${text}`
+    );
+  }
+
+  const json = JSON.parse(text) as {
+    data?: { arbeitsauftrag?: unknown[] };
+    errors?: unknown;
+  };
+
+  if (json.errors) {
+    throw new Error(
+      `fetchArbeitsauftraegeByIds GraphQL errors: ${JSON.stringify(
         json.errors
       )}`
     );
