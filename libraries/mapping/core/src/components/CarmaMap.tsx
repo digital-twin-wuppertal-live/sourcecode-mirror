@@ -69,6 +69,10 @@ interface CarmaMapProps extends LibreMapProps {
   backgroundLayers?: string | null;
   libreLayers?: LibreLayer[];
   children?: React.ReactNode;
+  /** Extra <Control> siblings injected into the internal ControlLayout.
+   * Auto-stack with the built-in topleft/topright/bottom columns by `order`,
+   * same mechanism apps/geoportal uses in MapWrapper. */
+  extraControls?: React.ReactNode;
   onProgressUpdate?: (progress: { current: number; total: number }) => void;
   embedded?: boolean;
   /** Non-interactive map: disables all controls, compass, interaction */
@@ -79,6 +83,8 @@ interface CarmaMapProps extends LibreMapProps {
   threePerfRef?: React.MutableRefObject<
     import("@carma-mapping/engines/threejs").ThreePerfData
   >;
+  /** Maximum tilt (pitch) in degrees. Defaults to 60 (MapLibre's stock cap). */
+  maxPitch?: number;
 }
 
 const TERRAIN_STORAGE_KEY = "carma-map-terrain";
@@ -99,6 +105,7 @@ const CarmaMapContent = (props: CarmaMapProps) => {
     backgroundLayers,
     libreLayers,
     children,
+    extraControls,
     embedded = false,
   } = props;
 
@@ -337,6 +344,8 @@ const CarmaMapContent = (props: CarmaMapProps) => {
               </Control>
             )}
 
+            {extraControls}
+
             {mapEngine === "leaflet" && (
               <TopicMapComponent
                 {...props}
@@ -375,6 +384,7 @@ const CarmaMapContent = (props: CarmaMapProps) => {
                 backgroundRasterPaint={effectiveRasterPaint}
                 threeRuntimeParams={props.threeRuntimeParams}
                 threePerfRef={props.threePerfRef}
+                maxPitch={props.maxPitch}
               />
             )}
             {modalMenu}

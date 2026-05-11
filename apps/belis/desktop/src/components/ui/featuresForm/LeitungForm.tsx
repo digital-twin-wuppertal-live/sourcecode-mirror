@@ -1,8 +1,9 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useRef, type ReactNode } from "react";
 import type { FormInstance } from "antd";
 import { message } from "antd";
 import { useSelector } from "react-redux";
 import type { DraftFile } from "../../../store/slices/featuresForms";
+import { isCreationDraftKey } from "../../../store/slices/featuresForms";
 import { getJWT } from "../../../store/slices/auth";
 import { DokumentItem } from "../DocumentPreview";
 import { getDocumentKey } from "../FilePreview";
@@ -23,6 +24,8 @@ interface LeitungFormProps {
   draftValues?: Record<string, unknown>;
   draftFiles?: DraftFile[];
   hasDraft?: boolean;
+  isCreation?: boolean;
+  formHeaderContent?: ReactNode;
   onDraftChange?: (values: Record<string, unknown>) => void;
   onDraftFilesChange?: (files: DraftFile[]) => void;
   onOriginalValues?: (values: Record<string, unknown>) => void;
@@ -42,6 +45,7 @@ const LeitungForm = ({
   draftValues,
   draftFiles,
   hasDraft,
+  formHeaderContent,
   onDraftChange,
   onDraftFilesChange,
   onOriginalValues,
@@ -109,7 +113,11 @@ const LeitungForm = ({
     "-ohne Bezeichnung-";
 
   // Compute sidebar main title to display in form header
-  const sidebarMain = rawProps?.id ? `L - ${rawProps?.id}` : "";
+  const isCreation =
+    typeof rawProps?.id === "string" && isCreationDraftKey(rawProps.id);
+  const sidebarMain = rawProps?.id && !isCreation
+    ? `L - ${rawProps.id}`
+    : "";
 
   const handleSave = async () => {
     if (!jwt) {
@@ -200,8 +208,10 @@ const LeitungForm = ({
 
   return (
     <FeatureFormLayout
-      title={sidebarMain ? `Leitung ${sidebarMain}` : "Leitung"}
+      title={isCreation ? "Neue Leitung" : sidebarMain ? `Leitung ${sidebarMain}` : "Leitung"}
       cancelLabel={sidebarMain || ""}
+      isCreation={isCreation}
+      formHeaderContent={formHeaderContent}
       subtitle={subtitle}
       documents={documents}
       jwt={jwt}
@@ -210,6 +220,7 @@ const LeitungForm = ({
       removedDocumentKeys={removedDocumentKeys}
       onToggleRemoveDocument={handleToggleRemoveDocument}
       debugData={data}
+      rawFeatureData={rawFeature}
       loading={loading}
       saving={saving}
       readOnly={readOnly}

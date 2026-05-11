@@ -26,6 +26,7 @@ import {
   removeLastLayer,
   updateLayer,
 } from "../../store/slices/mapping";
+import { getMeasurements } from "../../store/slices/measurements";
 import {
   getUIShowResourceModal,
   setShowLoginModal,
@@ -44,6 +45,7 @@ const ResourceModal = () => {
   const activeLayers = useSelector(getLayers);
   const backgroundLayer = useSelector(getBackgroundLayer);
   const favorites = useSelector(getFavorites);
+  const measurements = useSelector(getMeasurements);
   const savedLayerConfigs = useSelector(getSavedLayerConfigs);
   const showResourceModal = useSelector(getUIShowResourceModal);
 
@@ -158,11 +160,31 @@ const ResourceModal = () => {
               }),
             id: "favoriteLayers",
           },
+          isLeaflet && {
+            Title: "Meine Messungen",
+            layers: measurements.map((measurement) => {
+              return {
+                ...measurement,
+                path: "Meine Messungen",
+              };
+            }),
+            id: "measurements",
+            mainCategoryId: "objects",
+            hideWhenEmpty: true,
+          },
           {
             Title: "Meine Objekte",
-            layers: favorites.filter((favorite) => {
-              return favorite.type === "object";
-            }),
+            layers: favorites
+              .filter((favorite) => {
+                return favorite.type === "object";
+              })
+              .map((favorite) => {
+                return {
+                  ...favorite,
+                  serviceName: "favoriteObjects",
+                  path: "Meine Objekte",
+                };
+              }),
 
             id: "favoriteObjects",
           },
@@ -188,6 +210,7 @@ const ResourceModal = () => {
         unauthorizedCallback={() => {
           dispatch(setShowLoginModal(true));
         }}
+        appKey="geoportal"
       />
     </>
   );

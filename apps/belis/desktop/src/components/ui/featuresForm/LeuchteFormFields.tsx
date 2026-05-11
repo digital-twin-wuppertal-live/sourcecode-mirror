@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import {
   Form,
   Row,
@@ -12,6 +12,7 @@ import {
 import { useSelector } from "react-redux";
 import { getKeyTablesData } from "../../../store/slices/keyTables";
 import StrassenschluesselFields from "./StrassenschluesselFields";
+import StrassenschluesselFieldsModal from "./StrassenschluesselFieldsModal";
 import { getFormClassName, getPlaceholder } from "./readOnlyFormUtils";
 import { FormItem } from "./DraftFieldHighlight";
 import toTitleCase from "../../../helper/toTitleCase";
@@ -43,6 +44,8 @@ interface LeuchteFormFieldsProps {
   leuchte: Record<string, unknown> | null;
   namePrefix?: string;
   readOnly?: boolean;
+  isCreation?: boolean;
+  form?: import("antd").FormInstance;
   onFormInstance?: (form: import("antd").FormInstance) => void;
   draftValues?: Record<string, unknown>;
   onValuesChange?: (
@@ -107,15 +110,19 @@ const LeuchteFormFields = ({
   leuchte,
   namePrefix,
   readOnly = true,
+  isCreation,
+  form: externalForm,
   onFormInstance,
   draftValues,
   onValuesChange,
   onOriginalValues,
 }: LeuchteFormFieldsProps) => {
-  const [form] = Form.useForm();
+  const [localForm] = Form.useForm();
+  const form = externalForm ?? localForm;
+  const draftApplied = useRef(false);
   useEffect(() => {
-    onFormInstance?.(form);
-  }, [form, onFormInstance]);
+    if (!externalForm) onFormInstance?.(form);
+  }, [form, onFormInstance, externalForm]);
   const keyTablesData = useSelector(getKeyTablesData);
 
   // Key table options (sorted to match KeyTablesPage display order)
@@ -128,15 +135,19 @@ const LeuchteFormFields = ({
       ),
     [keyTablesData.leuchtentyp]
   );
-  const kennzifferOptions = useMemo(
-    () =>
-      sortOptions(
-        (keyTablesData.kennziffer || []) as KennzifferItem[],
-        (item) => `${item.kennziffer || ""} - ${item.beschreibung || ""}`,
-        "numeric"
-      ),
-    [keyTablesData.kennziffer]
-  );
+  const kennzifferOptions = useMemo(() => {
+    const sorted = sortOptions(
+      (keyTablesData.kennziffer || []) as KennzifferItem[],
+      (item) => `${item.kennziffer || ""} - ${item.beschreibung || ""}`,
+      "numeric"
+    );
+    // "1 - nur Mast" is meaningless when creating a Leuchte (a lamp is not
+    // just a mast). Existing Leuchten that legacy-carry kennziffer=1 still
+    // see the option in edit mode so their current value stays visible.
+    return isCreation
+      ? sorted.filter((item) => String(item.kennziffer) !== "1")
+      : sorted;
+  }, [keyTablesData.kennziffer, isCreation]);
   const energielieferantOptions = useMemo(
     () =>
       sortOptions(
@@ -182,8 +193,9 @@ const LeuchteFormFields = ({
   const fieldName = (name: string) => (namePrefix ? [namePrefix, name] : name);
 
   useEffect(() => {
-    // Reset form when data changes to clear old values
+    if (externalForm) return;
     form.resetFields();
+    draftApplied.current = false;
 
     if (leuchte) {
       const strassenschluessel = leuchte.tkey_strassenschluessel as
@@ -209,9 +221,9 @@ const LeuchteFormFields = ({
       const serverValues = {
         // Straßenschlüssel
         strassenschluessel_pk: strassenschluessel?.pk,
-        strassenschluessel_strasse: toTitleCase(
-          strassenschluessel?.strasse || ""
-        ),
+        strassenschluessel_strasse: strassenschluessel?.strasse
+          ? toTitleCase(strassenschluessel.strasse)
+          : undefined,
         // Kennziffer - use id for Select value
         fk_kennziffer: kennziffer?.id ?? null,
         // Laufende Nr. / Leuchtennummer
@@ -275,10 +287,18 @@ const LeuchteFormFields = ({
 
       if (draftValues) {
         form.setFieldsValue(draftValues);
+        draftApplied.current = true;
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [leuchte, form]);
+
+  useEffect(() => {
+    if (externalForm) return;
+    if (draftApplied.current || !draftValues) return;
+    form.setFieldsValue(draftValues);
+    draftApplied.current = true;
+  }, [draftValues, form, externalForm]);
 
   return (
     <Form
@@ -288,8 +308,11 @@ const LeuchteFormFields = ({
       className={getFormClassName(readOnly, "pr-2")}
       onValuesChange={onValuesChange}
     >
-      {/* Straßenschlüssel - always disabled */}
-      <StrassenschluesselFields namePrefix={namePrefix} />
+      {(!leuchte || isCreation) && !readOnly ? (
+        <StrassenschluesselFieldsModal namePrefix={namePrefix} isCreation={isCreation} />
+      ) : (
+        <StrassenschluesselFields namePrefix={namePrefix} />
+      )}
 
       {/* Kennziffer */}
       <FormItem
@@ -321,7 +344,7 @@ const LeuchteFormFields = ({
             label={<FormLabel>Laufende Nr.</FormLabel>}
             className="mb-4"
           >
-            <InputNumber className="w-full" size="large" />
+            <InputNumber className="w-full" size="large" placeholder={getPlaceholder(readOnly, "Nummer eingeben")} />
           </FormItem>
         </Col>
         <Col span={12}>
@@ -330,7 +353,7 @@ const LeuchteFormFields = ({
             label={<FormLabel>Leuchtennummer</FormLabel>}
             className="mb-4"
           >
-            <InputNumber className="w-full" size="large" />
+            <InputNumber className="w-full" size="large" placeholder={getPlaceholder(readOnly, "Nummer eingeben")} />
           </FormItem>
         </Col>
       </Row>
@@ -390,7 +413,7 @@ const LeuchteFormFields = ({
         label={<FormLabel>Montagefirma</FormLabel>}
         className="mb-4"
       >
-        <Input size="large" />
+        <Input size="large" placeholder={getPlaceholder(readOnly, "Montagefirma eingeben")} />
       </FormItem>
 
       {/* Energielieferant */}
@@ -421,7 +444,7 @@ const LeuchteFormFields = ({
         label={<FormLabel>Schaltstelle</FormLabel>}
         className="mb-4"
       >
-        <Input size="large" />
+        <Input size="large" placeholder={getPlaceholder(readOnly, "Schaltstelle eingeben")} />
       </FormItem>
 
       {/* Rundsteuerempfänger */}
@@ -493,7 +516,7 @@ const LeuchteFormFields = ({
             label={<FormLabel>Anzahl</FormLabel>}
             className="mb-4"
           >
-            <InputNumber className="w-full" size="large" />
+            <InputNumber className="w-full" size="large" placeholder={getPlaceholder(readOnly, "Anzahl eingeben")} />
           </FormItem>
         </Col>
       </Row>
@@ -509,6 +532,7 @@ const LeuchteFormFields = ({
           size="large"
           precision={2}
           decimalSeparator=","
+          placeholder={getPlaceholder(readOnly, "Leistung eingeben")}
         />
       </FormItem>
 
@@ -542,7 +566,7 @@ const LeuchteFormFields = ({
             label={<FormLabel>Anzahl</FormLabel>}
             className="mb-4"
           >
-            <InputNumber className="w-full" size="large" />
+            <InputNumber className="w-full" size="large" placeholder={getPlaceholder(readOnly, "Anzahl eingeben")} />
           </FormItem>
         </Col>
       </Row>
@@ -558,6 +582,7 @@ const LeuchteFormFields = ({
           size="large"
           precision={2}
           decimalSeparator=","
+          placeholder={getPlaceholder(readOnly, "Leistung eingeben")}
         />
       </FormItem>
 
@@ -648,6 +673,7 @@ const LeuchteFormFields = ({
           size="large"
           precision={2}
           decimalSeparator=","
+          placeholder={getPlaceholder(readOnly, "Stunden eingeben")}
         />
       </FormItem>
 
@@ -671,7 +697,7 @@ const LeuchteFormFields = ({
         label={<FormLabel>Vorschaltgerät</FormLabel>}
         className="mb-4"
       >
-        <Input size="large" />
+        <Input size="large" placeholder={getPlaceholder(readOnly, "Vorschaltgerät eingeben")} />
       </FormItem>
 
       {/* Erneuerung VG */}
@@ -694,7 +720,7 @@ const LeuchteFormFields = ({
         label={<FormLabel>Bemerkung</FormLabel>}
         className="mb-4"
       >
-        <Input.TextArea rows={4} size="large" />
+        <Input.TextArea rows={4} size="large" placeholder={getPlaceholder(readOnly, "Bemerkung eingeben")} />
       </FormItem>
     </Form>
   );

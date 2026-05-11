@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import type { CarmaConfig } from "./carma-config";
 
 export type LayerFilterInfo = {
@@ -5,6 +6,44 @@ export type LayerFilterInfo = {
   totalCount: number;
   isShowingAll: boolean;
 };
+
+export type InteractionButton = {
+  icon: ReactNode;
+  id: string;
+  tooltip?: string;
+  onClick?: () => void;
+};
+
+export type DynamicStylingOption = {
+  id: string;
+  title: string;
+  icon?: string;
+  replacements?: Record<string, [string, string][]>;
+  [key: string]: unknown;
+};
+
+export type DynamicStylingListConfig = {
+  type: "list";
+  label: string;
+  default: string;
+  options: DynamicStylingOption[];
+  targets: Record<string, string[]>;
+  showIcon?: boolean;
+};
+
+export type DynamicStylingVisibilityConfig = {
+  type: "visibility";
+  label: string;
+  default: "visible" | "hidden";
+  layers: string[];
+  showIcon?: boolean;
+  iconVisible?: string;
+  iconHidden?: string;
+};
+
+export type DynamicStylingConfig =
+  | DynamicStylingListConfig
+  | DynamicStylingVisibilityConfig;
 
 export type BackgroundLayer = BaseLayer & {
   layers: string;
@@ -29,6 +68,11 @@ export const FILTER_MODES = {
   OR: "or",
 } as const;
 export type FilterMode = (typeof FILTER_MODES)[keyof typeof FILTER_MODES];
+
+export const FILTER_TYPES = {
+  BUTTON: "button",
+} as const;
+export type FilterType = (typeof FILTER_TYPES)[keyof typeof FILTER_TYPES];
 
 export const LAYER_ENTITY_TYPES = {
   LAYER: "layer",
@@ -69,6 +113,7 @@ export type FilterConfig = {
   allLabel?: string;
   layerPattern: string;
   filterMode?: FilterMode;
+  filterType?: FilterType;
   filters: FilterOption[];
   styles?: {
     buttonBorderRadius?: string;
@@ -103,27 +148,31 @@ export type LayerProps = {
 type OtherLayerProps = Partial<LayerProps & Item> & {
   layerName?: string;
   capabilitiesUrl?: string;
-  header?: string;
-  accentColor?: string;
-  headerColor?: string;
 };
 
 type BaseLayer = {
   title: string;
   id: string;
-  opacity: number;
-  description: string;
+  opacity?: number;
+  description?: string;
   visible: boolean;
   queryable?: boolean;
   useInFeatureInfo?: boolean;
   conf?: CarmaConfig;
   icon?: string;
+  pinned?: "first" | "last";
+  skipSelection?: boolean;
+  interactionButtons?: InteractionButton | InteractionButton[];
   other?: OtherLayerProps;
   filterConfig?: FilterConfig;
   filterInfo?: LayerFilterInfo;
   filterState?: Record<string, boolean>;
+  dynamicStyling?: DynamicStylingConfig | DynamicStylingConfig[];
+  dynamicStylingSelection?: string | Record<number, string>;
   layerInfo?: {
     accentColor?: string;
+    header?: string;
+    headerColor?: string;
     title?: string;
     keywords?: string[];
     description?: string;
@@ -131,13 +180,15 @@ type BaseLayer = {
     thumbnail?: string;
     vectorStyle?: string;
     vectorLegend?: string;
+    metaDataText?: string;
+    vectorLegendTitle?: string;
     [key: string]: unknown;
   };
 };
 
 export type Layer = BaseLayer & {
   type?: typeof LAYER_ENTITY_TYPES.LAYER | typeof LAYER_ENTITY_TYPES.OBJECT;
-  layerType:
+  layerType?:
     | typeof LAYER_PROVIDER_TYPES.WMTS
     | typeof LAYER_PROVIDER_TYPES.WMTS_NT
     | typeof LAYER_PROVIDER_TYPES.VECTOR;
@@ -252,6 +303,7 @@ export type Item = {
   isDraft?: boolean;
   vectorStyle?: string;
   vectorLegend?: string;
+  vectorLegendTitle?: string;
   ff?: string;
   replaceId?: string;
   mergeId?: string;

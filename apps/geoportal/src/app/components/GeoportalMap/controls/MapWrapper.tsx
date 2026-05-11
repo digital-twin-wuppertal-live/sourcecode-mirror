@@ -231,7 +231,7 @@ const MapWrapper = () => {
       {zenMode ? (
         <Control position="topcenter" order={10}>
           <button
-            className={`text-xl size-16 hover:text-gray-600 button-shadow bg-white/80 rounded-md transition-all duration-300`}
+            className={`text-xl size-16 hover:text-gray-600 button-shadow bg-white/80 rounded-md transition-all duration-300 pointer-events-auto`}
             onClick={() => {
               if (zenButtonHidden) {
                 setZenButtonHidden(false);
@@ -263,8 +263,13 @@ const MapWrapper = () => {
           </button>
         </Control>
       ) : (
-        <div className="pt-16">
-          {/* adds padding for topnavbar*/}
+        <div
+          style={{
+            paddingTop:
+              "calc(4rem + var(--system-message-banner-height, 0px))",
+          }}
+        >
+          {/* adds padding for topnavbar (+ banner if visible)*/}
           <Control position="topleft" order={10}>
             <div ref={tourRefLabels.zoom} className="flex flex-col">
               <Tooltip title="Maßstab vergrößern (Zoom in)" placement="right">

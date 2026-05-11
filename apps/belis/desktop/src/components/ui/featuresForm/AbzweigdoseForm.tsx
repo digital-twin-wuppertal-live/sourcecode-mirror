@@ -1,7 +1,8 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, type ReactNode } from "react";
 import { message } from "antd";
 import { useSelector } from "react-redux";
 import type { DraftFile } from "../../../store/slices/featuresForms";
+import { isCreationDraftKey } from "../../../store/slices/featuresForms";
 import { getJWT } from "../../../store/slices/auth";
 import { DokumentItem } from "../DocumentPreview";
 import { getDocumentKey } from "../FilePreview";
@@ -20,6 +21,8 @@ interface AbzweigdoseFormProps {
   loading?: boolean;
   draftFiles?: DraftFile[];
   hasDraft?: boolean;
+  isCreation?: boolean;
+  formHeaderContent?: ReactNode;
   onDraftFilesChange?: (files: DraftFile[]) => void;
   onToggleReadOnly?: () => void;
   onCancel?: () => void;
@@ -36,6 +39,7 @@ const AbzweigdoseForm = ({
   loading,
   draftFiles,
   hasDraft,
+  formHeaderContent,
   onDraftFilesChange,
   onToggleReadOnly,
   onCancel,
@@ -82,12 +86,13 @@ const AbzweigdoseForm = ({
   // Extract subtitle
   const subtitle = "Nur Dokumente verfügbar";
 
-  // Compute sidebar main title to display in form header
   const rawProps = rawFeature?.properties;
-  const sidebarMain =
-    rawFeature?.id || rawProps?.id
-      ? `ID-${rawFeature?.id || rawProps?.id}`
-      : "";
+  const idValue = rawFeature?.id || rawProps?.id;
+  const isCreation =
+    typeof idValue === "string" && isCreationDraftKey(idValue);
+  const sidebarMain = idValue && !isCreation
+    ? `ID-${idValue}`
+    : "";
 
   const handleSave = async () => {
     if (!jwt) {
@@ -163,11 +168,15 @@ const AbzweigdoseForm = ({
   return (
     <FeatureFormLayout
       title={
-        sidebarMain
+        isCreation
+          ? "Neue Abzweigdose / Zugkasten"
+          : sidebarMain
           ? `Abzweigdose / Zugkasten ${sidebarMain}`
           : "Abzweigdose / Zugkasten"
       }
       cancelLabel={sidebarMain || ""}
+      isCreation={isCreation}
+      formHeaderContent={formHeaderContent}
       subtitle={subtitle}
       documents={documents}
       jwt={jwt}
@@ -176,6 +185,7 @@ const AbzweigdoseForm = ({
       removedDocumentKeys={removedDocumentKeys}
       onToggleRemoveDocument={handleToggleRemoveDocument}
       debugData={data}
+      rawFeatureData={rawFeature}
       loading={loading}
       saving={saving}
       readOnly={readOnly}

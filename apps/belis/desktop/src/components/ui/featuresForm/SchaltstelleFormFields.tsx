@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import {
   Form,
   Row,
@@ -13,6 +13,7 @@ import { useSelector } from "react-redux";
 import dayjs from "dayjs";
 import { getKeyTablesData } from "../../../store/slices/keyTables";
 import StrassenschluesselFields from "./StrassenschluesselFields";
+import StrassenschluesselFieldsModal from "./StrassenschluesselFieldsModal";
 import { getFormClassName, getPlaceholder } from "./readOnlyFormUtils";
 import { FormItem } from "./DraftFieldHighlight";
 import toTitleCase from "../../../helper/toTitleCase";
@@ -20,6 +21,8 @@ import toTitleCase from "../../../helper/toTitleCase";
 interface SchaltstelleFormFieldsProps {
   schaltstelle: Record<string, unknown> | null;
   readOnly?: boolean;
+  isCreation?: boolean;
+  form?: FormInstance;
   onFormInstance?: (form: FormInstance) => void;
   draftValues?: Record<string, unknown>;
   onValuesChange?: (
@@ -46,15 +49,19 @@ const FormLabel = ({ children }: { children: React.ReactNode }) => (
 const SchaltstelleFormFields = ({
   schaltstelle,
   readOnly = true,
+  isCreation,
+  form: externalForm,
   onFormInstance,
   draftValues,
   onValuesChange,
   onOriginalValues,
 }: SchaltstelleFormFieldsProps) => {
-  const [form] = Form.useForm();
+  const [localForm] = Form.useForm();
+  const form = externalForm ?? localForm;
+  const draftApplied = useRef(false);
   useEffect(() => {
-    onFormInstance?.(form);
-  }, [form, onFormInstance]);
+    if (!externalForm) onFormInstance?.(form);
+  }, [form, onFormInstance, externalForm]);
 
   const keyTablesData = useSelector(getKeyTablesData);
 
@@ -68,7 +75,9 @@ const SchaltstelleFormFields = ({
   ].sort((a, b) => (a.rs_typ || "").localeCompare(b.rs_typ || ""));
 
   useEffect(() => {
+    if (externalForm) return;
     form.resetFields();
+    draftApplied.current = false;
 
     if (schaltstelle) {
       const ss = schaltstelle;
@@ -78,7 +87,9 @@ const SchaltstelleFormFields = ({
       const serverValues = {
         // Strassenschluessel
         strassenschluessel_pk: tkey?.pk,
-        strassenschluessel_strasse: toTitleCase(tkey?.strasse || ""),
+        strassenschluessel_strasse: tkey?.strasse
+          ? toTitleCase(tkey.strasse)
+          : undefined,
         // Hausnummer
         haus_nummer: ss.haus_nummer,
         // Standortbez.
@@ -111,10 +122,18 @@ const SchaltstelleFormFields = ({
 
       if (draftValues) {
         form.setFieldsValue(draftValues);
+        draftApplied.current = true;
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [schaltstelle, form]);
+
+  useEffect(() => {
+    if (externalForm) return;
+    if (draftApplied.current || !draftValues) return;
+    form.setFieldsValue(draftValues);
+    draftApplied.current = true;
+  }, [draftValues, form, externalForm]);
 
   return (
     <Form
@@ -124,8 +143,11 @@ const SchaltstelleFormFields = ({
       className={getFormClassName(readOnly, "pr-2")}
       onValuesChange={onValuesChange}
     >
-      {/* Strassenschluessel - always disabled */}
-      <StrassenschluesselFields label="Strassenschlussel" />
+      {(!schaltstelle || isCreation) && !readOnly ? (
+        <StrassenschluesselFieldsModal label="Strassenschlussel" isCreation={isCreation} />
+      ) : (
+        <StrassenschluesselFields label="Strassenschlussel" />
+      )}
 
       {/* Hausnummer */}
       <FormItem
@@ -133,7 +155,7 @@ const SchaltstelleFormFields = ({
         label={<FormLabel>Hausnummer</FormLabel>}
         className="mb-4"
       >
-        <Input size="large" />
+        <Input size="large" placeholder={getPlaceholder(readOnly, "Hausnummer eingeben")} />
       </FormItem>
 
       {/* Standortbez. */}
@@ -142,7 +164,7 @@ const SchaltstelleFormFields = ({
         label={<FormLabel>Standortbez.</FormLabel>}
         className="mb-4"
       >
-        <Input size="large" />
+        <Input size="large" placeholder={getPlaceholder(readOnly, "Standortbezeichnung eingeben")} />
       </FormItem>
 
       {/* Laufende Nr. and Schaltstellen Nr. */}
@@ -153,7 +175,7 @@ const SchaltstelleFormFields = ({
             label={<FormLabel>Laufende Nr.</FormLabel>}
             className="mb-4"
           >
-            <InputNumber className="w-full" size="large" />
+            <InputNumber className="w-full" size="large" placeholder={getPlaceholder(readOnly, "Nummer eingeben")} />
           </FormItem>
         </Col>
         <Col span={12}>
@@ -162,7 +184,7 @@ const SchaltstelleFormFields = ({
             label={<FormLabel>Schaltstellen Nr.</FormLabel>}
             className="mb-4"
           >
-            <Input size="large" />
+            <Input size="large" placeholder={getPlaceholder(readOnly, "Nummer eingeben")} />
           </FormItem>
         </Col>
       </Row>
@@ -266,7 +288,7 @@ const SchaltstelleFormFields = ({
         label={<FormLabel>Bemerkung</FormLabel>}
         className="mb-4"
       >
-        <Input.TextArea rows={4} size="large" />
+        <Input.TextArea rows={4} size="large" placeholder={getPlaceholder(readOnly, "Bemerkung eingeben")} />
       </FormItem>
     </Form>
   );

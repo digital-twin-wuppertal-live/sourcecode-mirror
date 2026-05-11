@@ -20,16 +20,20 @@ import {
   backgroundLayerConfigs,
   additionalLayerConfigs,
   leuchtenDataLayer,
+  brandNewDataLayer,
   BELIS_STYLE_URL,
+  BELIS_BRAND_NEW_STYLE_URL,
+  BELIS_BRAND_NEW_FC_URL,
   BELIS_ORIGINAL_SOURCE,
   BELIS_SOURCE_LAYERS,
   AA_LAYER_STYLES,
 } from "../../config/mapLayerConfigs";
 import type { LibreLayer } from "@carma-mapping/engines/maplibre";
 import { AppDispatch, type RootState } from "../../store";
+import { useMapPage } from "../../contexts/MapPageContext";
 import BelisSidebar from "../ui/BelisSidebar";
 import ArbeitsauftraegeSidebar from "../ui/ArbeitsauftraegeSidebar";
-import { AA_SORT_BY_PROTOKOLLE_DESC } from "../../helper/aaSortHelpers";
+import { AA_SORT_BY_NUMMER_ASC, AA_SORT_BY_PROTOKOLLE_DESC } from "../../helper/aaSortHelpers";
 import {
   useVisibleMapFeatures,
   functionToInfo,
@@ -47,6 +51,7 @@ import {
   useSelectionNeighborhood,
   useLassoHighlight,
   slugifyUrl,
+  buildFeatureStateTarget,
 } from "@carma-mapping/engines/maplibre";
 import type maplibregl from "maplibre-gl";
 import BelisDatasheetView from "../ui/BelisDatasheetView";
@@ -84,6 +89,7 @@ import {
   getAALoading,
   getDraftMode,
   getGraphqlLoading,
+  getSearchResultsVersion,
 } from "../../store/slices/arbeitsauftraege";
 import {
   buildApGeoJson,
@@ -120,6 +126,7 @@ import type { SidebarFeature } from "../ui/BelisSidebar";
 import {
   getAllDraftFeatures,
   getDraftFeaturesCount,
+  getDraftFetchedData,
   getGlobalEditMode,
 } from "../../store/slices/featuresForms";
 import {
@@ -128,7 +135,18 @@ import {
   getAPDeletions,
 } from "../../store/slices/arbeitsauftraegeDrafts";
 import { prepareDraftFeatures } from "../../helper/prepareDraftFeatures";
+import {
+  buildSyntheticFeature,
+  featureTypeToSourceLayer,
+} from "../../helper/buildSyntheticFeature";
 // import { useAaLassoSelection } from "../../hooks/useAaLassoSelection";
+import { useBrandnewFcSync } from "../../hooks/useBrandnewFcSync";
+import {
+  DrawModeControls,
+  MeasurementHost,
+  type DrawMode,
+} from "@carma-mapping/measurements";
+import { setMeasurements } from "../../store/slices/measurements";
 
 function buildAAFeatureCollection(
   features: ArbeitsauftragTileFeature[]
@@ -167,6 +185,13 @@ interface BelisMapLibWrapperProps {
   onLassoDeactivate?: () => void;
   sidebarVariant: "fachobjekte" | "arbeitsauftraege";
   onHighlightsChange?: (highlights: SidebarFeature[] | null) => void;
+  /** Local-dev toggle: include the styleY-based Fachobjekte layer (default true). */
+  regularLayerEnabled?: boolean;
+  /** Local-dev toggle: include the brand.new.features GeoJSON-backed layer (default false). */
+  brandnewLayerEnabled?: boolean;
+  /** Notified with the live brandnew feature count whenever the FC reloads
+   * (incl. transitions to 0 when the source file disappears). */
+  onBrandnewCountChange?: (count: number) => void;
 }
 
 const BelisMapLibWrapper = ({
@@ -177,9 +202,13 @@ const BelisMapLibWrapper = ({
   onLassoDeactivate,
   sidebarVariant,
   onHighlightsChange,
+  regularLayerEnabled = true,
+  brandnewLayerEnabled = false,
+  onBrandnewCountChange,
 }: BelisMapLibWrapperProps) => {
   const dispatch: AppDispatch = useDispatch();
   const store = useStore<RootState>();
+  const { setOnSelectNextDraft, setOnOpenCreationDraft } = useMapPage();
   const jwt = useSelector(getJWT);
   const featureDataVersion = useSelector(getFeatureDataVersion);
   const enabledLeitungstypen = useSelector(getEnabledLeitungstypen);
@@ -194,6 +223,8 @@ const BelisMapLibWrapper = ({
   // Track whether the map style has finished loading so effects that call
   // addSource / addLayer don't fire too early ("Style is not done loading").
   const [mapReady, setMapReady] = useState(false);
+  const [drawMode, setDrawMode] = useState<DrawMode>("none");
+  const [snappingEnabled, setSnappingEnabled] = useState<boolean>(false);
   useEffect(() => {
     if (!map) {
       setMapReady(false);
@@ -264,6 +295,11 @@ const BelisMapLibWrapper = ({
   const namespacedSource = `${slugifyUrl(
     BELIS_STYLE_URL
   )}::${BELIS_ORIGINAL_SOURCE}`;
+  // Brandnew geojson source uses the same inner source id ("belis-source")
+  // but is namespaced by its own style URL.
+  const brandnewSource = `${slugifyUrl(
+    BELIS_BRAND_NEW_STYLE_URL
+  )}::${BELIS_ORIGINAL_SOURCE}`;
 
   const selectedAAId = useSelector(getSelectedAAId);
   const selectedAAData = useSelector(getSelectedAAData);
@@ -276,6 +312,7 @@ const BelisMapLibWrapper = ({
 
   const selectedTeamId = useSelector(getSelectedTeamId);
   const aaFeatures = useSelector(getAAFeatures);
+  const searchResultsVersion = useSelector(getSearchResultsVersion);
   const aaDrafts = useSelector(getAllAADrafts);
   const apDrafts = useSelector(getAllAPDrafts);
   const apDeletions = useSelector(getAPDeletions);
@@ -293,12 +330,18 @@ const BelisMapLibWrapper = ({
     return ids;
   }, [draftMode, aaDrafts, apDrafts, apDeletions]);
 
-  const highlightSources = useMemo(
-    () => [
+  const highlightSources = useMemo(() => {
+    const list: Array<{ source: string; sourceLayers: string[] }> = [
       { source: namespacedSource, sourceLayers: [...BELIS_SOURCE_LAYERS] },
-    ],
-    [namespacedSource]
-  );
+    ];
+    if (brandnewLayerEnabled) {
+      list.push({
+        source: brandnewSource,
+        sourceLayers: [...BELIS_SOURCE_LAYERS],
+      });
+    }
+    return list;
+  }, [namespacedSource, brandnewSource, brandnewLayerEnabled]);
 
   // Highlight context: need ensureToggledFeatures + criteria before handleHighlightToggle
   const {
@@ -317,6 +360,23 @@ const BelisMapLibWrapper = ({
     setAdjustedHighlights(highlightResults);
   }, [highlightResults]);
 
+  // Clear selection when highlighting activates (e.g. search)
+  useEffect(() => {
+    if (highlightingActive) {
+      clearMapSelection();
+    }
+  }, [highlightingActive]);
+
+  // Drop any fachobjekt selection the moment the user enters a measurement
+  // draw mode. Otherwise a previously-selected leuchte stays highlighted
+  // (and its infobox visible) while the user is busy clicking points or
+  // line vertices, which is visually noisy and conceptually unrelated.
+  useEffect(() => {
+    if (drawMode !== "none") {
+      clearMapSelection();
+    }
+  }, [drawMode]);
+
   // Notify parent about highlight changes
   useEffect(() => {
     onHighlightsChange?.(adjustedHighlights);
@@ -327,17 +387,33 @@ const BelisMapLibWrapper = ({
       const toSidebarFeature = (f: Record<string, any>): SidebarFeature =>
         Object.assign(f, { original: f }) as unknown as SidebarFeature;
 
+      // Use the feature's own source so brandnew (geojson) and regular
+      // (vector) features both resolve siblings against the right source.
+      const featureSource = feature.source ?? namespacedSource;
+      const isFeatureGeojson =
+        map?.getSource(featureSource)?.type === "geojson";
+
       // Determine if this is a standort with sibling leuchten to expand
       const isStandort = feature.sourceLayer === "standorte";
       let siblingLeuchten: maplibregl.GeoJSONFeature[] = [];
       if (isStandort && map) {
         const standortId = String(feature.properties?.id ?? "");
         if (standortId) {
+          // For geojson sources querySourceFeatures ignores sourceLayer;
+          // we filter by the stamped _sourceLayer property instead.
+          const queryOpts = isFeatureGeojson
+            ? undefined
+            : { sourceLayer: "leuchten" };
           siblingLeuchten = map
-            .querySourceFeatures(namespacedSource, { sourceLayer: "leuchten" })
-            .filter(
-              (f) => String(f.properties?.fk_standort ?? "") === standortId
-            );
+            .querySourceFeatures(featureSource, queryOpts)
+            .filter((f) => {
+              if (
+                isFeatureGeojson &&
+                String(f.properties?._sourceLayer ?? "") !== "leuchten"
+              )
+                return false;
+              return String(f.properties?.fk_standort ?? "") === standortId;
+            });
         }
       }
 
@@ -346,13 +422,13 @@ const BelisMapLibWrapper = ({
       // before onToggle fires), so criteria.toggledFeatures already reflects the standort's state.
       // Read direction from the ref: if standort is now toggled ON, we add siblings; if OFF, remove.
       if (isStandort && siblingLeuchten.length > 0) {
-        const standortKey = `${feature.source}::standorte::${feature.id}`;
+        const standortKey = `${featureSource}::standorte::${feature.id}`;
         const adding = criteria.toggledFeatures.has(standortKey);
         ensureToggledFeatures(
           siblingLeuchten.map((l) => ({
-            source: namespacedSource,
+            source: featureSource,
             sourceLayer: "leuchten",
-            id: l.id!, // MVT tile ID, matching what matchesCriteria uses
+            id: l.id!, // MVT tile ID (or geojson feature id), matching what matchesCriteria uses
           })),
           adding
         );
@@ -421,18 +497,30 @@ const BelisMapLibWrapper = ({
     (feature: SidebarFeature) => {
       const sl = feature.sourceLayer ?? "";
       const dbId = String(feature.properties?.id ?? feature.id ?? "");
+      // Use the source the sidebar feature was stamped with (set by
+      // useMapHighlighting / handleHighlightToggle) and fall back to the
+      // regular source if missing — that way both vector and brandnew
+      // (geojson) features get cleared from the right source.
+      const featureSource =
+        (feature as unknown as { source?: string }).source ?? namespacedSource;
+      const isFeatureGeojson =
+        map?.getSource(featureSource)?.type === "geojson";
 
       // Remove from map highlight state
       if (map) {
-        const sourceFeatures = map.querySourceFeatures(namespacedSource, {
-          sourceLayer: sl,
+        const queryOpts = isFeatureGeojson ? undefined : { sourceLayer: sl };
+        const sourceFeatures = map.querySourceFeatures(featureSource, queryOpts);
+        const match = sourceFeatures.find((f) => {
+          if (
+            isFeatureGeojson &&
+            String(f.properties?._sourceLayer ?? "") !== sl
+          )
+            return false;
+          return String(f.properties?.id ?? "") === dbId;
         });
-        const match = sourceFeatures.find(
-          (f) => String(f.properties?.id ?? "") === dbId
-        );
         if (match?.id != null) {
           ensureToggledFeatures(
-            [{ source: namespacedSource, sourceLayer: sl, id: match.id }],
+            [{ source: featureSource, sourceLayer: sl, id: match.id }],
             false
           );
         }
@@ -483,6 +571,22 @@ const BelisMapLibWrapper = ({
     onToggle: handleHighlightToggle,
   });
 
+  // Brandnew FC poll-and-reload: short cadence in localhost (yellow-border
+  // dev scenario), longer otherwise. Triggers setData only when the .md5
+  // sidecar changes.
+  const IS_LOCAL_DEV =
+    typeof window !== "undefined" &&
+    window.location.hostname === "localhost";
+  const BRAND_NEW_SYNC_INTERVAL_MS = IS_LOCAL_DEV ? 1000 : 15000;
+  useBrandnewFcSync({
+    map,
+    enabled: brandnewLayerEnabled,
+    source: brandnewSource,
+    dataUrl: BELIS_BRAND_NEW_FC_URL,
+    intervalMs: BRAND_NEW_SYNC_INTERVAL_MS,
+    onCountChange: onBrandnewCountChange,
+  });
+
   // AA lasso selection (disabled – button now only logs "hallo world")
   // useAaLassoSelection({
   //   map,
@@ -505,6 +609,15 @@ const BelisMapLibWrapper = ({
   // Draft features for "Entwürfe" sidebar tab
   const allDraftFeatures = useSelector(getAllDraftFeatures);
   const draftFeaturesCount = useSelector(getDraftFeaturesCount);
+
+  // Live fetchedData for creation drafts — avoids stale snapshot in fetchedFeatureData
+  const creationDraftKey =
+    rawFeature?.properties?._isCreation === true
+      ? String(rawFeature.properties.id)
+      : undefined;
+  const liveDraftFetchedData = useSelector((state: RootState) =>
+    getDraftFetchedData(state, creationDraftKey)
+  );
 
   // Draft features are stored as raw MapGeoJSON features (same structure as
   // sidebar features from the map). No reconstruction needed — just extract
@@ -530,6 +643,9 @@ const BelisMapLibWrapper = ({
         "Standorte.*-base",
         "Standorte.*-icon",
         "standorte.*",
+        // brandnew (GeoJSON-backed) layers — same suffixes, different prefix
+        "BrandNewFeatures.*-base",
+        "BrandNewFeatures.*-icon",
       ],
       highlightedOnly: highlightingActive,
       refreshTrigger: highlightVersion,
@@ -701,6 +817,19 @@ const BelisMapLibWrapper = ({
       //   fallback: !selectedFeature,
       // });
 
+      // Creation drafts have synthetic fetchedData — skip API fetch
+      const featureIdStr = String(featureId ?? "");
+      if (featureIdStr.startsWith("create:")) {
+        const creationDraft =
+          store.getState().featuresForms?.drafts[featureIdStr];
+        if (creationDraft?.fetchedData) {
+          setFetchedFeatureData(creationDraft.fetchedData);
+        } else {
+          setFetchedFeatureData(null);
+        }
+        return;
+      }
+
       const apiFeatureType = SOURCE_LAYER_TO_FEATURE_TYPE[sourceLayer ?? ""];
       if (!apiFeatureType || !featureId) {
         // Not a known BeLIS layer (e.g. ALKIS background); clear stale data
@@ -767,6 +896,11 @@ const BelisMapLibWrapper = ({
       !selectedFeatureId ||
       !map
     ) {
+      setFeatureOnMap(true);
+      return;
+    }
+
+    if (rawFeature?.properties?._isCreation === true) {
       setFeatureOnMap(true);
       return;
     }
@@ -983,7 +1117,12 @@ const BelisMapLibWrapper = ({
     }
 
     // Data layers (always loaded — visibility toggled per route)
-    layers.push(leuchtenDataLayer);
+    if (regularLayerEnabled) {
+      layers.push(leuchtenDataLayer);
+    }
+    if (brandnewLayerEnabled) {
+      layers.push(brandNewDataLayer);
+    }
 
     return layers;
   }, [
@@ -992,6 +1131,8 @@ const BelisMapLibWrapper = ({
     activeAdditionalLayers,
     additionalLayerOpacities,
     inPaleMode,
+    regularLayerEnabled,
+    brandnewLayerEnabled,
   ]);
 
   // Hide Fachobjekte layers when entering Arbeitsaufträge mode.
@@ -1044,10 +1185,11 @@ const BelisMapLibWrapper = ({
       filter = ["in", ["get", "bezeichnung"], ["literal", allowedNames]];
     }
 
+    const sources = new Set([namespacedSource, brandnewSource]);
     for (const layer of map.getStyle()?.layers ?? []) {
       if (
         "source" in layer &&
-        layer.source === namespacedSource &&
+        sources.has(layer.source as string) &&
         layer.id.toLowerCase().includes("leitungen")
       ) {
         try {
@@ -1057,7 +1199,7 @@ const BelisMapLibWrapper = ({
         }
       }
     }
-  }, [map, enabledLeitungstypen, keyTablesData, namespacedSource]);
+  }, [map, enabledLeitungstypen, keyTablesData, namespacedSource, brandnewSource]);
 
   // --- Save/restore selection when switching between route variants ---
   useEffect(() => {
@@ -1153,6 +1295,19 @@ const BelisMapLibWrapper = ({
       cancelled = true;
     };
   }, [sidebarVariant, selectedTeamId, jwt, dispatch, featureDataVersion]);
+
+  // --- Arbeitsauftraege: fit map bounds after a search returns results ---
+  // Keeps a ref to aaFeatures so the effect only fires on a fresh search
+  // (bumped version), not on every feature mutation while searchActive is true.
+  const aaFeaturesRef = useRef(aaFeatures);
+  useEffect(() => {
+    aaFeaturesRef.current = aaFeatures;
+  }, [aaFeatures]);
+  useEffect(() => {
+    if (searchResultsVersion === 0) return;
+    if (activeAATab === "ap") return;
+    fitAABounds(aaFeaturesRef.current, map);
+  }, [searchResultsVersion, map, activeAATab]);
 
   // --- Arbeitsauftraege: GraphQL fetch draft AAs by IDs when in draft mode ---
   useEffect(() => {
@@ -1941,53 +2096,60 @@ const BelisMapLibWrapper = ({
       // source may not exist yet
     }
 
-    // Fly the mini map to the selected AP feature
-    const geojson = draftMode
-      ? apDraftGeoJson
-      : selectedAAData
-      ? buildApGeoJson(selectedAAData)
-      : null;
-    const feature = geojson?.features.find(
-      (f) => f.properties?.id === selectedAPId
-    );
-    if (feature?.geometry) {
-      const geom = feature.geometry;
-      const flatCoords: number[][] =
-        geom.type === "Point"
-          ? [(geom as GeoJSON.Point).coordinates]
-          : geom.type === "LineString"
-          ? (geom as GeoJSON.LineString).coordinates
-          : geom.type === "MultiLineString"
-          ? (geom as GeoJSON.MultiLineString).coordinates.flat()
-          : [];
-      if (flatCoords.length > 0) {
-        let minLng = Infinity,
-          minLat = Infinity,
-          maxLng = -Infinity,
-          maxLat = -Infinity;
-        for (const [lng, lat] of flatCoords) {
-          if (lng < minLng) minLng = lng;
-          if (lat < minLat) minLat = lat;
-          if (lng > maxLng) maxLng = lng;
-          if (lat > maxLat) maxLat = lat;
-        }
-        miniMap.fitBounds(
-          [
-            [minLng, minLat],
-            [maxLng, maxLat],
-          ],
-          // Match the Fachobjekte mini-map's transition so switching AP rows
-          // feels as snappy. Without `duration`, MapLibre defaults to 1000ms,
-          // which felt sluggish vs. useDatasheetMiniMap's 200ms easeTo.
-          {
-            padding: 40,
-            maxZoom: MINI_MAP_TARGET_ZOOM,
-            duration: MINI_MAP_TRANSITION_MS,
+    // Only fly the mini map when on the AP tab (sidebar or double-click).
+    // When on the AA tab (single-click from Protokolle table), just highlight.
+    if (activeAATab === "ap") {
+      const geojson = draftMode
+        ? apDraftGeoJson
+        : selectedAAData
+        ? buildApGeoJson(selectedAAData)
+        : null;
+      const feature = geojson?.features.find(
+        (f) => f.properties?.id === selectedAPId
+      );
+      if (feature?.geometry) {
+        const geom = feature.geometry;
+        const flatCoords: number[][] =
+          geom.type === "Point"
+            ? [(geom as GeoJSON.Point).coordinates]
+            : geom.type === "LineString"
+            ? (geom as GeoJSON.LineString).coordinates
+            : geom.type === "MultiLineString"
+            ? (geom as GeoJSON.MultiLineString).coordinates.flat()
+            : [];
+        if (flatCoords.length > 0) {
+          let minLng = Infinity,
+            minLat = Infinity,
+            maxLng = -Infinity,
+            maxLat = -Infinity;
+          for (const [lng, lat] of flatCoords) {
+            if (lng < minLng) minLng = lng;
+            if (lat < minLat) minLat = lat;
+            if (lng > maxLng) maxLng = lng;
+            if (lat > maxLat) maxLat = lat;
           }
-        );
+          miniMap.fitBounds(
+            [
+              [minLng, minLat],
+              [maxLng, maxLat],
+            ],
+            {
+              padding: 40,
+              maxZoom: MINI_MAP_TARGET_ZOOM,
+              duration: MINI_MAP_TRANSITION_MS,
+            }
+          );
+        }
       }
     }
-  }, [miniMap, selectedAPId, selectedAAData, draftMode, apDraftGeoJson]);
+  }, [
+    miniMap,
+    selectedAPId,
+    selectedAAData,
+    draftMode,
+    apDraftGeoJson,
+    activeAATab,
+  ]);
 
   // --- Mini-map: mousewheel zoom in AA mode ---
   // The useDatasheetMiniMap hook's wheel handler is disabled in AA mode
@@ -2086,11 +2248,13 @@ const BelisMapLibWrapper = ({
         const highlighted = hits.filter((h) => {
           if (h.id == null) return false;
           try {
-            const state = map.getFeatureState({
-              source: h.source,
-              sourceLayer: h.sourceLayer,
-              id: h.id,
-            });
+            const state = map.getFeatureState(
+              buildFeatureStateTarget(map, {
+                source: h.source,
+                sourceLayer: h.sourceLayer,
+                id: h.id,
+              })
+            );
             return state?.highlighted === true;
           } catch {
             return false;
@@ -2130,6 +2294,16 @@ const BelisMapLibWrapper = ({
       }
     }
   }, [activeAATab]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Clear stale AA info-box override when the AA selection is cleared
+  // externally (e.g. ArbeitsauftragSearchModal dispatches clearSelection()).
+  useEffect(() => {
+    if (sidebarVariant !== "arbeitsauftraege") return;
+    if (activeAATab !== "aa") return;
+    if (selectedAAId == null) {
+      setOverrideSelectedFeature(null);
+    }
+  }, [sidebarVariant, activeAATab, selectedAAId]);
 
   // --- Arbeitsauftraege: AP feature-state selection ---
   const prevAPIdRef = useRef<number | null>(null);
@@ -2257,6 +2431,16 @@ const BelisMapLibWrapper = ({
       feature: SidebarFeature
     ) => {
       if (sidebarMode === "drafts") {
+        // Creation drafts have no MVT tile feature — select directly
+        if (feature.properties?._isCreation) {
+          dispatch(
+            setSelectedFeature({ ...feature, selected: true })
+          );
+          selectFeature(identifier, feature as any);
+          setFeatureOnMap(true);
+          return;
+        }
+
         const sl = identifier.sourceLayer ?? "";
         const dbPK = String(feature.properties?.id ?? identifier.id);
 
@@ -2294,19 +2478,31 @@ const BelisMapLibWrapper = ({
   );
 
   // After a draft is cancelled/removed, select the next remaining draft.
+  // If no drafts remain, clear the selection and close the datasheet.
   const handleSelectNextDraft = useCallback(
     (removedFeatureId: string) => {
-      if (sidebarMode !== "drafts") return;
+      if (sidebarMode !== "drafts") {
+        clearMapSelection();
+        closeDatasheet();
+        return;
+      }
       // allDraftFeatures still contains the removed draft at this point
       // because the selector reads from the store snapshot before the next render.
       // Filter it out to get the remaining drafts.
       const remaining = allDraftFeatures.filter(({ feature }) => {
         if (!feature) return false;
+        if (feature.properties?._isCreation) {
+          return String(feature.properties.id) !== removedFeatureId;
+        }
         const sl = feature.sourceLayer ?? "";
         const pk = String(feature.properties?.id ?? "");
         return `${sl}:${pk}` !== removedFeatureId;
       });
-      if (remaining.length === 0) return;
+      if (remaining.length === 0) {
+        clearMapSelection();
+        closeDatasheet();
+        return;
+      }
       const next = remaining[0];
       const f = next.feature;
       handleSidebarFeatureSelect(
@@ -2314,8 +2510,37 @@ const BelisMapLibWrapper = ({
         f
       );
     },
-    [sidebarMode, allDraftFeatures, handleSidebarFeatureSelect]
+    [sidebarMode, allDraftFeatures, handleSidebarFeatureSelect, clearMapSelection, closeDatasheet]
   );
+
+  useEffect(() => {
+    setOnSelectNextDraft(() => handleSelectNextDraft);
+    return () => setOnSelectNextDraft(undefined);
+  }, [handleSelectNextDraft, setOnSelectNextDraft]);
+
+  const handleOpenCreationDraft = useCallback(
+    (featureType: string, draftKey: string) => {
+      const draft = store.getState().featuresForms?.drafts[draftKey];
+      const syntheticFeature =
+        draft?.feature ??
+        buildSyntheticFeature(featureType, draftKey, {}, draft?.geometry);
+      const sourceLayer =
+        featureTypeToSourceLayer[featureType] ?? featureType;
+      dispatch(setSelectedFeature({ ...syntheticFeature, selected: true }));
+      selectFeature(
+        { source: "", sourceLayer, id: draftKey },
+        syntheticFeature as any
+      );
+      setFeatureOnMap(true);
+      openDatasheet();
+    },
+    [store, dispatch, selectFeature, openDatasheet]
+  );
+
+  useEffect(() => {
+    setOnOpenCreationDraft(() => handleOpenCreationDraft);
+    return () => setOnOpenCreationDraft(undefined);
+  }, [handleOpenCreationDraft, setOnOpenCreationDraft]);
 
   return (
     <div
@@ -2333,7 +2558,7 @@ const BelisMapLibWrapper = ({
           // AA_SORT_BY_TEAM_ASC                            — by team name
           // AA_SORT_BY_ERLEDIGT_DESC                       — by % completed
           // or use { field: "...", direction: "asc"|"desc" } for custom config
-          sort={AA_SORT_BY_PROTOKOLLE_DESC}
+          sort={AA_SORT_BY_NUMMER_ASC}
           onProtokollSelect={() => {
             /* fly-to handled by selectedAPId effect */
           }}
@@ -2362,6 +2587,7 @@ const BelisMapLibWrapper = ({
           highlightCount={adjustedHighlights?.length ?? undefined}
           draftsCount={draftFeaturesCount}
           onFeatureDismiss={handleSidebarDismiss}
+          auswahlActiveSourceLayers={activeSourceLayers}
           namespacedSource={namespacedSource}
           adjustedHighlights={adjustedHighlights}
           setAdjustedHighlights={setAdjustedHighlights}
@@ -2454,22 +2680,59 @@ const BelisMapLibWrapper = ({
         </div>
         <DatasheetLayout
           mainMap={
-            <CarmaMap
-              mapEngine="maplibre"
-              layerMode="imperative"
-              embedded
-              debugLog
-              logErrors={showRaw}
-              exposeMapToWindow
-              overrideGlyphs="https://tiles.cismet.de/fonts/{fontstack}/{range}.pbf"
-              backgroundLayers=""
-              terrainControl={false}
-              fullScreenControl={false}
-              libreLayers={libreLayers}
-              selectFromHits={handleSelectFromHits}
-              overrideSelectedFeature={overrideSelectedFeature}
-              gazetteerInfoOnClick={false}
-            />
+            <>
+              <CarmaMap
+                mapEngine="maplibre"
+                layerMode="imperative"
+                embedded
+                debugLog
+                logErrors={showRaw}
+                exposeMapToWindow
+                overrideGlyphs="https://tiles.cismet.de/fonts/{fontstack}/{range}.pbf"
+                backgroundLayers=""
+                terrainControl={false}
+                fullScreenControl={false}
+                libreLayers={libreLayers}
+                selectFromHits={handleSelectFromHits}
+                overrideSelectedFeature={overrideSelectedFeature}
+                gazetteerInfoOnClick={false}
+                // Suppress carma's vector-feature selection while a draw mode
+                // is active so clicks land in terra-draw, not in the
+                // fachobjekt selection logic.
+                selectionEnabled={drawMode === "none"}
+                extraControls={
+                  <DrawModeControls
+                    active={drawMode}
+                    onSelect={(mode) =>
+                      setDrawMode((prev) =>
+                        prev === mode ? "none" : mode
+                      )
+                    }
+                    snapping={{
+                      enabled: snappingEnabled,
+                      onToggle: () => setSnappingEnabled((s) => !s),
+                    }}
+                  />
+                }
+              />
+              <MeasurementHost
+                mode={drawMode}
+                snapping={snappingEnabled}
+                onChange={(features) => {
+                  // Prefix terra-draw's UUIDs to namespace measurement ids
+                  // away from any other id space (fachobjekte, brandnew FC,
+                  // etc.). Persistence intentionally omitted — refresh wipes.
+                  dispatch(
+                    setMeasurements(
+                      features.map((f) => ({
+                        ...f,
+                        id: `measurement.${f.id}`,
+                      }))
+                    )
+                  );
+                }}
+              />
+            </>
           }
           datasheetContent={
             // Draft mode: render AP form directly from persisted draft snapshot
@@ -2577,12 +2840,13 @@ const BelisMapLibWrapper = ({
                 <BelisDatasheetView
                   feature={selectedFeature}
                   rawFeature={rawFeature}
-                  fetchedData={fetchedFeatureData}
+                  fetchedData={liveDraftFetchedData ?? fetchedFeatureData}
                   featureType={
                     selectedFeature?.carmaInfo?.sourceLayer ||
                     selectedFeatureId?.sourceLayer ||
                     lastFeatureType
                   }
+                  readOnly={!globalEditMode}
                   featureOnMap={featureOnMap}
                   onSelectNextDraft={handleSelectNextDraft}
                 />

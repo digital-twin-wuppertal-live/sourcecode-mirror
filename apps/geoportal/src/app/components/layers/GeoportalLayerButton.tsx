@@ -18,7 +18,12 @@ import L from "leaflet";
 
 import { TopicMapContext } from "react-cismap/contexts/TopicMapContextProvider";
 
-import type { BackgroundLayer, Layer } from "@carma-mapping/layers";
+import type {
+  BackgroundLayer,
+  Layer,
+  DynamicStylingListConfig,
+} from "@carma-mapping/layers";
+import { getInteractionButtons } from "@carma-mapping/layers";
 import { cn, getHashParams } from "@carma-commons/utils";
 
 import {
@@ -32,16 +37,20 @@ import {
   getLayers,
   getSelectedLayerIndex,
   getActiveInteractionLayerID,
+  getActiveInteractionButtonID,
   getShowLeftScrollButton,
   removeLayer,
   setClickFromInfoView,
   setSelectedLayerIndex,
   setSelectedLayerIndexNoSelection,
   setActiveInteractionLayerID,
+  setActiveInteractionButtonID,
   setShowLeftScrollButton,
   setShowRightScrollButton,
   toggleUseInFeatureInfo,
   getMaplibreMaps,
+  setLayerDynamicStylingSelection,
+  updateLayerFromLayerInfo,
 } from "../../store/slices/mapping";
 import {
   UIMode,
@@ -57,9 +66,12 @@ import {
   LayerIcon,
   buildFilterExpression,
   captureOriginalFilters,
+  DynamicStylingControl,
+  applyDynamicStyling,
+  getLastAppliedSelection,
+  setLastAppliedSelection,
 } from "@carma-mapping/components";
-import { Badge, Spin } from "antd";
-import { LoadingOutlined } from "@ant-design/icons";
+import { Badge, Spin, Tooltip } from "antd";
 import { useLayerLoading } from "@carma-mapping/utils";
 import { useAdhocFeatureDisplay } from "@carma-appframeworks/portals";
 import { isAdhocVectorLayer } from "../../helper/adhoc-feature-utils";
@@ -108,15 +120,18 @@ const GeoportalLayerButton = ({
   const showLeftScrollButton = useSelector(getShowLeftScrollButton);
   const clickFromInfoView = useSelector(getClickFromInfoView);
   const activeInteractionLayerID = useSelector(getActiveInteractionLayerID);
+  const activeInteractionButtonID = useSelector(getActiveInteractionButtonID);
   const maplibreMaps = useSelector(getMaplibreMaps);
   const mode = useSelector(getUIMode);
   const showSettings = index === selectedLayerIndex;
   const layers = useSelector(getLayers);
   const layersLength = layers.length;
 
+  const isPinned = !!(layer as Layer).pinned;
   const { attributes, listeners, setNodeRef, transform, transition } =
     useSortable({
       id,
+      disabled: isPinned,
     });
   const buttonRef = useRef<HTMLDivElement>(null);
 
@@ -133,7 +148,9 @@ const GeoportalLayerButton = ({
   const zoom =
     routedMapRef?.leafletMap?.leafletElement.getZoom() || hashParams.zoom;
   const queryable =
-    (layer?.queryable || layer?.other?.accentColor || layer?.other?.header) &&
+    (layer?.queryable ||
+      layer?.layerInfo?.accentColor ||
+      layer?.layerInfo?.header) &&
     zoom < (layer.props.maxZoom ? layer.props.maxZoom : Infinity) &&
     zoom > (layer.props.minZoom ? layer.props.minZoom : 0);
   const map = routedMapRef?.leafletMap?.leafletElement as L.Map;
@@ -205,6 +222,64 @@ const GeoportalLayerButton = ({
     }
   }, [layer.filterConfig, layer.filterState, maplibreMaps, id]);
 
+  const dynamicStylingConfigs = (
+    Array.isArray(layer.dynamicStyling)
+      ? layer.dynamicStyling
+      : layer.dynamicStyling
+      ? [layer.dynamicStyling]
+      : []
+  ).filter((c): c is DynamicStylingListConfig => c.type === "list");
+  const dynamicStylingSelections =
+    typeof layer.dynamicStylingSelection === "object" &&
+    layer.dynamicStylingSelection !== null
+      ? layer.dynamicStylingSelection
+      : {};
+
+  const iconListConfigIndex = dynamicStylingConfigs.findIndex(
+    (c) =>
+      c.type === "list" &&
+      (c as DynamicStylingListConfig).options.some((o) => o.icon)
+  );
+  const iconListConfig =
+    iconListConfigIndex >= 0
+      ? (dynamicStylingConfigs[iconListConfigIndex] as DynamicStylingListConfig)
+      : null;
+
+  useEffect(() => {
+    if (!dynamicStylingConfigs.length) {
+      return;
+    }
+
+    const mapEntry = maplibreMaps?.find((entry) => entry.id === id);
+    if (!mapEntry?.map) {
+      return;
+    }
+
+    dynamicStylingConfigs.forEach((config, idx) => {
+      if (config.type !== "list") {
+        return;
+      }
+      const currentSelection =
+        dynamicStylingSelections[idx] ?? config.default;
+      const lastApplied =
+        getLastAppliedSelection(id, idx) ?? config.default;
+      if (currentSelection === lastApplied) {
+        return;
+      }
+
+      const layerInfo = applyDynamicStyling(
+        mapEntry.map,
+        id,
+        config,
+        currentSelection
+      );
+      setLastAppliedSelection(id, idx, currentSelection);
+      if (layerInfo) {
+        dispatch(updateLayerFromLayerInfo({ id, layerInfo }));
+      }
+    });
+  }, [layer.dynamicStyling, layer.dynamicStylingSelection, maplibreMaps, id]);
+
   const isCurrentlyVisible = () => {
     if (zoom >= layer?.props?.maxZoom || zoom <= layer?.props?.minZoom) {
       return false;
@@ -234,6 +309,12 @@ const GeoportalLayerButton = ({
             showSettings,
             clickFromInfoView
           );
+          if (activeInteractionLayerID && activeInteractionLayerID !== id) {
+            dispatch(setActiveInteractionLayerID(null));
+          }
+          if (layer.skipSelection) {
+            return;
+          }
           if (!clickFromInfoView) {
             showSettings
               ? dispatch(setSelectedLayerIndexNoSelection())
@@ -263,11 +344,41 @@ const GeoportalLayerButton = ({
           "pl-3",
         ]}
       >
-        <LayerIcon
-          layer={layer}
-          fallbackIcon={layer.icon}
-          className={loading && isCurrentlyVisible() ? "icon" : ""}
-        />
+        {iconListConfig && !background ? (
+          <DynamicStylingControl
+            config={iconListConfig}
+            maplibreMap={maplibreMaps?.find((entry) => entry.id === id)?.map}
+            carmaLayerId={id}
+            currentSelection={
+              dynamicStylingSelections[iconListConfigIndex] ||
+              iconListConfig.default
+            }
+            onSelectionChange={(selection) => {
+              dispatch(
+                setLayerDynamicStylingSelection({
+                  id,
+                  configIndex: iconListConfigIndex,
+                  selection,
+                })
+              );
+            }}
+            onLayerInfoChange={(layerInfo) => {
+              dispatch(updateLayerFromLayerInfo({ id, layerInfo }));
+            }}
+          >
+            <LayerIcon
+              layer={layer}
+              fallbackIcon={layer.icon}
+              className={loading && isCurrentlyVisible() ? "icon" : ""}
+            />
+          </DynamicStylingControl>
+        ) : (
+          <LayerIcon
+            layer={layer}
+            fallbackIcon={layer.icon}
+            className={loading && isCurrentlyVisible() ? "icon" : ""}
+          />
+        )}
 
         {layersLength > 0 && (
           <span className="text-base sm:hidden">{layersLength} Layer</span>
@@ -286,16 +397,16 @@ const GeoportalLayerButton = ({
             <span className="text-base ml-1">{title}</span>
             {layer.filterConfig && (
               <button
-                id={`filterLayerButton-${id}`}
-                className={cn("px-1.5 flex items-center justify-center")}
+                id={`layerInteractionButton-${id}`}
+                className="px-1.5 flex items-center justify-center"
                 onClick={(e) => {
                   e.preventDefault();
                   e.stopPropagation();
-                  dispatch(
-                    setActiveInteractionLayerID(
-                      activeInteractionLayerID === id ? null : id
-                    )
-                  );
+                  const isOpen =
+                    activeInteractionLayerID === id &&
+                    activeInteractionButtonID === null;
+                  dispatch(setActiveInteractionLayerID(isOpen ? null : id));
+                  dispatch(setActiveInteractionButtonID(null));
                 }}
               >
                 <Badge
@@ -305,13 +416,14 @@ const GeoportalLayerButton = ({
                       : 0
                   }
                   size="small"
-                  color={"#4b5563"}
+                  color="#4b5563"
                 >
                   <FontAwesomeIcon
                     icon={faFilter}
                     className={cn(
                       "text-sm",
-                      activeInteractionLayerID === id
+                      activeInteractionLayerID === id &&
+                        activeInteractionButtonID === null
                         ? "text-[#1677ff]"
                         : "text-gray-600 hover:text-gray-500"
                     )}
@@ -319,6 +431,74 @@ const GeoportalLayerButton = ({
                 </Badge>
               </button>
             )}
+            {getInteractionButtons(layer.interactionButtons).map((btn) => {
+              const isActive =
+                activeInteractionLayerID === id &&
+                activeInteractionButtonID === btn.id;
+              const button = (
+                <button
+                  key={btn.id}
+                  id={`layerInteractionButton-${id}-${btn.id}`}
+                  className={cn(
+                    "px-1.5 flex items-center justify-center text-sm",
+                    isActive
+                      ? "text-[#1677ff]"
+                      : "text-gray-600 hover:text-gray-500"
+                  )}
+                  onClick={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    if (btn.onClick) {
+                      btn.onClick();
+                      return;
+                    }
+                    dispatch(setActiveInteractionLayerID(isActive ? null : id));
+                    dispatch(
+                      setActiveInteractionButtonID(isActive ? null : btn.id)
+                    );
+                  }}
+                >
+                  {btn.icon}
+                </button>
+              );
+              return btn.tooltip ? (
+                <Tooltip key={btn.id} title={btn.tooltip}>
+                  {button}
+                </Tooltip>
+              ) : (
+                button
+              );
+            })}
+
+            {dynamicStylingConfigs.map((config, idx) => {
+              if (idx === iconListConfigIndex) return null;
+              return (
+                <DynamicStylingControl
+                  key={idx}
+                  config={config}
+                  maplibreMap={
+                    maplibreMaps?.find((entry) => entry.id === id)?.map
+                  }
+                  carmaLayerId={id}
+                  currentSelection={
+                    dynamicStylingSelections[idx] || config.default
+                  }
+                  onSelectionChange={(selection) => {
+                    dispatch(
+                      setLayerDynamicStylingSelection({
+                        id,
+                        configIndex: idx,
+                        selection,
+                      })
+                    );
+                  }}
+                  onLayerInfoChange={(layerInfo) => {
+                    dispatch(updateLayerFromLayerInfo({ id, layerInfo }));
+                  }}
+                  showIcon={false}
+                />
+              );
+            })}
 
             <button
               id={`removeLayerButton-${id}`}

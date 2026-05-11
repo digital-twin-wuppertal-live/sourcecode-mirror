@@ -5,6 +5,7 @@ import { getDocumentKey } from "../components/ui/FilePreview";
 import type { Draft, DraftFile } from "../store/slices/featuresForms";
 import { updateDataByClassName } from "./apiMethods";
 import { uploadDraftFiles } from "./uploadDraftFiles";
+import { parseStandortIdFromKey } from "./geometryOptions";
 
 // ---------------------------------------------------------------------------
 // Dayjs serialization (independent copy — matches FeaturesFormsWrapper logic)
@@ -71,22 +72,14 @@ interface FeatureSaveConfig {
 const featureSaveConfigs: Record<string, FeatureSaveConfig> = {
   leuchte: {
     className: "tdta_leuchten",
-    removedFields: [
-      "strassenschluessel_pk",
-      "strassenschluessel_strasse",
-      "sonderturnus",
-    ],
+    removedFields: ["strassenschluessel_pk", "strassenschluessel_strasse", "sonderturnus"],
     fieldRenames: { sonderturnus: "wartungszyklus" },
     transformDates: true,
     valuesPath: "leuchte",
   },
   standort: {
     className: "tdta_standort_mast",
-    removedFields: [
-      "strassenschluessel_pk",
-      "strassenschluessel_strasse",
-      "fk_bezirk",
-    ],
+    removedFields: ["strassenschluessel_pk", "strassenschluessel_strasse"],
     fieldRenames: {},
     transformDates: true,
   },
@@ -242,6 +235,11 @@ export const saveFeatureDraft = async (
     };
   }
 
+  // Creation drafts: create new feature with id: -1
+  if (draft.isCreation) {
+    return saveCreationDraft(jwt, featureId, draft, config);
+  }
+
   if (featureDbId == null) {
     return {
       ...base,
@@ -286,13 +284,129 @@ export const saveFeatureDraft = async (
     };
 
     // 5. Send to API
-    // console.log("xxx [SAVE DEBUG]", {
-    //   featureType,
-    //   featureDbId,
-    //   className: config.className,
-    //   payload: JSON.parse(JSON.stringify(dataToSave)),
-    // });
     await updateDataByClassName(jwt, config.className, dataToSave);
+
+    return { ...base, success: true };
+  } catch (error) {
+    return {
+      ...base,
+      success: false,
+      error: error instanceof Error ? error.message : "Unknown error",
+    };
+  }
+};
+
+const saveCreationDraft = async (
+  jwt: string,
+  featureId: string,
+  draft: Draft,
+  config: FeatureSaveConfig
+): Promise<SaveResult> => {
+  const { featureType } = draft;
+  const base = { featureId, featureType };
+  const geomPayload = draft.geometry
+    ? { id: -1, geo_field: draft.geometry }
+    : undefined;
+
+  try {
+    console.debug("[CREATE-FEATURE] raw draft.values:", JSON.stringify(draft.values, null, 2));
+    const formValues = prepareSaveValues(featureType, draft.values ?? {}) ?? {};
+    console.debug("[CREATE-FEATURE] after prepareSaveValues:", JSON.stringify(formValues, null, 2));
+    let payload: Record<string, unknown>;
+
+    if (featureType === "leuchte") {
+      const linkedMastId = parseStandortIdFromKey(draft.geometryKey);
+      const leuchteValues = (draft.values?.leuchte ?? {}) as Record<
+        string,
+        unknown
+      >;
+
+      let mastIdForLink: number;
+      if (linkedMastId != null) {
+        // Existing Standort was selected — reuse it, no new Mast created.
+        mastIdForLink = linkedMastId;
+      } else {
+        // Build the Mast payload from the form's Mast tab values, falling
+        // back to the same defaults that used to be hardcoded so a Mast can
+        // still be created if the user leaves required fields blank.
+        const rawMastValues = (draft.values?.mast ?? {}) as Record<
+          string,
+          unknown
+        >;
+        const cleanedMastValues =
+          prepareSaveValues("standort", rawMastValues) ?? {};
+        const mastPayload: Record<string, unknown> = {
+          id: -1,
+          ...cleanedMastValues,
+          // Defaults applied last so a missing or null form value still
+          // produces a saveable Mast. Leuchte's strassenschluessel always
+          // wins for the Mast since the field is hidden on the Mast tab.
+          lfd_nummer: cleanedMastValues.lfd_nummer ?? 1,
+          fk_strassenschluessel:
+            leuchteValues.fk_strassenschluessel ?? null,
+          fk_mastart: cleanedMastValues.fk_mastart ?? 8,
+          fk_masttyp: cleanedMastValues.fk_masttyp ?? 42,
+          ...(geomPayload ? { geom: geomPayload } : {}),
+        };
+        console.debug(
+          "[CREATE-FEATURE] Standort payload:",
+          JSON.stringify(mastPayload, null, 2)
+        );
+        const mastResult = await updateDataByClassName(
+          jwt,
+          featureSaveConfigs["standort"].className,
+          mastPayload
+        );
+        const mastRes = mastResult as { res?: string } | null;
+        const parsedMast = mastRes?.res
+          ? (JSON.parse(mastRes.res) as { id?: number })
+          : null;
+        const newMastId = parsedMast?.id;
+        if (!newMastId) {
+          return {
+            ...base,
+            success: false,
+            error: "Standort erstellt, aber keine ID erhalten",
+          };
+        }
+        mastIdForLink = Number(newMastId);
+      }
+
+      payload = {
+        id: -1,
+        ...formValues,
+        tdta_standort_mast: { id: mastIdForLink },
+      };
+    } else {
+      payload = {
+        id: -1,
+        ...formValues,
+        ...(geomPayload ? { geom: geomPayload } : {}),
+      };
+    }
+
+    console.debug(`[CREATE-FEATURE] ${featureType} → ${config.className} payload:`, JSON.stringify(payload, null, 2));
+    const result = await updateDataByClassName(jwt, config.className, payload);
+    console.debug(`[CREATE-FEATURE] ${featureType} → ${config.className} result:`, JSON.stringify(result, null, 2));
+
+    // Upload files if any
+    const draftFiles: DraftFile[] = draft.files ?? [];
+    if (draftFiles.length > 0) {
+      const res = result as { res?: string } | null;
+      const parsed = res?.res
+        ? (JSON.parse(res.res) as { id?: number })
+        : null;
+      const newId = parsed?.id;
+      if (newId) {
+        const uploadedDocs = await uploadDraftFiles(jwt, draftFiles);
+        if (uploadedDocs.length > 0) {
+          await updateDataByClassName(jwt, config.className, {
+            id: newId,
+            dokumenteArray: uploadedDocs,
+          });
+        }
+      }
+    }
 
     return { ...base, success: true };
   } catch (error) {
@@ -352,6 +466,10 @@ interface HandleSaveAllDeps {
   dispatch: (action: any) => void;
   removeDraft: (featureId: string) => unknown;
   incrementFeatureDataVersion: () => unknown;
+  /** Fires once the batch finishes if at least one draft saved successfully.
+   * The caller wires this to `closeDatasheet` so the right pane returns to
+   * the map view — the form was bound to drafts that no longer exist. */
+  onSuccess?: () => void;
 }
 
 export const handleSaveAllDrafts = (deps: HandleSaveAllDeps) => {
@@ -363,14 +481,28 @@ export const handleSaveAllDrafts = (deps: HandleSaveAllDeps) => {
     dispatch,
     removeDraft,
     incrementFeatureDataVersion,
+    onSuccess,
   } = deps;
+
+  const creationCount = Object.values(drafts).filter(
+    (d) => d.isCreation
+  ).length;
+  const editCount = draftCount - creationCount;
+  const parts: string[] = [];
+  if (editCount > 0)
+    parts.push(editCount === 1 ? "1 Änderung" : `${editCount} Änderungen`);
+  if (creationCount > 0)
+    parts.push(
+      creationCount === 1
+        ? "1 neues Objekt"
+        : `${creationCount} neue Objekte`
+    );
 
   Modal.confirm({
     title: "Alle Entwürfe speichern?",
-    content:
-      draftCount === 1
-        ? "Entwurf wird gespeichert."
-        : "Entwürfe werden gespeichert.",
+    content: `${parts.join(" und ")} ${
+      draftCount === 1 ? "wird" : "werden"
+    } gespeichert.`,
     okText: "Alle speichern",
     cancelText: "Abbrechen",
     onOk: async () => {
@@ -389,6 +521,7 @@ export const handleSaveAllDrafts = (deps: HandleSaveAllDeps) => {
 
         if (result.succeeded.length > 0) {
           dispatch(incrementFeatureDataVersion());
+          onSuccess?.();
         }
 
         for (const fail of result.failed) {

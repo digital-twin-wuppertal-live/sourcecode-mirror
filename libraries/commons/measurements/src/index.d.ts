@@ -34,6 +34,8 @@ export interface MapMeasurementsContextType {
   setDrawingShape: (drawingShape: boolean) => void;
   setShowAll: (showAll: boolean) => void;
   setDeleteAll: (deleteAll: boolean) => void;
+  clearAllShapes: () => void;
+  clearAllShapesTrigger: number | null;
   setMoveToShape: (moveToShape: any) => void;
   setUpdateShape: (updateShape: boolean) => void;
   setMapMovingEnd: (mapMovingEnd: boolean) => void;
@@ -46,7 +48,8 @@ export interface MapMeasurementsContextType {
     shapeId: string,
     newCoordinates?: any,
     newDistance?: number,
-    newSquare?: number | null
+    newSquare?: number | null,
+    newLabels?: { position: [number, number]; text: string }[]
   ) => void;
   setLastVisibleShapeActive: () => void;
   setDrawingWithLastActiveShape: () => void;

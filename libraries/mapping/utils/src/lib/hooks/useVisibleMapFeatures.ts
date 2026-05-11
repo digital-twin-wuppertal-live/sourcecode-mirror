@@ -1,5 +1,7 @@
 import { useEffect, useState, useCallback, useRef } from "react";
 import type { Map as MaplibreMap, MapGeoJSONFeature } from "maplibre-gl";
+import { buildFeatureStateTarget } from "../featureStateTarget";
+import { stampSourceLayerFromProperty } from "../sourceLayerStamp";
 
 const DEFAULT_MAX_FEATURES = 2000;
 const DEFAULT_DEBOUNCE_MS = 300;
@@ -398,19 +400,22 @@ export const useVisibleMapFeatures = ({
 
         for (const f of renderedFeatures) {
           if (filterRef.current && !filterRef.current(f)) continue;
+          stampSourceLayerFromProperty(f);
           const key = `${f.source}-${f.sourceLayer}-${f.id}`;
           if (!seen.has(key) && isFeatureInGeoBounds(f, boundsToUse)) {
             seen.add(key);
 
             // When highlightedOnly is active, skip non-highlighted features early
-            // so the maxFeatures cap only counts features we actually care about
+            // so the maxFeatures cap only counts features we actually care about.
             if (checkHighlight) {
               if (f.id == null || !f.source) continue;
-              const state = maplibreMap.getFeatureState({
-                source: f.source,
-                sourceLayer: f.sourceLayer,
-                id: f.id,
-              });
+              const state = maplibreMap.getFeatureState(
+                buildFeatureStateTarget(maplibreMap, {
+                  source: f.source,
+                  sourceLayer: f.sourceLayer,
+                  id: f.id,
+                })
+              );
               if (!state?.highlighted) continue;
             }
 

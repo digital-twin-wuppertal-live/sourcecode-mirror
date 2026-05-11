@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import { Form, Input, Row, Col, Table, Select } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import { useDispatch, useSelector } from "react-redux";
@@ -24,6 +24,7 @@ import { getFormClassName } from "./readOnlyFormUtils";
 import { FormItem } from "./DraftFieldHighlight";
 import toTitleCase from "../../../helper/toTitleCase";
 import { compare } from "../../../helper/protokolleSortHelpers";
+import { useScrollToSelectedTableRow } from "../../../hooks/useScrollToSelectedTableRow";
 
 const FormLabel = ({ children }: { children: React.ReactNode }) => (
   <span className="text-sm font-medium text-gray-700">{children}</span>
@@ -111,6 +112,14 @@ const ArbeitsauftragFormFields = ({
   const protokolleSort = useSelector(getProtokolleSort);
   const keyTablesData = useSelector(getKeyTablesData);
   const apDeletions = useSelector((state: RootState) => getAPDeletions(state));
+  const tableWrapperRef = useRef<HTMLDivElement>(null);
+  const fromTableClickRef = useRef(false);
+
+  useScrollToSelectedTableRow({
+    selectedId: selectedAPId,
+    wrapperRef: tableWrapperRef,
+    fromClickRef: fromTableClickRef,
+  });
 
   const teamOptions = useMemo(
     () =>
@@ -128,11 +137,19 @@ const ArbeitsauftragFormFields = ({
     onFormInstance?.(form);
   }, [form, onFormInstance]);
 
+  const veranlassung = useMemo(() => {
+    const protokolle = data?.ar_protokolleArray;
+    if (!Array.isArray(protokolle) || protokolle.length === 0) return null;
+    return protokolle[0]?.arbeitsprotokoll?.veranlassung ?? null;
+  }, [data]);
+
   useEffect(() => {
     form.resetFields();
     if (data) {
       const serverValues = {
         zugewiesen_an: data.team?.id ?? null,
+        bezeichnung: veranlassung?.bezeichnung ?? "",
+        beschreibung: veranlassung?.beschreibung ?? "",
       };
       form.setFieldsValue(serverValues);
       onOriginalValues?.(form.getFieldsValue());
@@ -405,6 +422,32 @@ const ArbeitsauftragFormFields = ({
           </Col>
         </Row>
         <Row gutter={16}>
+          <Col span={24}>
+            <FormItem
+              name="bezeichnung"
+              label={<FormLabel>Bezeichnung</FormLabel>}
+              className="mb-4"
+            >
+              <Input size="large" placeholder="Bezeichnung eingeben" />
+            </FormItem>
+          </Col>
+        </Row>
+        <Row gutter={16}>
+          <Col span={24}>
+            <FormItem
+              name="beschreibung"
+              label={<FormLabel>Beschreibung</FormLabel>}
+              className="mb-4"
+            >
+              <Input.TextArea
+                rows={3}
+                style={{ resize: "vertical" }}
+                placeholder="Beschreibung eingeben"
+              />
+            </FormItem>
+          </Col>
+        </Row>
+        <Row gutter={16}>
           <Col span={12} className="cursor-not-allowed">
             <div className="pointer-events-none">
               <Form.Item
@@ -433,7 +476,7 @@ const ArbeitsauftragFormFields = ({
       </Form>
 
       {/* Protokolle table */}
-      <div>
+      <div ref={tableWrapperRef}>
         <div className="text-sm font-medium text-gray-700 mb-2">
           Protokolle ({protokolleRows.length})
         </div>
@@ -468,7 +511,12 @@ const ArbeitsauftragFormFields = ({
             return classes.join(" ");
           }}
           onRow={(record) => ({
+            onClick: () => {
+              fromTableClickRef.current = true;
+              dispatch(setSelectedAPId(record.id));
+            },
             onDoubleClick: () => {
+              fromTableClickRef.current = true;
               dispatch(setSelectedAPId(record.id));
               dispatch(setApOpenedFrom("auTable"));
               dispatch(setActiveAATab("ap"));

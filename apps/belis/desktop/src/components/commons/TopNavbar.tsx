@@ -23,6 +23,7 @@ import {
 import { incrementFeatureDataVersion } from "../../store/slices/featureCollection";
 import { buildAddFeaturesToAAPayload } from "../../helper/buildNewAAFromFeatures";
 import { updateDataByClassName } from "../../helper/apiMethods";
+import CreateFeatureDropdown from "../ui/CreateFeatureDropdown";
 
 const TopNavbar = () => {
   const dispatch = useDispatch();
@@ -108,14 +109,7 @@ const TopNavbar = () => {
   ];
 
   const aaButtonTitle = hasHighlights
-    ? highlightCount === 1
-      ? (() => {
-          const props = activeHighlights[0].properties || {};
-          const title =
-            props.name || props.title || props.label || props.bezeichnung || "";
-          return `neuer Arbeitsauftrag anlegen "${title}"`;
-        })()
-      : `neuer Arbeitsauftrag anlegen (mit ${highlightCount} Protokollen)`
+    ? `neuer Arbeitsauftrag anlegen (mit ${highlightCount} Protokollen)`
     : "";
 
   return (
@@ -132,6 +126,8 @@ const TopNavbar = () => {
         >
           Fachobjekte
         </NavLink>
+        {/* temporarily hidden — re-enable when needed */}
+        {/* <CreateFeatureDropdown /> */}
         <NavLink
           to="/arbeitsauftraege"
           className={({ isActive }) => `text-base hover:text-gray-600`}

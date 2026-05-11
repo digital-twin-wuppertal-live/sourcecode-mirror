@@ -31,10 +31,13 @@ const LayerRow = ({ layer, id, isBackgroundLayer, index }: LayerRowProps) => {
   const dispatch = useDispatch();
   const { clearFeatureCollections } = useAdhocFeatureDisplay();
   const { isCesium } = useMapFrameworkSwitcherContext();
-  const icon = layer?.other?.icon;
+  const icon = (layer?.layerInfo?.icon as string) || layer?.other?.icon;
+  const isPinned = !!(layer as Layer).pinned;
+  const skipSelection = !!layer.skipSelection;
   const { attributes, listeners, setNodeRef, transform, transition } =
     useSortable({
       id,
+      disabled: isPinned,
     });
 
   const style = { transform: CSS.Translate.toString(transform) };
@@ -50,7 +53,7 @@ const LayerRow = ({ layer, id, isBackgroundLayer, index }: LayerRowProps) => {
           {...listeners}
           {...attributes}
           className={`flex items-center justify-center !cursor-grab ${
-            isBackgroundLayer ? "invisible" : ""
+            isBackgroundLayer || isPinned ? "invisible" : ""
           }`}
         >
           <FontAwesomeIcon icon={faGripVertical} />
@@ -73,14 +76,16 @@ const LayerRow = ({ layer, id, isBackgroundLayer, index }: LayerRowProps) => {
       </div>
       <OpacitySlider
         isBackgroundLayer={isBackgroundLayer}
-        opacity={layer.opacity}
+        opacity={skipSelection ? 1 : layer.opacity}
         id={layer.id}
         isVisible={layer.visible}
+        disabled={skipSelection}
       />
       <VisibilityToggle
         visible={layer.visible}
         id={id}
         isBackgroundLayer={isBackgroundLayer}
+        disabled={skipSelection}
       />
       <button
         className={`hover:text-gray-500 text-gray-600 flex items-center justify-center ${

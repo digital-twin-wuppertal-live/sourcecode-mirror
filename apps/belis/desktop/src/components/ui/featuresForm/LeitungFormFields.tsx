@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { Form, Row, Col, Select } from "antd";
 import type { FormInstance } from "antd";
 import { useSelector } from "react-redux";
@@ -9,6 +9,7 @@ import { FormItem } from "./DraftFieldHighlight";
 interface LeitungFormFieldsProps {
   leitung: Record<string, unknown> | null;
   readOnly?: boolean;
+  form?: FormInstance;
   onFormInstance?: (form: FormInstance) => void;
   draftValues?: Record<string, unknown>;
   onValuesChange?: (
@@ -31,15 +32,18 @@ const FormLabel = ({ children }: { children: React.ReactNode }) => (
 const LeitungFormFields = ({
   leitung,
   readOnly = true,
+  form: externalForm,
   onFormInstance,
   draftValues,
   onValuesChange,
   onOriginalValues,
 }: LeitungFormFieldsProps) => {
-  const [form] = Form.useForm();
+  const [localForm] = Form.useForm();
+  const form = externalForm ?? localForm;
+  const draftApplied = useRef(false);
   useEffect(() => {
-    onFormInstance?.(form);
-  }, [form, onFormInstance]);
+    if (!externalForm) onFormInstance?.(form);
+  }, [form, onFormInstance, externalForm]);
 
   const keyTablesData = useSelector(getKeyTablesData);
 
@@ -49,12 +53,16 @@ const LeitungFormFields = ({
   const materialOptions = [
     ...((keyTablesData.materialLeitung || []) as KeyTableItem[]),
   ].sort((a, b) => (a.bezeichnung || "").localeCompare(b.bezeichnung || ""));
-  const querschnittOptions = [
-    ...((keyTablesData.querschnitt || []) as KeyTableItem[]),
-  ].sort((a, b) => Number(a.groesse || 0) - Number(b.groesse || 0));
+  const querschnittOptions = (
+    (keyTablesData.querschnitt || []) as KeyTableItem[]
+  )
+    .filter((item) => item.groesse !== null && item.groesse !== undefined)
+    .sort((a, b) => Number(a.groesse) - Number(b.groesse));
 
   useEffect(() => {
+    if (externalForm) return;
     form.resetFields();
+    draftApplied.current = false;
 
     if (leitung) {
       const serverValues = {
@@ -67,10 +75,18 @@ const LeitungFormFields = ({
 
       if (draftValues) {
         form.setFieldsValue(draftValues);
+        draftApplied.current = true;
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [leitung, form]);
+
+  useEffect(() => {
+    if (externalForm) return;
+    if (draftApplied.current || !draftValues) return;
+    form.setFieldsValue(draftValues);
+    draftApplied.current = true;
+  }, [draftValues, form, externalForm]);
 
   return (
     <Form

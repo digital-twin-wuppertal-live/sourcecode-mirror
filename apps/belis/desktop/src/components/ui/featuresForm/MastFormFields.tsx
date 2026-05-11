@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import {
   Form,
   Row,
@@ -12,6 +12,8 @@ import {
 import { useSelector } from "react-redux";
 import { getKeyTablesData } from "../../../store/slices/keyTables";
 import StrassenschluesselFields from "./StrassenschluesselFields";
+import StrassenschluesselFieldsModal from "./StrassenschluesselFieldsModal";
+import StadtbezirkField from "./StadtbezirkField";
 import { getFormClassName, getPlaceholder } from "./readOnlyFormUtils";
 import { FormItem } from "./DraftFieldHighlight";
 import toTitleCase from "../../../helper/toTitleCase";
@@ -21,6 +23,12 @@ interface MastFormFieldsProps {
   mast: Record<string, unknown> | null;
   namePrefix?: string;
   readOnly?: boolean;
+  isCreation?: boolean;
+  /** When true, always render the read-only StrassenschluesselFields,
+   * even during creation. Used by the Mast tab on the new-Leuchte form
+   * where the Strassenschluessel is taken from the Leuchte. */
+  readOnlyStrassenschluessel?: boolean;
+  form?: import("antd").FormInstance;
   onFormInstance?: (form: import("antd").FormInstance) => void;
   draftValues?: Record<string, unknown>;
   onValuesChange?: (
@@ -66,12 +74,6 @@ interface AnlagengruppeItem {
   bezeichnung?: string;
 }
 
-interface BezirkItem {
-  id: number;
-  pk?: string;
-  bezirk?: string;
-}
-
 // Helper type for nested objects with common properties
 interface NestedObject {
   id?: number;
@@ -87,15 +89,20 @@ const MastFormFields = ({
   mast,
   namePrefix,
   readOnly = true,
+  isCreation,
+  readOnlyStrassenschluessel = false,
+  form: externalForm,
   onFormInstance,
   draftValues,
   onValuesChange,
   onOriginalValues,
 }: MastFormFieldsProps) => {
-  const [form] = Form.useForm();
+  const [localForm] = Form.useForm();
+  const form = externalForm ?? localForm;
+  const draftApplied = useRef(false);
   useEffect(() => {
-    onFormInstance?.(form);
-  }, [form, onFormInstance]);
+    if (!externalForm) onFormInstance?.(form);
+  }, [form, onFormInstance, externalForm]);
   const keyTablesData = useSelector(getKeyTablesData);
 
   // Key table options - sorted alphabetically
@@ -121,16 +128,14 @@ const MastFormFields = ({
     []) as KennzifferItem[];
   const anlagengruppeOptions = (keyTablesData.anlagengruppe ||
     []) as AnlagengruppeItem[];
-  const bezirkOptions = [
-    ...((keyTablesData.bezirk || []) as BezirkItem[]),
-  ].sort((a, b) => (a.bezirk || "").localeCompare(b.bezirk || ""));
 
   // Helper to create field name with optional prefix
   const fieldName = (name: string) => (namePrefix ? [namePrefix, name] : name);
 
   useEffect(() => {
-    // Reset form when data changes to clear old values
+    if (externalForm) return;
     form.resetFields();
+    draftApplied.current = false;
 
     if (mast) {
       const strassenschluessel = mast.tkey_strassenschluessel as
@@ -151,9 +156,9 @@ const MastFormFields = ({
       const serverValues = {
         // Strassenschluessel
         strassenschluessel_pk: strassenschluessel?.pk,
-        strassenschluessel_strasse: toTitleCase(
-          strassenschluessel?.strasse || ""
-        ),
+        strassenschluessel_strasse: strassenschluessel?.strasse
+          ? toTitleCase(strassenschluessel.strasse)
+          : undefined,
         // Kennziffer - use id for Select value
         fk_kennziffer: kennziffer?.id ?? null,
         // Laufende Nr.
@@ -163,7 +168,7 @@ const MastFormFields = ({
         // Standortangabe
         standortangabe: toTitleCase((mast.standortangabe as string) || ""),
         // Stadtbezirk - use id for Select value
-        fk_bezirk: bezirk?.id ?? null,
+        fk_stadtbezirk: bezirk?.id ?? null,
         // Mastart - use id for Select value
         fk_mastart: mastart?.id ?? null,
         // Masttyp - use id for Select value
@@ -226,10 +231,18 @@ const MastFormFields = ({
 
       if (draftValues) {
         form.setFieldsValue(draftValues);
+        draftApplied.current = true;
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mast, form]);
+
+  useEffect(() => {
+    if (externalForm) return;
+    if (draftApplied.current || !draftValues) return;
+    form.setFieldsValue(draftValues);
+    draftApplied.current = true;
+  }, [draftValues, form, externalForm]);
 
   return (
     <Form
@@ -239,8 +252,13 @@ const MastFormFields = ({
       className={getFormClassName(readOnly, "pr-2")}
       onValuesChange={onValuesChange}
     >
-      {/* Strassenschluessel - always disabled */}
-      <StrassenschluesselFields namePrefix={namePrefix} />
+      {readOnlyStrassenschluessel ? (
+        <StrassenschluesselFields namePrefix={namePrefix} />
+      ) : (!mast || isCreation) && !readOnly ? (
+        <StrassenschluesselFieldsModal namePrefix={namePrefix} isCreation={isCreation} />
+      ) : (
+        <StrassenschluesselFields namePrefix={namePrefix} />
+      )}
 
       {/* Kennziffer */}
       <FormItem
@@ -272,7 +290,7 @@ const MastFormFields = ({
             label={<FormLabel>Laufende Nr.</FormLabel>}
             className="mb-4"
           >
-            <InputNumber className="w-full" size="large" />
+            <InputNumber className="w-full" size="large" placeholder={getPlaceholder(readOnly, "Nummer eingeben")} />
           </FormItem>
         </Col>
         <Col span={12}>
@@ -281,7 +299,7 @@ const MastFormFields = ({
             label={<FormLabel>Hausnummer</FormLabel>}
             className="mb-4"
           >
-            <Input size="large" />
+            <Input size="large" placeholder={getPlaceholder(readOnly, "Hausnummer eingeben")} />
           </FormItem>
         </Col>
       </Row>
@@ -292,33 +310,15 @@ const MastFormFields = ({
         label={<FormLabel>Standortangabe</FormLabel>}
         className="mb-4"
       >
-        <Input size="large" />
+        <Input size="large" placeholder={getPlaceholder(readOnly, "Standortangabe eingeben")} />
       </FormItem>
 
       {/* Stadtbezirk - always non-editable (reference data) */}
-      <div className="cursor-not-allowed">
-        <div className="pointer-events-none">
-          <FormItem
-            name={fieldName("fk_bezirk")}
-            label={<FormLabel>Stadtbezirk</FormLabel>}
-            className="mb-4"
-          >
-            <Select
-              placeholder={getPlaceholder(readOnly, "Stadtbezirk auswählen")}
-              className="w-full"
-              size="large"
-              showSearch
-              optionFilterProp="children"
-            >
-              {bezirkOptions.map((item) => (
-                <Select.Option key={item.id} value={item.id}>
-                  {toTitleCase(item.bezirk || "")}
-                </Select.Option>
-              ))}
-            </Select>
-          </FormItem>
-        </div>
-      </div>
+      <StadtbezirkField
+        namePrefix={namePrefix}
+        readOnly={readOnly}
+        locked={false}
+      />
 
       {/* Mastart */}
       <FormItem
@@ -457,7 +457,7 @@ const MastFormFields = ({
             label={<FormLabel>Anstrichfarbe</FormLabel>}
             className="mb-4"
           >
-            <Input size="large" />
+            <Input size="large" placeholder={getPlaceholder(readOnly, "Farbe eingeben")} />
           </FormItem>
         </Col>
       </Row>
@@ -468,7 +468,7 @@ const MastFormFields = ({
         label={<FormLabel>Montagefirma</FormLabel>}
         className="mb-4"
       >
-        <Input size="large" />
+        <Input size="large" placeholder={getPlaceholder(readOnly, "Montagefirma eingeben")} />
       </FormItem>
 
       {/* Gruendung */}
@@ -477,7 +477,7 @@ const MastFormFields = ({
         label={<FormLabel>Gründung</FormLabel>}
         className="mb-4"
       >
-        <Input size="large" />
+        <Input size="large" placeholder={getPlaceholder(readOnly, "Gründung eingeben")} />
       </FormItem>
 
       {/* Standsicherheitspruefung and Naechstes Pruefdatum */}
@@ -518,7 +518,7 @@ const MastFormFields = ({
         label={<FormLabel>Verfahren</FormLabel>}
         className="mb-4"
       >
-        <Input size="large" />
+        <Input size="large" placeholder={getPlaceholder(readOnly, "Verfahren eingeben")} />
       </FormItem>
 
       {/* Elektrische Pruefung and Erdung */}
@@ -554,7 +554,7 @@ const MastFormFields = ({
         label={<FormLabel>Monteur</FormLabel>}
         className="mb-4"
       >
-        <Input size="large" />
+        <Input size="large" placeholder={getPlaceholder(readOnly, "Monteur eingeben")} />
       </FormItem>
 
       {/* Mastschutz and Revision */}
@@ -617,7 +617,7 @@ const MastFormFields = ({
         label={<FormLabel>Anbauten</FormLabel>}
         className="mb-4"
       >
-        <Input size="large" />
+        <Input size="large" placeholder={getPlaceholder(readOnly, "Anbauten eingeben")} />
       </FormItem>
 
       {/* Bemerkung */}
@@ -626,7 +626,7 @@ const MastFormFields = ({
         label={<FormLabel>Bemerkung</FormLabel>}
         className="mb-4"
       >
-        <Input.TextArea rows={4} size="large" />
+        <Input.TextArea rows={4} size="large" placeholder={getPlaceholder(readOnly, "Bemerkung eingeben")} />
       </FormItem>
 
       {/* Letzte Aenderung (readonly) */}

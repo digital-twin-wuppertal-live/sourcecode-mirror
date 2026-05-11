@@ -33,6 +33,15 @@ const DEFAULT_CONFIG: MapPageConfig = {
   onFilterChange: null,
 };
 
+export type CreateFeatureType =
+  | "leuchte"
+  | "standort"
+  | "leitung"
+  | "schaltstelle"
+  | "mauerlasche"
+  | "abzweigdose"
+  | null;
+
 interface MapPageContextValue {
   config: MapPageConfig;
   setConfig: (c: Partial<MapPageConfig>) => void;
@@ -40,6 +49,16 @@ interface MapPageContextValue {
   setActiveHighlights: (highlights: SidebarFeature[] | null) => void;
   aaModalOpen: boolean;
   setAaModalOpen: (open: boolean) => void;
+  createFeatureType: CreateFeatureType;
+  setCreateFeatureType: (type: CreateFeatureType) => void;
+  onSelectNextDraft?: (removedFeatureId: string) => void;
+  setOnSelectNextDraft: (
+    fn: ((removedFeatureId: string) => void) | undefined
+  ) => void;
+  onOpenCreationDraft?: (featureType: string, draftKey: string) => void;
+  setOnOpenCreationDraft: (
+    fn: ((featureType: string, draftKey: string) => void) | undefined
+  ) => void;
 }
 
 const MapPageContext = createContext<MapPageContextValue>({
@@ -49,6 +68,12 @@ const MapPageContext = createContext<MapPageContextValue>({
   setActiveHighlights: () => undefined,
   aaModalOpen: false,
   setAaModalOpen: () => undefined,
+  createFeatureType: null,
+  setCreateFeatureType: () => undefined,
+  onSelectNextDraft: undefined,
+  setOnSelectNextDraft: () => undefined,
+  onOpenCreationDraft: undefined,
+  setOnOpenCreationDraft: () => undefined,
 });
 
 export const MapPageProvider = ({ children }: { children: ReactNode }) => {
@@ -57,6 +82,14 @@ export const MapPageProvider = ({ children }: { children: ReactNode }) => {
     SidebarFeature[] | null
   >(null);
   const [aaModalOpen, setAaModalOpen] = useState(false);
+  const [createFeatureType, setCreateFeatureType] =
+    useState<CreateFeatureType>(null);
+  const [onSelectNextDraft, setOnSelectNextDraft] = useState<
+    ((removedFeatureId: string) => void) | undefined
+  >(undefined);
+  const [onOpenCreationDraft, setOnOpenCreationDraft] = useState<
+    ((featureType: string, draftKey: string) => void) | undefined
+  >(undefined);
 
   const setConfig = useCallback((c: Partial<MapPageConfig>) => {
     setConfigState((prev) => ({ ...prev, ...c }));
@@ -71,6 +104,12 @@ export const MapPageProvider = ({ children }: { children: ReactNode }) => {
         setActiveHighlights,
         aaModalOpen,
         setAaModalOpen,
+        createFeatureType,
+        setCreateFeatureType,
+        onSelectNextDraft,
+        setOnSelectNextDraft,
+        onOpenCreationDraft,
+        setOnOpenCreationDraft,
       }}
     >
       {children}

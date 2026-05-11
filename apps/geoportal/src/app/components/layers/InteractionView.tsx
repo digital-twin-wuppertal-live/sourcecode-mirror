@@ -1,7 +1,11 @@
-import { useMemo, useState } from "react";
+import { FC, useMemo } from "react";
 import { useDispatch, useSelector } from "react-redux";
 
+import type { FilterConfig, FilterType, Layer } from "@carma-mapping/layers";
+import { FILTER_TYPES } from "@carma-mapping/layers";
+
 import {
+  getActiveInteractionButtonID,
   getActiveInteractionLayerID,
   getLayers,
   getMaplibreMaps,
@@ -24,10 +28,25 @@ import {
 } from "../../store/slices/ui";
 import { useFilterBackground } from "./useFilterBackground";
 import FilterBackdrop from "./FilterBackdrop";
+import SaveMeasurements from "./SaveMeasurements";
+
+const INTERACTION_COMPONENTS: Record<string, FC<{ layer: Layer }>> = {
+  "save-measurements": SaveMeasurements,
+};
+
+const FILTER_FACTORIES: Partial<
+  Record<
+    FilterType,
+    (config: FilterConfig) => ReturnType<typeof createFilterButtons>
+  >
+> = {
+  [FILTER_TYPES.BUTTON]: createFilterButtons,
+};
 
 const InteractionView = ({ isDragging }: { isDragging?: boolean }) => {
   const dispatch = useDispatch();
   const activeInteractionLayerID = useSelector(getActiveInteractionLayerID);
+  const activeInteractionButtonID = useSelector(getActiveInteractionButtonID);
   const layers = useSelector(getLayers);
   const maplibreMaps = useSelector(getMaplibreMaps);
   const selectedFeature = useSelector(getSelectedFeature);
@@ -44,45 +63,70 @@ const InteractionView = ({ isDragging }: { isDragging?: boolean }) => {
     isDragging
   );
 
-  const FilterComponent = useMemo(
-    () =>
-      layer?.filterConfig ? createFilterButtons(layer.filterConfig) : null,
-    [layer?.filterConfig]
-  );
+  const FilterComponent = useMemo(() => {
+    const filterConfig = layer?.filterConfig;
+    if (!filterConfig?.filterType) {
+      return null;
+    }
+    const factory = FILTER_FACTORIES[filterConfig.filterType];
+    return factory ? factory(filterConfig) : null;
+  }, [layer?.filterConfig]);
 
   if (!layer) {
     return null;
   }
 
+  const InteractionComponent = activeInteractionButtonID
+    ? INTERACTION_COMPONENTS[activeInteractionButtonID]
+    : undefined;
+
+  if (!InteractionComponent && !FilterComponent) {
+    return null;
+  }
+
+  const renderContent = () => {
+    if (InteractionComponent) {
+      return <InteractionComponent layer={layer} />;
+    }
+
+    if (FilterComponent) {
+      return (
+        <FilterComponent
+          maplibreMap={maplibreMap}
+          selectedFeature={selectedFeature}
+          skipFeatureMatchCheck={isModeFeatureInfo}
+          setSelectedFeature={(feature) => {
+            dispatch(setSelectedFeatureAction(feature));
+          }}
+          onFilterChange={(info: FilterInfo, state: FilterState) => {
+            dispatch(
+              setLayerFilterState({
+                id: layer.id,
+                filterState: state,
+              })
+            );
+            dispatch(
+              setLayerFilterInfo({
+                id: layer.id,
+                filterInfo: info,
+              })
+            );
+            dispatch(triggerFeatureInfoUpdateAction());
+          }}
+          initialFilters={layer.filterState}
+        />
+      );
+    }
+
+    return null;
+  };
+
   return (
-    <div ref={wrapperRef} className="relative">
+    <div ref={wrapperRef} className="relative pointer-events-none">
       {validBg && !isDragging && <FilterBackdrop bgData={validBg} />}
       <div className="pt-3 w-full flex items-center justify-center">
-        <div ref={filterRef}>
-          <FilterComponent
-            maplibreMap={maplibreMap}
-            selectedFeature={selectedFeature}
-            skipFeatureMatchCheck={isModeFeatureInfo}
-            setSelectedFeature={(feature) => {
-              dispatch(setSelectedFeatureAction(feature));
-            }}
-            onFilterChange={(info: FilterInfo, state: FilterState) => {
-              dispatch(
-                setLayerFilterState({
-                  id: layer.id,
-                  filterState: state,
-                })
-              );
-              dispatch(
-                setLayerFilterInfo({
-                  id: layer.id,
-                  filterInfo: info,
-                })
-              );
-              dispatch(triggerFeatureInfoUpdateAction());
-            }}
-            initialFilters={layer.filterState}
-          />
+        <div ref={filterRef} className="pointer-events-auto">
+          {renderContent()}
         </div>
       </div>
     </div>

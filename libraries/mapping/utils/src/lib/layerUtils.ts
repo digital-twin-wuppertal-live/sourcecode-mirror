@@ -165,7 +165,10 @@ export const parseToMapLayer = async (
           ? JSON.parse(carmaConf.vectorStyle as string)
           : carmaConf.vectorStyle;
       } else if (layer.vectorStyle) {
-        vectorStyle = layer.vectorStyle;
+        localJson = isJson(layer.vectorStyle);
+        vectorStyle = localJson
+          ? JSON.parse(layer.vectorStyle as string)
+          : layer.vectorStyle;
       }
 
       let metaData: {
@@ -179,6 +182,7 @@ export const parseToMapLayer = async (
         [key: string]: unknown;
       } = {};
       let filterConfig = null;
+      let dynamicStyling = null;
       if (vectorStyle && typeof vectorStyle === "object") {
         zoom = parseZoom(vectorStyle.layers, {
           minzoom: 9,
@@ -188,6 +192,10 @@ export const parseToMapLayer = async (
           metaData = vectorStyle.metadata;
           if (metaData?.carmaConf?.filterConfig) {
             filterConfig = metaData?.carmaConf?.filterConfig;
+          }
+          if (metaData?.carmaConf?.dynamicStyling) {
+            const ds = metaData.carmaConf.dynamicStyling;
+            dynamicStyling = Array.isArray(ds) ? ds : [ds];
           }
         }
       } else if (typeof vectorStyle === "string" && vectorStyle) {
@@ -204,6 +212,9 @@ export const parseToMapLayer = async (
               metaData = result.metadata;
               if (metaData?.carmaConf?.filterConfig) {
                 filterConfig = metaData?.carmaConf?.filterConfig;
+              }
+              if (metaData?.carmaConf?.dynamicStyling) {
+                dynamicStyling = metaData?.carmaConf?.dynamicStyling;
               }
             }
             return parsedZoom;
@@ -247,18 +258,25 @@ export const parseToMapLayer = async (
           metaData: layer?.props?.MetadataURL,
         },
         other: {
-          ...Object.fromEntries(
-            Object.entries(layer).filter(([key]) => !["props"].includes(key))
-          ),
+          name: layer.name,
           layerName: layer.name,
           capabilitiesUrl: capabilitiesUrl,
-          ...metaData,
-          ...layerInfo,
+          service: layer.service,
+          serviceName: layer.serviceName,
+          keywords: layer.keywords,
+          tags: layer.tags,
+          icon: layer.icon,
+          alternativeIcon: layer.alternativeIcon,
+          path: layer.path,
+          originalPath: layer.originalPath,
+          vectorLegend: layer.vectorLegend,
+          thumbnail: layer.thumbnail,
         },
         layerInfo: {
           ...layerInfo,
         },
         filterConfig,
+        dynamicStyling,
         type: layer.type,
       };
     } else {
@@ -286,13 +304,19 @@ export const parseToMapLayer = async (
               metaData: layer.props.MetadataURL,
             },
             other: {
-              ...Object.fromEntries(
-                Object.entries(layer).filter(
-                  ([key]) => !["props"].includes(key)
-                )
-              ),
+              name: layer.name,
               layerName: layer.name,
               capabilitiesUrl: capabilitiesUrl,
+              service: layer.service,
+              serviceName: layer.serviceName,
+              keywords: layer.keywords,
+              tags: layer.tags,
+              icon: layer.icon,
+              alternativeIcon: layer.alternativeIcon,
+              path: layer.path,
+              originalPath: layer.originalPath,
+              vectorLegend: layer.vectorLegend,
+              thumbnail: layer.thumbnail,
             },
           };
           break;
@@ -318,13 +342,19 @@ export const parseToMapLayer = async (
               metaData: layer.props.MetadataURL,
             },
             other: {
-              ...Object.fromEntries(
-                Object.entries(layer).filter(
-                  ([key]) => !["props"].includes(key)
-                )
-              ),
+              name: layer.name,
               layerName: layer.name,
               capabilitiesUrl: capabilitiesUrl,
+              service: layer.service,
+              serviceName: layer.serviceName,
+              keywords: layer.keywords,
+              tags: layer.tags,
+              icon: layer.icon,
+              alternativeIcon: layer.alternativeIcon,
+              path: layer.path,
+              originalPath: layer.originalPath,
+              vectorLegend: layer.vectorLegend,
+              thumbnail: layer.thumbnail,
             },
           };
           break;

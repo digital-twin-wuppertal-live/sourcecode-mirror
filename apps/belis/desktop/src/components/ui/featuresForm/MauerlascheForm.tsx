@@ -1,9 +1,10 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useRef, type ReactNode } from "react";
 import type { FormInstance } from "antd";
 import { message } from "antd";
 import { useSelector } from "react-redux";
 import dayjs from "dayjs";
 import type { DraftFile } from "../../../store/slices/featuresForms";
+import { isCreationDraftKey } from "../../../store/slices/featuresForms";
 import { getJWT } from "../../../store/slices/auth";
 import { DokumentItem } from "../DocumentPreview";
 import { getDocumentKey } from "../FilePreview";
@@ -39,6 +40,8 @@ interface MauerlascheFormProps {
   draftValues?: Record<string, unknown>;
   draftFiles?: DraftFile[];
   hasDraft?: boolean;
+  isCreation?: boolean;
+  formHeaderContent?: ReactNode;
   onDraftChange?: (values: Record<string, unknown>) => void;
   onDraftFilesChange?: (files: DraftFile[]) => void;
   onOriginalValues?: (values: Record<string, unknown>) => void;
@@ -58,6 +61,7 @@ const MauerlascheForm = ({
   draftValues,
   draftFiles,
   hasDraft,
+  formHeaderContent,
   onDraftChange,
   onDraftFilesChange,
   onOriginalValues,
@@ -129,11 +133,13 @@ const MauerlascheForm = ({
     toTitleCase((rawProps?.strasse as string) || "") ||
     "-ohne Straße-";
 
-  // Compute sidebar main title to display in form header
-  const sidebarMain =
-    rawProps?.laufende_nummer || rawProps?.id
-      ? `M - ${rawProps?.laufende_nummer || rawProps?.id}`
-      : "";
+  const isCreation =
+    typeof rawProps?.id === "string" && isCreationDraftKey(rawProps.id);
+  const sidebarMain = rawProps?.laufende_nummer
+    ? `M - ${rawProps.laufende_nummer}`
+    : rawProps?.id && !isCreation
+    ? `M - ${rawProps.id}`
+    : "";
 
   const handleSave = async () => {
     if (!jwt) {
@@ -225,8 +231,10 @@ const MauerlascheForm = ({
 
   return (
     <FeatureFormLayout
-      title={sidebarMain ? `Mauerlasche ${sidebarMain}` : "Mauerlasche"}
+      title={isCreation ? "Neue Mauerlasche" : sidebarMain ? `Mauerlasche ${sidebarMain}` : "Mauerlasche"}
       cancelLabel={sidebarMain || ""}
+      isCreation={isCreation}
+      formHeaderContent={formHeaderContent}
       subtitle={subtitle}
       documents={documents}
       jwt={jwt}
@@ -235,6 +243,7 @@ const MauerlascheForm = ({
       removedDocumentKeys={removedDocumentKeys}
       onToggleRemoveDocument={handleToggleRemoveDocument}
       debugData={data}
+      rawFeatureData={rawFeature}
       loading={loading}
       saving={saving}
       readOnly={readOnly}
@@ -246,6 +255,7 @@ const MauerlascheForm = ({
       <MauerlascheFormFields
         mauerlasche={ml}
         readOnly={readOnly}
+        isCreation={isCreation}
         onFormInstance={setFormInstance}
         draftValues={draftValues}
         onValuesChange={handleValuesChange}

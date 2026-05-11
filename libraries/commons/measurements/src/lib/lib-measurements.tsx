@@ -33,6 +33,7 @@ export function Measurements({
     addShape,
     deleteAll,
     setDeleteAll,
+    clearAllShapesTrigger,
     setUpdateShape,
     visibleShapes,
     setVisibleShapes,
@@ -195,6 +196,18 @@ export function Measurements({
     currentMode,
   ]);
 
+  useEffect(() => {
+    if (!measureControl || clearAllShapesTrigger === null) return;
+    try {
+      if (measureControl._measureLayers) {
+        measureControl._measureLayers.clearLayers();
+      }
+      measureControl.options.shapes = [];
+    } catch (e) {
+      console.error("[MEASUREMENTS] clearAllShapes failed", e);
+    }
+  }, [clearAllShapesTrigger, measureControl]);
+
   // keep snappingLatlng and snappingEnabled in sync with control options
   useEffect(() => {
     if (measureControl) {
@@ -248,8 +261,14 @@ export function Measurements({
   const deleteVisibleShapeByIdHandler = (id) => {
     deleteVisibleShapeById(id);
   };
-  const updateShapeHandler = (id, newCoordinates, newDistance, newSquare) => {
-    updateShapeById(id, newCoordinates, newDistance, newSquare);
+  const updateShapeHandler = (
+    id,
+    newCoordinates,
+    newDistance,
+    newSquare,
+    newLabels
+  ) => {
+    updateShapeById(id, newCoordinates, newDistance, newSquare, newLabels);
   };
 
   const saveLastActiveShapeIdBeforeDrawingHandler = () => {

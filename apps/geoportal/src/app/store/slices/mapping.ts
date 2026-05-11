@@ -13,6 +13,8 @@ import {
   type MappingState,
 } from "@carma-appframeworks/portals";
 
+import { extractCarmaConfig } from "@carma-commons/utils";
+
 import { RootState } from "..";
 import { layerMap } from "../../config";
 
@@ -23,11 +25,28 @@ type MapLibreMapEntry = {
 
 const defaultOpacity = 0.2;
 
+const shouldSkipLayerForSelection = (
+  layer: Layer | undefined,
+  isLeaflet: boolean
+): boolean => {
+  if (!layer) {
+    return false;
+  }
+  if (layer.skipSelection) {
+    return true;
+  }
+  if (!isLeaflet && layer.type !== "object") {
+    return true;
+  }
+  return false;
+};
+
 const initialState: MappingState = {
   layers: [],
   savedLayerConfigs: [],
   selectedLayerIndex: SELECTED_LAYER_INDEX.NO_SELECTION,
   activeInteractionLayerID: null,
+  activeInteractionButtonID: null,
   paleOpacityValue: defaultOpacity,
   libreMapRef: null,
   maplibreMaps: [],
@@ -88,12 +107,39 @@ const slice = createSlice({
   initialState,
   reducers: {
     setLayers(state, action) {
-      state.layers = action.payload;
+      const incoming = action.payload as Layer[];
+      const pinnedFirst = incoming.filter((l) => l.pinned === "first");
+      const unpinned = incoming.filter((l) => !l.pinned);
+      const pinnedLast = incoming.filter((l) => l.pinned === "last");
+      state.layers = [...pinnedFirst, ...unpinned, ...pinnedLast];
     },
     appendLayer(state, action: PayloadAction<Layer>) {
-      let newLayers = state.layers;
-      newLayers.push(action.payload);
-      state.layers = newLayers;
+      const layer = action.payload;
+      if (layer.pinned === "first") {
+        const firstUnpinnedIndex = state.layers.findIndex(
+          (l) => l.pinned !== "first"
+        );
+        state.layers.splice(
+          firstUnpinnedIndex === -1 ? 0 : firstUnpinnedIndex,
+          0,
+          layer
+        );
+      } else if (layer.pinned === "last") {
+        state.layers.push(layer);
+      } else {
+        let lastPinnedIndex = -1;
+        for (let i = state.layers.length - 1; i >= 0; i--) {
+          if (state.layers[i].pinned === "last") {
+            lastPinnedIndex = i;
+            break;
+          }
+        }
+        if (lastPinnedIndex === -1) {
+          state.layers.push(layer);
+        } else {
+          state.layers.splice(lastPinnedIndex, 0, layer);
+        }
+      }
     },
     updateLayer(state, action: PayloadAction<Layer>) {
       const layer = state.layers.find((obj) => obj.id === action.payload.id);
@@ -115,6 +161,7 @@ const slice = createSlice({
       );
       if (state.activeInteractionLayerID === action.payload) {
         state.activeInteractionLayerID = null;
+        state.activeInteractionButtonID = null;
       }
     },
     removeLastLayer(state) {
@@ -231,6 +278,56 @@ const slice = createSlice({
       }
     },
 
+    setLayerDynamicStylingSelection(
+      state,
+      action: PayloadAction<{
+        id: string;
+        configIndex: number;
+        selection: string;
+      }>
+    ) {
+      const { id, configIndex, selection } = action.payload;
+      const layer = state.layers.find((l) => l.id === id);
+      if (layer) {
+        const prev =
+          typeof layer.dynamicStylingSelection === "object" &&
+          layer.dynamicStylingSelection !== null
+            ? layer.dynamicStylingSelection
+            : {};
+        layer.dynamicStylingSelection = { ...prev, [configIndex]: selection };
+      }
+    },
+
+    updateLayerFromLayerInfo(
+      state,
+      action: PayloadAction<{
+        id: string;
+        layerInfo: Record<string, unknown>;
+      }>
+    ) {
+      const { id, layerInfo } = action.payload;
+      const layer = state.layers.find((l) => l.id === id);
+      if (!layer) {
+        return;
+      }
+
+      layer.layerInfo = { ...layer.layerInfo, ...layerInfo };
+
+      const directKeys = ["title", "description"] as const;
+      for (const key of directKeys) {
+        if (typeof layerInfo[key] === "string") {
+          layer[key] = layerInfo[key] as string;
+        }
+      }
+
+      if (Array.isArray(layerInfo.keywords)) {
+        const conf = extractCarmaConfig(layerInfo.keywords as string[]);
+        if (conf) {
+          layer.conf = { ...layer.conf, ...conf };
+        }
+      }
+    },
+
     setSelectedLayerIndex(state, action) {
       state.selectedLayerIndex = action.payload;
     },
@@ -240,18 +337,46 @@ const slice = createSlice({
     setSelectedLayerIndexNoSelection(state) {
       state.selectedLayerIndex = SELECTED_LAYER_INDEX.NO_SELECTION;
     },
-    setNextSelectedLayerIndex(state) {
-      const newIndex = state.selectedLayerIndex + 1;
+    setNextSelectedLayerIndex(
+      state,
+      action: PayloadAction<{ isLeaflet: boolean } | undefined>
+    ) {
+      const isLeaflet = action.payload?.isLeaflet ?? true;
+      let newIndex = state.selectedLayerIndex + 1;
+      while (
+        newIndex < state.layers.length &&
+        shouldSkipLayerForSelection(state.layers[newIndex], isLeaflet)
+      ) {
+        newIndex += 1;
+      }
       if (newIndex >= state.layers.length) {
         state.selectedLayerIndex = SELECTED_LAYER_INDEX.BACKGROUND_LAYER;
       } else {
         state.selectedLayerIndex = newIndex;
       }
     },
-    setPreviousSelectedLayerIndex(state) {
-      const newIndex = state.selectedLayerIndex - 1;
+    setPreviousSelectedLayerIndex(
+      state,
+      action: PayloadAction<{ isLeaflet: boolean } | undefined>
+    ) {
+      const isLeaflet = action.payload?.isLeaflet ?? true;
+      let newIndex = state.selectedLayerIndex - 1;
+      while (
+        newIndex >= 0 &&
+        shouldSkipLayerForSelection(state.layers[newIndex], isLeaflet)
+      ) {
+        newIndex -= 1;
+      }
       if (newIndex < SELECTED_LAYER_INDEX.BACKGROUND_LAYER) {
-        state.selectedLayerIndex = state.layers.length - 1;
+        let wrapIndex = state.layers.length - 1;
+        while (
+          wrapIndex >= 0 &&
+          shouldSkipLayerForSelection(state.layers[wrapIndex], isLeaflet)
+        ) {
+          wrapIndex -= 1;
+        }
+        state.selectedLayerIndex =
+          wrapIndex >= 0 ? wrapIndex : SELECTED_LAYER_INDEX.BACKGROUND_LAYER;
       } else {
         state.selectedLayerIndex = newIndex;
       }
@@ -259,6 +384,12 @@ const slice = createSlice({
 
     setActiveInteractionLayerID(state, action) {
       state.activeInteractionLayerID = action.payload;
+      if (action.payload === null) {
+        state.activeInteractionButtonID = null;
+      }
+    },
+    setActiveInteractionButtonID(state, action: PayloadAction<string | null>) {
+      state.activeInteractionButtonID = action.payload;
     },
     setSelectedMapLayer(state, action: PayloadAction<BackgroundLayer>) {
       state.selectedMapLayer = action.payload;
@@ -344,6 +475,7 @@ export const {
   setNextSelectedLayerIndex,
   setPreviousSelectedLayerIndex,
   setActiveInteractionLayerID,
+  setActiveInteractionButtonID,
   setSelectedMapLayer,
   setBackgroundLayer,
   setSelectedLuftbildLayer,
@@ -361,6 +493,8 @@ export const {
   toggleUseInFeatureInfo,
   setLayerFilterInfo,
   setLayerFilterState,
+  setLayerDynamicStylingSelection,
+  updateLayerFromLayerInfo,
   setLibreMapRef,
   setMaplibreMaps,
   setConfigSelection,
@@ -407,6 +541,8 @@ export const getShowRightScrollButton = (state: RootState) =>
   state.mapping.showRightScrollButton;
 export const getActiveInteractionLayerID = (state: RootState) =>
   state.mapping.activeInteractionLayerID;
+export const getActiveInteractionButtonID = (state: RootState) =>
+  state.mapping.activeInteractionButtonID;
 export const getStartDrawing = (state: RootState) => state.mapping.startDrawing;
 export const getLibreMapRef = (state: RootState) => state.mapping.libreMapRef;
 export const getMaplibreMaps = (state: RootState) => state.mapping.maplibreMaps;

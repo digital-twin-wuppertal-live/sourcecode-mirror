@@ -1,6 +1,8 @@
-import { useCallback, useEffect, useMemo } from "react";
+import { useCallback, useEffect, useMemo, useRef } from "react";
 import { useDispatch, useSelector } from "react-redux";
 import { useKeyboardListNavigation } from "../../hooks/useKeyboardListNavigation";
+import { useScrollToSelected } from "../../hooks/useScrollToSelected";
+
 import { Spin } from "antd";
 import { getFachobjektOfProtocol } from "@carma-appframeworks/belis";
 import {
@@ -17,6 +19,7 @@ import {
   setActiveAATab,
   setSelectedAPId,
   setApOpenedFrom,
+  getApOpenedFrom,
 } from "../../store/slices/arbeitsauftraege";
 import { sortProtokolleByTableSort } from "../../helper/protokolleSortHelpers";
 import {
@@ -257,13 +260,21 @@ const ArbeitsauftraegeSidebar = ({
     }
   }, [isAPTabDisabled, activeTab]);
 
-  // Auto-select first AP when switching to AP tab with no selection
+  // Auto-select first AP when switching to AP tab with no valid selection,
+  // and ensure apOpenedFrom is set so the AP form renders.
+  const apOpenedFrom = useSelector(getApOpenedFrom);
   useEffect(() => {
-    if (activeTab === "ap" && selectedAPId == null && protokolle.length > 0) {
-      dispatch(setSelectedAPId(protokolle[0].id));
-      dispatch(setApOpenedFrom("sidebar"));
+    if (activeTab === "ap" && protokolle.length > 0) {
+      const hasValidSelection =
+        selectedAPId != null && protokolle.some((p) => p.id === selectedAPId);
+      if (!hasValidSelection) {
+        dispatch(setSelectedAPId(protokolle[0].id));
+        dispatch(setApOpenedFrom("sidebar"));
+      } else if (apOpenedFrom == null) {
+        dispatch(setApOpenedFrom("sidebar"));
+      }
     }
-  }, [activeTab, selectedAPId, protokolle]);
+  }, [activeTab, selectedAPId, protokolle, apOpenedFrom]);
 
   // Keyboard navigation for AA tab
   const selectedAAIndex = useMemo(
@@ -310,6 +321,24 @@ const ArbeitsauftraegeSidebar = ({
   });
 
   const handleKeyDown = activeTab === "aa" ? onAAKeyDown : onAPKeyDown;
+
+  const listRef = useRef<HTMLDivElement>(null);
+  const aaFromListRef = useRef(false);
+  const apFromListRef = useRef(false);
+
+  const selectedAARef = useScrollToSelected({
+    selectedId: selectedAAId ?? null,
+    containerRef: listRef,
+    fromListRef: aaFromListRef,
+    active: activeTab === "aa",
+  });
+
+  const selectedAPRef = useScrollToSelected({
+    selectedId: selectedAPId ?? null,
+    containerRef: listRef,
+    fromListRef: apFromListRef,
+    active: activeTab === "ap",
+  });
 
   return (
     <div
@@ -367,7 +396,7 @@ const ArbeitsauftraegeSidebar = ({
       </div>
 
       {/* Content */}
-      <div className="flex-1 overflow-y-auto">
+      <div ref={listRef} className="flex-1 overflow-y-auto">
         {activeTab === "aa" ? (
           /* Tab 1: Arbeitsaufträge list */
           graphqlLoading ? (
@@ -386,12 +415,14 @@ const ArbeitsauftraegeSidebar = ({
               return (
                 <div
                   key={item.id}
+                  ref={isSelected ? selectedAARef : undefined}
                   className={`px-3 py-2 border-b border-gray-100 cursor-pointer transition-colors ${
                     isSelected
                       ? "bg-blue-50 border-l-2 border-l-blue-500"
                       : "hover:bg-blue-50/50"
                   }`}
                   onClick={() => {
+                    aaFromListRef.current = true;
                     dispatch(setSelectedAAId(item.id));
                     onFeatureSelect?.(item.id);
                   }}
@@ -481,12 +512,14 @@ const ArbeitsauftraegeSidebar = ({
                 return (
                   <div
                     key={p.id}
+                    ref={isSelected ? selectedAPRef : undefined}
                     className={`px-3 py-2 border-b border-gray-100 cursor-pointer transition-colors ${
                       isSelected
                         ? "bg-blue-50 border-l-2 border-l-blue-500"
                         : "hover:bg-blue-50/50"
                     } ${isMarkedForDeletion ? "line-through opacity-50" : ""}`}
                     onClick={() => {
+                      apFromListRef.current = true;
                       dispatch(setSelectedAPId(p.id));
                       dispatch(setApOpenedFrom("sidebar"));
                       onProtokollSelect?.(p.id);

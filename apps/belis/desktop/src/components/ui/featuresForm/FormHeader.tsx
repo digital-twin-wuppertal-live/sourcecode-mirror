@@ -14,6 +14,9 @@ import {
 import { getJWT } from "../../../store/slices/auth";
 import { incrementFeatureDataVersion } from "../../../store/slices/featureCollection";
 import { handleSaveAllDrafts } from "../../../helper/featureFormSaveHelpers";
+import { useSingleSave } from "./FeaturesFormsWrapper";
+import { useDatasheet } from "@carma-mapping/engines/maplibre";
+import SendOrDiscardAllDraftsButton from "../SendOrDiscardAllDraftsButton";
 
 interface FormHeaderProps {
   title: string;
@@ -27,9 +30,8 @@ interface FormHeaderProps {
   hasDraft?: boolean;
   onToggleReadOnly?: () => void;
   onBack?: () => void;
-  /** When provided, overrides the default Fachobjekte drafts count for the badge */
+  isCreation?: boolean;
   customDraftsCount?: number;
-  /** When provided, overrides the default Fachobjekte save-all handler */
   onSaveAll?: () => void;
 }
 
@@ -45,6 +47,7 @@ const FormHeader = ({
   hasDraft,
   onToggleReadOnly,
   onBack,
+  isCreation,
   customDraftsCount,
   onSaveAll,
 }: FormHeaderProps) => {
@@ -53,6 +56,8 @@ const FormHeader = ({
   const drafts = useSelector(getAllDrafts);
   const jwt = useSelector(getJWT);
   const [savingAll, setSavingAll] = useState(false);
+  const { onSaveSingle, savingSingle } = useSingleSave();
+  const { closeDatasheet } = useDatasheet();
 
   const draftsCount = customDraftsCount ?? featureDraftsCount;
 
@@ -69,6 +74,9 @@ const FormHeader = ({
       dispatch,
       removeDraft,
       incrementFeatureDataVersion,
+      // After at least one draft saved, the form on the right pane is
+      // bound to a draft that no longer exists — return to the map.
+      onSuccess: closeDatasheet,
     });
   };
 
@@ -117,6 +125,10 @@ const FormHeader = ({
         <div className="flex items-center gap-2">
           {!readOnly && (
             <>
+              {/* temporarily hidden — re-enable when needed */}
+              {/* {customDraftsCount === undefined && (
+                <SendOrDiscardAllDraftsButton />
+              )} */}
               <span style={!hasDraft ? { cursor: "not-allowed" } : undefined}>
                 <Button
                   onClick={hasDraft ? onCancel : undefined}
@@ -132,9 +144,38 @@ const FormHeader = ({
                       : undefined
                   }
                 >
-                  {cancelLabel
+                  {isCreation
+                    ? "Verlassen ohne zu speichern"
+                    : cancelLabel
                     ? `${cancelLabel}: zurücksetzen`
                     : "zurücksetzen"}
+                </Button>
+              </span>
+              <span
+                style={
+                  !hasDraft || !onSaveSingle
+                    ? { cursor: "not-allowed" }
+                    : undefined
+                }
+              >
+                <Button
+                  type="primary"
+                  onClick={
+                    hasDraft && onSaveSingle ? onSaveSingle : undefined
+                  }
+                  loading={savingSingle}
+                  style={
+                    !hasDraft || !onSaveSingle
+                      ? {
+                          pointerEvents: "none",
+                          color: "#d9d9d9",
+                          borderColor: "#d9d9d9",
+                          backgroundColor: "#f5f5f5",
+                        }
+                      : undefined
+                  }
+                >
+                  Speichern
                 </Button>
               </span>
               <Badge
@@ -161,10 +202,17 @@ const FormHeader = ({
                     onClick={draftsCount >= 1 ? handleSaveAll : undefined}
                     loading={draftsCount >= 1 ? savingAll : false}
                     style={
-                      draftsCount === 0 ? { pointerEvents: "none" } : undefined
+                      draftsCount === 0
+                        ? {
+                            pointerEvents: "none",
+                            color: "#d9d9d9",
+                            borderColor: "#d9d9d9",
+                            backgroundColor: "#f5f5f5",
+                          }
+                        : undefined
                     }
                   >
-                    Speichern
+                    Alle speichern
                   </Button>
                 </span>
               </Badge>

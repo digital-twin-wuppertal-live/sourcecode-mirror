@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useRef, type ReactNode } from "react";
 import type { FormInstance } from "antd";
 import { message } from "antd";
 import { useSelector } from "react-redux";
@@ -36,6 +36,8 @@ interface StandortFormProps {
   draftValues?: Record<string, unknown>;
   draftFiles?: DraftFile[];
   hasDraft?: boolean;
+  isCreation?: boolean;
+  formHeaderContent?: ReactNode;
   onDraftChange?: (values: Record<string, unknown>) => void;
   onDraftFilesChange?: (files: DraftFile[]) => void;
   onOriginalValues?: (values: Record<string, unknown>) => void;
@@ -55,6 +57,8 @@ const StandortForm = ({
   draftValues,
   draftFiles,
   hasDraft,
+  isCreation,
+  formHeaderContent,
   onDraftChange,
   onDraftFilesChange,
   onOriginalValues,
@@ -163,12 +167,8 @@ const StandortForm = ({
       const formValues = mastFormRef.current.getFieldsValue();
 
       // Remove display-only fields that the backend doesn't expect
-      const {
-        strassenschluessel_pk,
-        strassenschluessel_strasse,
-        fk_bezirk,
-        ...rest
-      } = formValues;
+      const { strassenschluessel_pk, strassenschluessel_strasse, ...rest } =
+        formValues;
 
       // Upload pending draft files first
       let uploadedDocuments: DokumentItem[] = [];
@@ -196,7 +196,6 @@ const StandortForm = ({
           : {}),
       });
 
-      console.log("xxx saving standort:", JSON.stringify(dataToSave, null, 2));
       await updateDataByClassName(jwt, "tdta_standort_mast", dataToSave);
 
       // Update local documents so changes appear immediately
@@ -234,10 +233,12 @@ const StandortForm = ({
 
   return (
     <FeatureFormLayout
-      title={sidebarMain ? `Standort ${sidebarMain}` : "Standort"}
+      title={isCreation ? "Neuer Standort" : sidebarMain ? `Standort ${sidebarMain}` : "Standort"}
       cancelLabel={
         rawProps?.lfd_nummer ? `Standort ${sidebarMain}` : "Standort"
       }
+      isCreation={isCreation}
+      formHeaderContent={formHeaderContent}
       subtitle={subtitle}
       documents={documents}
       mainDocumentsTitle="Standort"
@@ -248,6 +249,7 @@ const StandortForm = ({
       removedDocumentKeys={removedDocumentKeys}
       onToggleRemoveDocument={handleToggleRemoveDocument}
       debugData={data}
+      rawFeatureData={rawFeature}
       loading={loading}
       saving={saving}
       readOnly={readOnly}
@@ -259,6 +261,7 @@ const StandortForm = ({
       <MastFormFields
         mast={mast}
         readOnly={readOnly}
+        isCreation={isCreation}
         onFormInstance={setMastForm}
         draftValues={draftValues}
         onValuesChange={handleMastValuesChange}

@@ -25,6 +25,7 @@ import {
 } from "../utils/styleBuilder";
 import { slugifyUrl } from "../utils/styleComposer";
 import { createFeature } from "../utils/featureUtils";
+import { buildFeatureStateTarget } from "../utils/featureStateTarget";
 import { HidingForwardingManager } from "../lib/HidingForwardingManager";
 import {
   applySelectionForwarding,
@@ -37,7 +38,11 @@ import { zoom256as512, zoom512as256 } from "../utils/zoomUtils";
 import { LibreMapSelectionContent } from "./LibreMapSelectionContent";
 import { ENDPOINT, isAreaType } from "@carma-commons/resources";
 import proj4 from "proj4";
-import { proj4crs3857def, proj4crs4326def } from "@carma-mapping/utils";
+import {
+  proj4crs3857def,
+  proj4crs4326def,
+  stampSourceLayerFromProperty,
+} from "@carma-mapping/utils";
 import { useSelectionLibreMap } from "../hooks/useSelectionLibreMap";
 import { useLibreContext } from "../contexts/LibreContext";
 import { useMapSelection } from "../contexts/MapSelectionContext";
@@ -165,6 +170,8 @@ export interface LibreMapProps {
   threePerfRef?: React.MutableRefObject<
     import("@carma-mapping/engines/threejs").ThreePerfData
   >;
+  /** Maximum tilt (pitch) in degrees. Defaults to 60 (MapLibre's stock cap). */
+  maxPitch?: number;
 }
 
 /**
@@ -255,6 +262,7 @@ export const LibreMap = ({
   backgroundRasterPaint,
   threeRuntimeParams,
   threePerfRef,
+  maxPitch = 60,
 }: LibreMapProps) => {
   const mapContainer = useRef<HTMLDivElement>(null);
   const map = useRef<maplibregl.Map | null>(null);
@@ -317,59 +325,62 @@ export const LibreMap = ({
   mapSelectionCtxRef.current = mapSelectionCtx;
   const lastHandledVersionRef = useRef(0);
 
+  // Mirror selectionEnabled into a ref so the click handler (registered once
+  // inside a [] -deps useEffect below) can honor live prop changes — e.g. an
+  // app toggling selection off while a draw mode is active. Without this the
+  // handler would hold the value at mount and never react.
+  const selectionEnabledRef = useRef(selectionEnabled);
+  selectionEnabledRef.current = selectionEnabled;
+
   // DatasheetContext: when a DatasheetProvider is mounted, isEnabled is true
   // and openDatasheet is a real function. Otherwise createFeature gets undefined.
   const { isEnabled: datasheetEnabled, openDatasheet } = useDatasheet();
   const openDatasheetRef = useRef(datasheetEnabled ? openDatasheet : undefined);
   openDatasheetRef.current = datasheetEnabled ? openDatasheet : undefined;
 
-  // Helper: clear all visual selection state on the map
-  const clearVisualSelection = useCallback((mapInstance: maplibregl.Map) => {
-    selectedFeaturesRef.current.forEach((feature) => {
-      try {
-        if (
-          feature.selectionLayerId &&
-          mapInstance.getLayer(feature.selectionLayerId)
-        ) {
-          mapInstance.setFilter(feature.selectionLayerId, [
-            "==",
-            "__selected__",
-            "true",
-          ]);
-        } else if (feature.id != null) {
-          mapInstance.setFeatureState(
-            {
-              source: feature.source,
-              sourceLayer: feature.sourceLayer,
-              id: feature.id,
-            },
-            { selected: false }
-          );
-        }
 
-        // Also clear forwarded selections
-        if (feature.forwardedTo) {
-          for (const forwarded of feature.forwardedTo) {
-            try {
-              mapInstance.setFeatureState(
-                {
-                  source: forwarded.source,
-                  sourceLayer: forwarded.sourceLayer,
-                  id: forwarded.id,
-                },
-                { selected: false }
-              );
-            } catch {
-              // Forwarded feature may not exist
+  // Helper: clear all visual selection state on the map
+  const clearVisualSelection = useCallback(
+    (mapInstance: maplibregl.Map) => {
+      selectedFeaturesRef.current.forEach((feature) => {
+        try {
+          if (
+            feature.selectionLayerId &&
+            mapInstance.getLayer(feature.selectionLayerId)
+          ) {
+            mapInstance.setFilter(feature.selectionLayerId, [
+              "==",
+              "__selected__",
+              "true",
+            ]);
+          } else if (feature.id != null) {
+            mapInstance.setFeatureState(
+              buildFeatureStateTarget(mapInstance, feature),
+              { selected: false }
+            );
+          }
+
+          // Also clear forwarded selections
+          if (feature.forwardedTo) {
+            for (const forwarded of feature.forwardedTo) {
+              try {
+                mapInstance.setFeatureState(
+                  buildFeatureStateTarget(mapInstance, forwarded),
+                  { selected: false }
+                );
+              } catch {
+                // Forwarded feature may not exist
+              }
             }
           }
+        } catch (error) {
+          console.error("Error clearing feature selection:", error);
         }
-      } catch (error) {
-        console.error("Error clearing feature selection:", error);
-      }
-    });
-    selectedFeaturesRef.current.clear();
-  }, []);
+      });
+      selectedFeaturesRef.current.clear();
+    },
+    []
+  );
 
   // Helper: apply visual selection highlighting for a feature
   const applyVisualSelection = useCallback(
@@ -380,11 +391,7 @@ export const LibreMap = ({
       try {
         if (featureId.id != null) {
           mapInstance.setFeatureState(
-            {
-              source: featureId.source,
-              sourceLayer: featureId.sourceLayer,
-              id: featureId.id,
-            },
+            buildFeatureStateTarget(mapInstance, featureId),
             { selected: true }
           );
         }
@@ -645,7 +652,7 @@ export const LibreMap = ({
         center: [lng, lat],
         zoom: zoom,
         maxZoom: 21.9999,
-        maxPitch: 65,
+        maxPitch,
         attributionControl: false,
         interactive,
         canvasContextAttributes: preserveDrawingBuffer
@@ -672,6 +679,13 @@ export const LibreMap = ({
       }
 
       mapInstance.on("click", async (e) => {
+        // Selection fully disabled (e.g. host app is in a custom interaction
+        // mode like terra-draw measurement). Skip everything: 3D raycast,
+        // visual selection, gazetteer info, context updates. Other click
+        // listeners (terra-draw etc.) still fire — maplibre fires events to
+        // all registered handlers regardless of order.
+        if (!selectionEnabledRef.current) return;
+
         // ── 3D raycast: check 3D layers before 2D ─────────────
         const threeLayers = get3dLayers(mapInstance);
         if (threeLayers.length > 0) {
@@ -864,6 +878,13 @@ export const LibreMap = ({
             !hit.layer.id.includes("cluster")
           );
         });
+
+        // Stamp effective sourceLayer on geojson hits whose native
+        // sourceLayer is undefined; the convention for FCs that mirror a
+        // vector-tile schema is properties._sourceLayer. Downstream
+        // selection code, sidebar lookups, and forwarding all read
+        // feature.sourceLayer.
+        for (const hit of filteredHits) stampSourceLayerFromProperty(hit);
 
         console.log(
           "[TERRAIN CLICK]",
@@ -1576,6 +1597,10 @@ export const LibreMap = ({
             !hit.layer.id.includes("selection") &&
             !hit.layer.id.includes("cluster")
         );
+
+        // Stamp effective sourceLayer on geojson hits (same convention as
+        // the click handler above).
+        for (const hit of filteredHits) stampSourceLayerFromProperty(hit);
 
         // Clear previous visual selection
         clearVisualSelection(mapInstance);

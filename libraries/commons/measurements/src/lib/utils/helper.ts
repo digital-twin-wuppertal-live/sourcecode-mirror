@@ -1,4 +1,8 @@
 import localforage from "localforage";
+import { COLORS_HEX } from "@carma-commons/utils";
+import { computeMeasurementLabels, MeasurementLabel } from "./measurement-math";
+
+export type { MeasurementLabel } from "./measurement-math";
 
 export const setFromLocalforage = async (
   lfKey: string,
@@ -93,6 +97,230 @@ export const adjustClickPosition = (
 
   return false;
 };
+
+export interface MeasurementShapeData {
+  shapeId: number | string;
+  number: number;
+  shapeType: "line" | "polygon" | string;
+  coordinates: [number, number][];
+  distance?: string;
+  area?: string;
+  customTitle?: string;
+  labels?: MeasurementLabel[];
+}
+
+function buildFeatureTitle(shape: MeasurementShapeData, order: number): string {
+  const label = shape.customTitle || (shape.area ? "Fläche" : "Linienzug");
+  return `${label} #${order}`;
+}
+
+function buildFeatureSubtitle(shape: MeasurementShapeData): string {
+  const parts: string[] = [];
+  if (shape.distance) {
+    parts.push(`${shape.area ? "Umfang" : "Strecke"}: ${shape.distance}`);
+  }
+  if (shape.area) {
+    parts.push(`Fläche: ${shape.area}`);
+  }
+  return parts.join(" | ");
+}
+
+export type ShapesToFeatureCollectionLayerInfo = {
+  title?: string;
+  icon?: string;
+  description?: string;
+  keywords?: string[];
+  metaDataText?: string;
+};
+
+type LabelFeature = {
+  type: "Feature";
+  id: number | string;
+  geometry: { type: "Point"; coordinates: [number, number] };
+  properties: { kind: "label"; label: string };
+};
+
+const buildLabelFeatures = (shape: MeasurementShapeData): LabelFeature[] => {
+  const labels =
+    shape.labels && shape.labels.length > 0
+      ? shape.labels
+      : computeMeasurementLabels(shape);
+  return labels.map((l) => ({
+    type: "Feature",
+    id: shape.shapeId,
+    geometry: { type: "Point", coordinates: l.position },
+    properties: { kind: "label", label: l.text },
+  }));
+};
+
+export function shapesToFeatureCollection(
+  shapes: MeasurementShapeData[],
+  layerInfoOverrides?: ShapesToFeatureCollectionLayerInfo
+) {
+  const labelFeatures: LabelFeature[] = [];
+
+  const features = shapes
+    .map((shape, index) => ({ shape, order: index + 1 }))
+    .filter(({ shape }) => shape.shapeId !== 5555)
+    .map(({ shape, order }) => {
+      const geoJsonCoords = shape.coordinates.map(
+        ([lat, lng]) => [lng, lat] as [number, number]
+      );
+
+      const isPolygon = shape.shapeType === "polygon";
+
+      labelFeatures.push(...buildLabelFeatures(shape));
+
+      return {
+        type: "Feature" as const,
+        id: shape.shapeId,
+        geometry: isPolygon
+          ? {
+              type: "Polygon" as const,
+              coordinates: [geoJsonCoords],
+            }
+          : {
+              type: "LineString" as const,
+              coordinates: geoJsonCoords,
+            },
+        properties: {
+          info: {
+            headerColor: COLORS_HEX.ACCENT_MEASUREMENTS,
+            title: buildFeatureTitle(shape, order),
+            subtitle: buildFeatureSubtitle(shape),
+            actions: [{ name: "zoomToFeature" }, {}],
+          },
+        },
+      };
+    });
+
+  return {
+    version: 8,
+    glyphs: "https://tiles.cismet.de/fonts/{fontstack}/{range}.pbf",
+    metadata: {
+      carmaConf: {
+        instant: true,
+        layerInfo: {
+          title: "Messungen",
+          icon: "measurement",
+          description: "",
+          metaDataText: `Messungs-Steuerelemente stellen eine oder mehrere Messungsgeometrien zur Verfügung, die eine Nutzerin bzw. ein Nutzer unter einer selbst gewählten Bezeichnung abgespeichert hat. Ihre eigenen Messungen werden für Sie bis zum Löschen des Cache-Speichers Ihres Browsers im Dialog "Karteninhalte hinzufügen" unter "Objekte / Meine Messungen" festgehalten. Eine andere Nutzerin / ein anderer Nutzer kann Ihnen Messungen über einen mit der Funktion "Teilen" erzeugten Link bereitstellen. Diese Messungen sind zunächst nur über das Messungs-Steuerelement für Sie verfügbar. Benutzen Sie die Favorisieren-Funktion im Messungs-Steuerelement, um die Messungen längerfristig zu speichern. Sie sind dann auch verfügbar, wenn Sie das Geoportal nicht über den spezifischen Teilen-Link öffnen.`,
+          keywords: ["carmaconf://lazyInfoBox"],
+          ...layerInfoOverrides,
+        },
+      },
+    },
+    sources: {
+      adhoc: {
+        type: "geojson",
+        data: {
+          type: "FeatureCollection" as const,
+          features: [...features, ...labelFeatures],
+        },
+      },
+    },
+    layers: [
+      {
+        id: "adhoc-polygons-fill",
+        type: "fill",
+        source: "adhoc",
+        filter: ["==", ["geometry-type"], "Polygon"],
+        paint: {
+          "fill-color": "#267bdc",
+          "fill-opacity": 0.3,
+        },
+      },
+      {
+        id: "adhoc-polygons-outline",
+        type: "line",
+        source: "adhoc",
+        filter: ["==", ["geometry-type"], "Polygon"],
+        paint: {
+          "line-color": "gray",
+          "line-width": 2,
+        },
+      },
+      {
+        id: "adhoc-lines",
+        type: "line",
+        source: "adhoc",
+        filter: ["==", ["geometry-type"], "LineString"],
+        paint: {
+          "line-color": "gray",
+          "line-width": 3,
+        },
+      },
+      {
+        id: "selection-line",
+        type: "line",
+        source: "adhoc",
+        filter: ["==", ["geometry-type"], "LineString"],
+        minzoom: 0,
+        maxzoom: 24,
+        layout: {
+          "line-join": "round",
+          "line-cap": "round",
+        },
+        paint: {
+          "line-color": "rgba(38, 123, 220, 0.83)",
+          "line-width": 4,
+          "line-opacity": [
+            "case",
+            ["boolean", ["feature-state", "selected"], false],
+            1,
+            0,
+          ],
+        },
+      },
+      {
+        id: "selection-polygon",
+        type: "line",
+        source: "adhoc",
+        filter: ["==", ["geometry-type"], "Polygon"],
+        minzoom: 0,
+        maxzoom: 24,
+        layout: {
+          "line-join": "round",
+          "line-cap": "round",
+        },
+        paint: {
+          "line-color": "rgba(38, 123, 220, 0.83)",
+          "line-width": 4,
+          "line-opacity": [
+            "case",
+            ["boolean", ["feature-state", "selected"], false],
+            1,
+            0,
+          ],
+        },
+      },
+      {
+        id: "selection-measurement-labels",
+        type: "symbol",
+        source: "adhoc",
+        filter: ["==", ["get", "kind"], "label"],
+        layout: {
+          "text-field": ["get", "label"],
+          "text-font": ["Open Sans Semibold"],
+          "text-size": 12,
+          "text-allow-overlap": true,
+          "text-ignore-placement": true,
+        },
+        paint: {
+          "text-color": "#000000",
+          "text-halo-color": "#FFFFFF",
+          "text-halo-width": 2,
+          "text-opacity": [
+            "case",
+            ["boolean", ["feature-state", "selected"], false],
+            1,
+            0,
+          ],
+        },
+      },
+    ],
+  };
+}
 
 // Prepare a Leaflet LatLng from a GeoJSON Point-like feature with coordinates [lng, lat]
 export const toLatLngFromClosestPoint = (closestPoint: any) => {

@@ -3,9 +3,19 @@ import { useKeyboardListNavigation } from "../../hooks/useKeyboardListNavigation
 import type { MapGeoJSONFeatureWithOriginal as SidebarFeature } from "@carma-mapping/utils";
 export type { SidebarFeature };
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
-import { faSpinner } from "@fortawesome/free-solid-svg-icons";
+import { faSpinner, faStar } from "@fortawesome/free-solid-svg-icons";
+
+const IS_LOCAL_DEV =
+  typeof window !== "undefined" && window.location.hostname === "localhost";
 import toTitleCase from "../../helper/toTitleCase";
+import { isCreationDraftKey } from "../../store/slices/featuresForms";
 import AuswahlBlock from "./AuswahlBlock";
+
+const displayId = (id: unknown): string => {
+  if (id == null) return "?";
+  const s = String(id);
+  return isCreationDraftKey(s) ? "Entwurf" : s;
+};
 
 export const SELECTED_ROW_STYLE =
   "bg-blue-50 hover:bg-blue-50 border-l-2 border-l-blue-500";
@@ -65,7 +75,7 @@ const defaultListItemExtractors: Record<
     const p = feature.properties || {};
     const title = p.schaltstellen_nummer
       ? `S ${p.schaltstellen_nummer}`
-      : `ID: ${p.id}`;
+      : `ID: ${displayId(p.id)}`;
     return {
       main: title,
       upperright: toTitleCase(p.strasse || "") || "-",
@@ -76,7 +86,7 @@ const defaultListItemExtractors: Record<
     const p = feature.properties || {};
     const title = p.schaltstellen_nummer
       ? `S ${p.schaltstellen_nummer}`
-      : `ID: ${p.id}`;
+      : `ID: ${displayId(p.id)}`;
     return {
       main: title,
       upperright: toTitleCase(p.strasse || "") || "-",
@@ -88,7 +98,7 @@ const defaultListItemExtractors: Record<
     const laenge = p.laenge || p.length || "";
     const laengeStr = laenge ? `${laenge}m` : "";
     return {
-      main: `L-${p.id || "?"}`,
+      main: `L-${displayId(p.id)}`,
       upperright: laengeStr,
       subtitle: p.bezeichnung || p.leitungstyp || "",
     };
@@ -99,7 +109,7 @@ const defaultListItemExtractors: Record<
       ? `, ${p.fk_querschnitt.groesse}mm`
       : "";
     return {
-      main: `L-${p.id}`,
+      main: `L-${displayId(p.id)}`,
       upperright: p.fk_leitungstyp?.bezeichnung || "Leitung",
       subtitle: aPart ? `Querschnitt${aPart}` : "",
     };
@@ -107,7 +117,7 @@ const defaultListItemExtractors: Record<
   mauerlaschen: (feature) => {
     const p = feature.properties || {};
     return {
-      main: `M-${p.laufende_nummer || p.id || "?"}`,
+      main: `M-${p.laufende_nummer || displayId(p.id)}`,
       upperright: toTitleCase(p.strasse || "") || "-",
       subtitle: p.bezeichnung || p.material || "Mauerlasche",
     };
@@ -115,7 +125,7 @@ const defaultListItemExtractors: Record<
   mauerlasche: (feature) => {
     const p = feature.properties || {};
     return {
-      main: `M-${p.laufende_nummer || p.id}`,
+      main: `M-${p.laufende_nummer || displayId(p.id)}`,
       upperright: toTitleCase(p.fk_strassenschluessel?.strasse || "") || "-",
       subtitle: p.fk_material?.bezeichnung || "Mauerlasche",
     };
@@ -123,7 +133,7 @@ const defaultListItemExtractors: Record<
   abzweigdose: (feature) => {
     const p = feature.properties || {};
     return {
-      main: `AZD-${p.id}`,
+      main: `AZD-${displayId(p.id)}`,
       upperright: "",
       subtitle: "Abzweigdose",
     };
@@ -138,7 +148,7 @@ const genericExtractor = (feature: SidebarFeature): ListItemData => {
     props.title ||
     props.label ||
     props.bezeichnung ||
-    `ID: ${feature.id || "?"}`;
+    `ID: ${displayId(feature.id)}`;
 
   const upperright = toTitleCase(
     props.strasse || props.street || props.typ || props.type || ""
@@ -188,6 +198,8 @@ export interface BelisSidebarProps {
     string,
     (feature: SidebarFeature) => ListItemData
   >;
+  /** Unmerged activeSourceLayers for AuswahlBlock (respects filter toggles). */
+  auswahlActiveSourceLayers?: Set<string>;
   /** Namespaced MVT source for querying features (needed by AuswahlBlock). */
   namespacedSource?: string;
   /** Current adjusted highlights list (needed by AuswahlBlock). */
@@ -218,6 +230,7 @@ const BelisSidebar = ({
   draftsCount,
   onFeatureDismiss,
   listItemExtractors,
+  auswahlActiveSourceLayers,
   namespacedSource,
   adjustedHighlights,
   setAdjustedHighlights,
@@ -262,6 +275,8 @@ const BelisSidebar = ({
   } | null>(null);
 
   // Scroll selected item into view only when selection comes from map (not list)
+
+
   useEffect(() => {
     if (!selectedFeatureId) return;
 
@@ -539,6 +554,13 @@ const BelisSidebar = ({
   });
 
   const getListItem = (feature: SidebarFeature): ListItemData => {
+    if (feature.properties?._isCreation) {
+      return {
+        main: feature.properties._creationLabel || "Neu",
+        upperright: "Neu",
+        subtitle: "Entwurf",
+      };
+    }
     const layerKey = feature.sourceLayer || feature.source || "";
     const extractor =
       listItemExtractors?.[layerKey] ||
@@ -631,7 +653,7 @@ const BelisSidebar = ({
           setAdjustedHighlights={setAdjustedHighlights}
           getListItem={getListItem}
           onFeatureSelect={onFeatureSelect}
-          activeSourceLayers={activeSourceLayers}
+          activeSourceLayers={auswahlActiveSourceLayers ?? activeSourceLayers}
         />
       )}
       <div className="flex-1 overflow-y-auto overflow-x-hidden">
@@ -690,6 +712,18 @@ const BelisSidebar = ({
                           <div className="flex justify-between gap-2 overflow-hidden">
                             <span className="shrink-0 whitespace-nowrap text-sm">
                               <b>{listItem.main}</b>
+                              {feature.properties?._isCreation && (
+                                <span className="bg-green-500 text-white text-[10px] px-1 rounded ml-1 font-normal">
+                                  Neu
+                                </span>
+                              )}
+                              {IS_LOCAL_DEV && feature.properties?.brandnew && (
+                                <FontAwesomeIcon
+                                  icon={faStar}
+                                  className="ml-1 text-yellow-500"
+                                  title="brand new feature"
+                                />
+                              )}
                             </span>
                             <span className="grow text-right whitespace-nowrap text-ellipsis overflow-hidden text-sm text-gray-700">
                               {listItem.upperright}
