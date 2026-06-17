@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import {
   Form,
   Row,
@@ -14,7 +14,11 @@ import { getKeyTablesData } from "../../../store/slices/keyTables";
 import StrassenschluesselFields from "./StrassenschluesselFields";
 import StrassenschluesselFieldsModal from "./StrassenschluesselFieldsModal";
 import StadtbezirkField from "./StadtbezirkField";
-import { getFormClassName, getPlaceholder } from "./readOnlyFormUtils";
+import {
+  getFormClassName,
+  getPlaceholder,
+  LOCKED_FIELD_CLASSES,
+} from "./readOnlyFormUtils";
 import { FormItem } from "./DraftFieldHighlight";
 import toTitleCase from "../../../helper/toTitleCase";
 import dayjs from "dayjs";
@@ -24,10 +28,22 @@ interface MastFormFieldsProps {
   namePrefix?: string;
   readOnly?: boolean;
   isCreation?: boolean;
+  /** Identity of the underlying draft/feature. Used to re-run the form
+   * reset effect when the user switches between drafts that all share the
+   * same `mast` reference (e.g. multiple in-progress creation drafts where
+   * `mast` is always null). */
+  featureId?: string;
   /** When true, always render the read-only StrassenschluesselFields,
    * even during creation. Used by the Mast tab on the new-Leuchte form
    * where the Strassenschluessel is taken from the Leuchte. */
   readOnlyStrassenschluessel?: boolean;
+  /** When true, paint all form fields with the locked-gray fill. Used on
+   * the Standort tab when creating a Leuchte against an existing Mast,
+   * to signal the data belongs to that Mast and is not editable here. */
+  locked?: boolean;
+  /** Edit-geometry selector, rendered above Strassenschlüssel. Only supplied
+   * for the Standort's own Allgemein tab (not the Leuchte-creation Mast tab). */
+  geometrySelector?: React.ReactNode;
   form?: import("antd").FormInstance;
   onFormInstance?: (form: import("antd").FormInstance) => void;
   draftValues?: Record<string, unknown>;
@@ -81,6 +97,102 @@ interface NestedObject {
   strasse?: string;
 }
 
+// Project a server-side Mast record (with resolved `tkey_*` / `*Object` nested
+// references) into the flat form-field shape that `draftValues.mast` carries —
+// the same blob applied via `setFieldsValue` in the effect below. Exported so
+// the Leuchte *view* (which never renders the Mast tab) can capture a selected
+// Leuchte's parent Mast into the "remember" memory, mirroring how the Leuchte
+// slice is captured. Date fields become dayjs objects, matching the live form.
+export const projectMastToFormValues = (
+  mast: Record<string, unknown>
+): Record<string, unknown> => {
+  const strassenschluessel = mast.tkey_strassenschluessel as
+    | NestedObject
+    | undefined;
+  const kennziffer = mast.tkey_kennziffer as NestedObject | undefined;
+  const bezirk = mast.tkey_bezirk as NestedObject | undefined;
+  const mastart = mast.tkey_mastart as NestedObject | undefined;
+  const masttyp = mast.tkey_masttyp as NestedObject | undefined;
+  const klassifizierung = mast.tkey_klassifizierung as NestedObject | undefined;
+  const unterhMast = mast.tkey_unterh_mast as NestedObject | undefined;
+  const anlagengruppeObj = mast.anlagengruppeObject as NestedObject | undefined;
+  return {
+    // Strassenschluessel - display fields plus the FK id. The id is what the
+    // backend persists (the pk/strasse pair is display-only); without it a
+    // remembered/seeded street shows in the form but saves as null, dropping
+    // the street on the new Mast and on every Leuchte that inherits its FK.
+    strassenschluessel_pk: strassenschluessel?.pk,
+    strassenschluessel_strasse: strassenschluessel?.strasse
+      ? toTitleCase(strassenschluessel.strasse)
+      : undefined,
+    fk_strassenschluessel: strassenschluessel?.id ?? null,
+    // Kennziffer - use id for Select value
+    fk_kennziffer: kennziffer?.id ?? null,
+    // Laufende Nr.
+    lfd_nummer: mast.lfd_nummer,
+    // Hausnummer
+    haus_nr: mast.haus_nr,
+    // Standortangabe
+    standortangabe: toTitleCase((mast.standortangabe as string) || ""),
+    // Stadtbezirk - use id for Select value
+    fk_stadtbezirk: bezirk?.id ?? null,
+    // Mastart - use id for Select value
+    fk_mastart: mastart?.id ?? null,
+    // Masttyp - use id for Select value
+    fk_masttyp: masttyp?.id ?? null,
+    // Klassifizierung - use id for Select value
+    fk_klassifizierung: klassifizierung?.id ?? null,
+    // Unterhalt - use id for Select value
+    fk_unterhaltspflicht_mast: unterhMast?.id ?? null,
+    // Inbetriebnahme
+    inbetriebnahme_mast: mast.inbetriebnahme_mast
+      ? dayjs(mast.inbetriebnahme_mast as string)
+      : null,
+    // V-Einheit
+    verrechnungseinheit: mast.verrechnungseinheit,
+    // Mastanstrich
+    mastanstrich: mast.mastanstrich ? dayjs(mast.mastanstrich as string) : null,
+    // Anstrichfarbe
+    anstrichfarbe: mast.anstrichfarbe,
+    // Montagefirma
+    montagefirma: mast.montagefirma,
+    // Gruendung
+    gruendung: mast.gruendung,
+    // Standsicherheitspruefung
+    standsicherheitspruefung: mast.standsicherheitspruefung
+      ? dayjs(mast.standsicherheitspruefung as string)
+      : null,
+    // Naechstes Pruefdatum
+    naechstes_pruefdatum: mast.naechstes_pruefdatum
+      ? dayjs(mast.naechstes_pruefdatum as string)
+      : null,
+    // Verfahren
+    verfahren: mast.verfahren,
+    // Elektrische Pruefung
+    elek_pruefung: mast.elek_pruefung
+      ? dayjs(mast.elek_pruefung as string)
+      : null,
+    // Erdung
+    erdung: mast.erdung,
+    // Monteur
+    monteur: mast.monteur,
+    // Mastschutz
+    mastschutz: mast.mastschutz ? dayjs(mast.mastschutz as string) : null,
+    // Revision
+    revision: mast.revision ? dayjs(mast.revision as string) : null,
+    // Anlagengruppe - use id for Select value
+    anlagengruppe: anlagengruppeObj?.id ?? mast.anlagengruppe,
+    // Anbauten
+    anbauten: mast.anbauten,
+    // Bemerkungen
+    bemerkungen: mast.bemerkungen,
+    // Letzte Aenderung
+    letzte_aenderung: mast.letzte_aenderung
+      ? dayjs(mast.letzte_aenderung as string)
+      : null,
+  };
+};
+
 const FormLabel = ({ children }: { children: React.ReactNode }) => (
   <span className="text-sm font-medium text-gray-700">{children}</span>
 );
@@ -90,7 +202,10 @@ const MastFormFields = ({
   namePrefix,
   readOnly = true,
   isCreation,
+  featureId,
   readOnlyStrassenschluessel = false,
+  locked = false,
+  geometrySelector,
   form: externalForm,
   onFormInstance,
   draftValues,
@@ -100,6 +215,12 @@ const MastFormFields = ({
   const [localForm] = Form.useForm();
   const form = externalForm ?? localForm;
   const draftApplied = useRef(false);
+  const appliedForFeatureRef = useRef<string | number | undefined>(undefined);
+  // Tracks the id of the mast object last applied to the form so that
+  // switching the linked Standort (or clearing the link to a Punkt) during
+  // a single creation draft repopulates / resets the fields. featureId
+  // alone is not enough: it is stable across geometry changes.
+  const appliedForMastIdRef = useRef<unknown>(undefined);
   useEffect(() => {
     if (!externalForm) onFormInstance?.(form);
   }, [form, onFormInstance, externalForm]);
@@ -124,8 +245,24 @@ const MastFormFields = ({
   const unterhaltMastOptions = [
     ...((keyTablesData.unterhaltMast || []) as UnterhaltMastItem[]),
   ].sort((a, b) => Number(a.pk ?? 0) - Number(b.pk ?? 0));
-  const kennzifferOptions = (keyTablesData.kennziffer ||
-    []) as KennzifferItem[];
+  const kennzifferOptions = useMemo(() => {
+    const sorted = [
+      ...((keyTablesData.kennziffer || []) as KennzifferItem[]),
+    ].sort((a, b) =>
+      `${a.kennziffer || ""} - ${a.beschreibung || ""}`.localeCompare(
+        `${b.kennziffer || ""} - ${b.beschreibung || ""}`,
+        "de",
+        { numeric: true }
+      )
+    );
+    // Mirrors the Leuchten-side filter: "1 - nur Mast" is meaningless when
+    // the Mast is being created as part of a new Leuchte. Existing Masten
+    // carrying kennziffer=1 still see the option in edit mode so their
+    // current value remains visible.
+    return isCreation
+      ? sorted.filter((item) => String(item.kennziffer) !== "1")
+      : sorted;
+  }, [keyTablesData.kennziffer, isCreation]);
   const anlagengruppeOptions = (keyTablesData.anlagengruppe ||
     []) as AnlagengruppeItem[];
 
@@ -134,108 +271,55 @@ const MastFormFields = ({
 
   useEffect(() => {
     if (externalForm) return;
-    form.resetFields();
-    draftApplied.current = false;
+
+    const featureChanged = appliedForFeatureRef.current !== featureId;
+    const currentMastId = mast
+      ? ((mast as { id?: unknown }).id ?? "no-id")
+      : null;
+    const mastIdChanged = appliedForMastIdRef.current !== currentMastId;
+    const isCreationFeature = String(featureId ?? "").startsWith("create:");
+
+    // Edit mode: nothing to do until mast data has been fetched.
+    if (!mast && !isCreationFeature) return;
+
+    // During creation, the synthetic record gets a fresh reference per
+    // keystroke. Re-running with the same featureId AND same Mast identity
+    // would call resetFields() and steal focus. Mast identity changes when
+    // the user picks a different Standort or clears the link to a Punkt —
+    // those transitions need to repopulate/reset.
+    if (!featureChanged && !mastIdChanged && isCreationFeature) return;
+
+    if (featureChanged || mastIdChanged) {
+      // First time we see this feature, or the linked Mast changed — clear
+      // any stale state. For post-save refresh on the same feature, skip
+      // resetFields so AntD keeps the DOM intact (preserves scroll position
+      // and focus).
+      form.resetFields();
+      draftApplied.current = false;
+    }
 
     if (mast) {
-      const strassenschluessel = mast.tkey_strassenschluessel as
-        | NestedObject
-        | undefined;
-      const kennziffer = mast.tkey_kennziffer as NestedObject | undefined;
-      const bezirk = mast.tkey_bezirk as NestedObject | undefined;
-      const mastart = mast.tkey_mastart as NestedObject | undefined;
-      const masttyp = mast.tkey_masttyp as NestedObject | undefined;
-      const klassifizierung = mast.tkey_klassifizierung as
-        | NestedObject
-        | undefined;
-      const unterhMast = mast.tkey_unterh_mast as NestedObject | undefined;
-      const anlagengruppeObj = mast.anlagengruppeObject as
-        | NestedObject
-        | undefined;
-
-      const serverValues = {
-        // Strassenschluessel
-        strassenschluessel_pk: strassenschluessel?.pk,
-        strassenschluessel_strasse: strassenschluessel?.strasse
-          ? toTitleCase(strassenschluessel.strasse)
-          : undefined,
-        // Kennziffer - use id for Select value
-        fk_kennziffer: kennziffer?.id ?? null,
-        // Laufende Nr.
-        lfd_nummer: mast.lfd_nummer,
-        // Hausnummer
-        haus_nr: mast.haus_nr,
-        // Standortangabe
-        standortangabe: toTitleCase((mast.standortangabe as string) || ""),
-        // Stadtbezirk - use id for Select value
-        fk_stadtbezirk: bezirk?.id ?? null,
-        // Mastart - use id for Select value
-        fk_mastart: mastart?.id ?? null,
-        // Masttyp - use id for Select value
-        fk_masttyp: masttyp?.id ?? null,
-        // Klassifizierung - use id for Select value
-        fk_klassifizierung: klassifizierung?.id ?? null,
-        // Unterhalt - use id for Select value
-        fk_unterhaltspflicht_mast: unterhMast?.id ?? null,
-        // Inbetriebnahme
-        inbetriebnahme_mast: mast.inbetriebnahme_mast
-          ? dayjs(mast.inbetriebnahme_mast as string)
-          : null,
-        // V-Einheit
-        verrechnungseinheit: mast.verrechnungseinheit,
-        // Mastanstrich
-        mastanstrich: mast.mastanstrich
-          ? dayjs(mast.mastanstrich as string)
-          : null,
-        // Anstrichfarbe
-        anstrichfarbe: mast.anstrichfarbe,
-        // Montagefirma
-        montagefirma: mast.montagefirma,
-        // Gruendung
-        gruendung: mast.gruendung,
-        // Standsicherheitspruefung
-        standsicherheitspruefung: mast.standsicherheitspruefung
-          ? dayjs(mast.standsicherheitspruefung as string)
-          : null,
-        // Naechstes Pruefdatum
-        naechstes_pruefdatum: mast.naechstes_pruefdatum
-          ? dayjs(mast.naechstes_pruefdatum as string)
-          : null,
-        // Verfahren
-        verfahren: mast.verfahren,
-        // Elektrische Pruefung
-        elek_pruefung: mast.elek_pruefung
-          ? dayjs(mast.elek_pruefung as string)
-          : null,
-        // Erdung
-        erdung: mast.erdung,
-        // Monteur
-        monteur: mast.monteur,
-        // Mastschutz
-        mastschutz: mast.mastschutz ? dayjs(mast.mastschutz as string) : null,
-        // Revision
-        revision: mast.revision ? dayjs(mast.revision as string) : null,
-        // Anlagengruppe - use id for Select value
-        anlagengruppe: anlagengruppeObj?.id ?? mast.anlagengruppe,
-        // Anbauten
-        anbauten: mast.anbauten,
-        // Bemerkungen
-        bemerkungen: mast.bemerkungen,
-        // Letzte Aenderung
-        letzte_aenderung: mast.letzte_aenderung
-          ? dayjs(mast.letzte_aenderung as string)
-          : null,
-      };
+      const serverValues = projectMastToFormValues(mast);
       form.setFieldsValue(serverValues);
       onOriginalValues?.(form.getFieldsValue());
-
-      if (draftValues) {
-        form.setFieldsValue(draftValues);
-        draftApplied.current = true;
-      }
+    } else {
+      // Cleared the linked Mast (switched to a Punkt geometry). Tell the
+      // parent the form is now empty so change-tracking compares against
+      // an empty original rather than the previously linked Standort.
+      onOriginalValues?.(form.getFieldsValue());
     }
+
+    if (draftValues) {
+      form.setFieldsValue(draftValues);
+      draftApplied.current = true;
+    }
+    appliedForFeatureRef.current = featureId;
+    appliedForMastIdRef.current = currentMastId;
+    // Depend on the `mast` reference so post-save refetches re-populate
+    // automatically; the featureChanged/mastIdChanged guards above filter
+    // out the synthetic-record churn during creation.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mast, form]);
+  }, [featureId, mast, form]);
 
   useEffect(() => {
     if (externalForm) return;
@@ -249,13 +333,21 @@ const MastFormFields = ({
       form={form}
       layout="vertical"
       requiredMark={false}
-      className={getFormClassName(readOnly, "pr-2")}
+      className={getFormClassName(
+        readOnly,
+        locked ? `pr-2 ${LOCKED_FIELD_CLASSES}` : "pr-2"
+      )}
       onValuesChange={onValuesChange}
     >
+      {geometrySelector}
+
       {readOnlyStrassenschluessel ? (
         <StrassenschluesselFields namePrefix={namePrefix} />
-      ) : (!mast || isCreation) && !readOnly ? (
-        <StrassenschluesselFieldsModal namePrefix={namePrefix} isCreation={isCreation} />
+      ) : !readOnly ? (
+        <StrassenschluesselFieldsModal
+          namePrefix={namePrefix}
+          onSyncDerivedValues={onValuesChange}
+        />
       ) : (
         <StrassenschluesselFields namePrefix={namePrefix} />
       )}

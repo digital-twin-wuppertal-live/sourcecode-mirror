@@ -1,0 +1,38 @@
+import type { AnnotationInfoBoxVisualOptions } from "@carma-mapping/annotations/ui";
+import type { AnnotationInfoBoxSlots } from "@carma-mapping/annotations/ui";
+
+import type {
+  StoredAnnotation,
+  AnnotationNode,
+} from "../../store/annotations-store.types";
+import type { AnnotationsRuntimeFormatOptions } from "../../config/annotations-runtime-format-options";
+import type { AnnotationDeleteRequestOptions } from "../../context/annotation-delete-confirmation";
+
+export type RuntimeAnnotationInfoBoxContext = {
+  annotation: StoredAnnotation;
+  annotationEntries: readonly StoredAnnotation[];
+  nodes: readonly AnnotationNode[];
+  selectedAnnotationId: string;
+  setSelectedAnnotationId: (annotationId: string | null) => void;
+  focusAnnotationId: (annotationId: string | null) => void;
+  flyToAllAnnotations: () => void;
+  removeAnnotationById: (
+    annotationId: string,
+    options?: AnnotationDeleteRequestOptions
+  ) => void;
+  exportAnnotationGeoJson: (annotationId: string) => void;
+  toggleAnnotationVisibility: (annotationId: string) => void;
+  toggleAnnotationLocked: (annotationId: string) => void;
+  elevationReferenceAnnotationId: string | null;
+  setElevationReferenceAnnotationId: (annotationId: string | null) => void;
+  updateAnnotationDisplayName: (
+    annotationId: string,
+    displayName: string
+  ) => void;
+  updateAnnotationShortLabel: (
+    annotationId: string,
+    shortLabel: string
+  ) => void;
+  formatOptions: AnnotationsRuntimeFormatOptions;
+  infoBoxVisualOptions: AnnotationInfoBoxVisualOptions;
+};

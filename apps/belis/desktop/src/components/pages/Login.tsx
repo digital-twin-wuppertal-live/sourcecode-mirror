@@ -4,9 +4,11 @@ import React, { useEffect, useState } from "react";
 import { useWindowSize } from "@react-hook/window-size";
 import { useDispatch, useSelector } from "react-redux";
 import { useLocation, useNavigate } from "react-router-dom";
-import { storeJWT, storeLogin } from "../../store/slices/auth";
+import { storeJWT, storeLogin, storePermissions } from "../../store/slices/auth";
 import { resetKeyTablesFetched } from "../../store/slices/keyTables";
 import { DOMAIN, REST_SERVICE } from "../../constants/belis";
+import { getApplicationVersion } from "@carma-commons/utils";
+import versionData from "../../version.json";
 
 export const background = "belis_background_iStock-139701369_blurred.jpg";
 
@@ -23,10 +25,15 @@ const Login = () => {
   const navigate = useNavigate();
   const [loginInfo, setLoginInfo] = useState<LoginInfo | null>(null);
 
+  // Show the dev marker whenever this is not a live build. The live build is
+  // stamped with `triggered: "live"` in version.json (same signal used by
+  // getApplicationVersion); everything else (local dev, dev/PR builds) is dev.
+  const isLiveVersion =
+    (versionData as { triggered?: string | null }).triggered === "live";
+
   const windowHeight = windowSize[1];
 
-  const loginPanelWidth = 450;
-  const loginPanelHeight = 300;
+  const loginPanelWidth = 400;
 
   const onFinishFailed = (errorInfo) => {
     console.log("Failed:", errorInfo);
@@ -49,11 +56,15 @@ const Login = () => {
         if (response.status >= 200 && response.status < 300) {
           response.json().then(function (responseWithJWT) {
             const jwt = responseWithJWT.jwt;
+            // Server returns the user's groups as `userGroups`; we map it into
+            // app-side `permissions` (used to derive read-only mode).
+            const permissions = responseWithJWT.userGroups;
             setTimeout(() => {
               dispatch(resetKeyTablesFetched());
               navigate("/" + browserlocation.search);
               dispatch(storeJWT(jwt));
               dispatch(storeLogin(user));
+              dispatch(storePermissions(permissions));
             }, 500);
           });
         } else {
@@ -80,6 +91,7 @@ const Login = () => {
     <div
       style={{
         // background: "#dddddd",
+        position: "relative",
         height: windowHeight,
         width: "100%",
         background: `url(${baseUrl}images/${background})`,
@@ -91,30 +103,73 @@ const Login = () => {
         alignItems: "center",
       }}
     >
+      <div className="absolute bottom-6 right-6 text-white/80 text-[11px] text-right max-w-[340px]">
+        <b>BelISDesktop {getApplicationVersion(versionData)}</b>:{" "}
+        <a href="https://cismet.de/" target="_cismet">
+          cismet GmbH
+        </a>{" "}
+        auf Basis von{" "}
+        <a href="https://maplibre.org/" target="_cismet">
+          MapLibre
+        </a>{" "}
+        und{" "}
+        <a href="https://github.com/cismet/carma" target="_cismet">
+          carma
+        </a>{" "}
+        |{" "}
+        <a
+          target="_blank"
+          rel="noopener noreferrer"
+          href="https://cismet.de/datenschutzerklaerung.html"
+        >
+          Datenschutzerklärung
+        </a>{" "}
+        |{" "}
+        <a
+          target="_blank"
+          rel="noopener noreferrer"
+          href="https://cismet.de/impressum.html"
+        >
+          Impressum
+        </a>
+      </div>
       <div
         style={{
           width: loginPanelWidth,
-          height: loginPanelHeight,
-          background: "#ffffff22",
-
-          borderRadius: 25,
+          padding: 36,
+          background: "rgba(255, 255, 255, 0.13)",
+          backdropFilter: "blur(2px)",
+          WebkitBackdropFilter: "blur(2px)",
+          borderRadius: 16,
+          border: "1px solid rgba(255, 255, 255, 0.55)",
+          boxShadow: "0 24px 64px rgba(0, 0, 0, 0.45)",
         }}
       >
         <h1
           style={{
-            padding: 25,
-            color: "black",
-            opacity: 0.5,
-            paddingBottom: 4,
+            margin: 0,
+            color: "#1f1f1f",
+            fontSize: 24,
+            fontWeight: 600,
+            lineHeight: 1.2,
           }}
         >
           BelIS-Desktop
         </h1>
+        {!isLiveVersion && (
+          <div
+            className="whitespace-nowrap"
+            style={{ color: "#595959", fontSize: 13, marginTop: 2 }}
+          >
+            Entwicklungsversion
+          </div>
+        )}
         <div
           style={{
             minHeight: 21,
-            color: loginInfo?.color || "black",
-            marginLeft: 26,
+            color: loginInfo?.color || "transparent",
+            fontSize: 13,
+            marginTop: 12,
           }}
         >
           {loginInfo?.text || ""}
@@ -122,19 +177,12 @@ const Login = () => {
         <Form
           form={form}
           name="basic"
-          //   labelCol={{ span: 8 }}
-          //   wrapperCol={{ span: 16 }}
+          layout="vertical"
           onFinish={onFinish}
           onFinishFailed={onFinishFailed}
           autoComplete="off"
-          style={{
-            justifyContent: "left",
-            width: "100%",
-            display: "flex",
-            flexDirection: "column",
-            alignItems: "left",
-            padding: 20,
-          }}
+          requiredMark={false}
+          style={{ width: "100%" }}
         >
           <Form.Item
             label="Benutzer"
@@ -146,7 +194,7 @@ const Login = () => {
               },
             ]}
           >
-            <Input />
+            <Input size="large" autoFocus />
           </Form.Item>
 
           <Form.Item
@@ -156,15 +204,13 @@ const Login = () => {
               { required: true, message: "Bitte geben Sie ein Passwort an." },
             ]}
           >
-            <Input.Password />
+            <Input.Password size="large" />
           </Form.Item>
-          <div style={{ width: "100%" }}>
-            <Form.Item style={{ float: "right" }}>
-              <Button type="primary" htmlType="submit">
-                Login
-              </Button>
-            </Form.Item>
-          </div>
+          <Form.Item style={{ marginBottom: 0, marginTop: 8 }}>
+            <Button type="primary" htmlType="submit" size="large" block>
+              Login
+            </Button>
+          </Form.Item>
         </Form>
       </div>
       <div style={{ position: "absolute", top: 20, left: 30, opacity: 0.7 }}>
@@ -178,7 +224,8 @@ const Login = () => {
           top: 20,
           right: 20,
           textAlign: "right",
-          opacity: 0.7,
+          opacity: 0.85,
+          textShadow: "0 1px 4px rgba(0, 0, 0, 0.6)",
         }}
       >
         <h5 style={{ color: "white" }}>Stadt Wuppertal</h5>

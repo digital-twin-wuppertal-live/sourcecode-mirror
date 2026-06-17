@@ -11,8 +11,11 @@ const initialState = {
   zoom: -1,
   enabledLeitungstypen: {} as Record<number, boolean>,
   enabledCategoryFilters: {} as Record<string, boolean>,
-  regularLayerEnabled: true,
-  brandnewLayerEnabled: false,
+  snappingEnabled: false,
+  // "Gefährlicher Löschmodus": when on, an existing Fachobjekt's form exposes a
+  // GitHub-style "Gefahrenzone" delete action at the bottom. Off by default so
+  // the destructive UI stays hidden until a user opts in via Einstellungen.
+  dangerousDeleteMode: false,
 };
 export const searchMinimumZoomThreshhold = 18;
 
@@ -70,11 +73,11 @@ const slice = createSlice({
     ) {
       state.enabledCategoryFilters = action.payload;
     },
-    setRegularLayerEnabled(state, action: { payload: boolean }) {
-      state.regularLayerEnabled = action.payload;
+    setSnappingEnabled(state, action: { payload: boolean }) {
+      state.snappingEnabled = action.payload;
     },
-    setBrandnewLayerEnabled(state, action: { payload: boolean }) {
-      state.brandnewLayerEnabled = action.payload;
+    setDangerousDeleteMode(state, action: { payload: boolean }) {
+      state.dangerousDeleteMode = action.payload;
     },
   },
 });
@@ -94,8 +97,8 @@ export const {
   setAllLeitungstypen,
   setCategoryFilterEnabled,
   setAllCategoryFilters,
-  setRegularLayerEnabled,
-  setBrandnewLayerEnabled,
+  setSnappingEnabled,
+  setDangerousDeleteMode,
 } = slice.actions;
 
 export const getActiveBackgroundLayer = (state) => {
@@ -144,10 +147,10 @@ export const getEnabledCategoryFilters = (state) => {
   return state.mapSettings.enabledCategoryFilters;
 };
 
-export const isRegularLayerEnabled = (state) => {
-  return state.mapSettings.regularLayerEnabled;
+export const isSnappingEnabled = (state) => {
+  return state.mapSettings.snappingEnabled;
 };
 
-export const isBrandnewLayerEnabled = (_state) => {
-  return true;
+export const isDangerousDeleteModeActive = (state) => {
+  return state.mapSettings.dangerousDeleteMode;
 };

@@ -1,4 +1,4 @@
-import { useContext, useEffect, useState, useRef } from "react";
+import { useContext, useEffect, useState, useRef, type ReactNode } from "react";
 import { useDispatch, useSelector } from "react-redux";
 
 import InfoBoxFotoPreview from "react-cismap/topicmaps/InfoBoxFotoPreview";
@@ -52,6 +52,7 @@ interface InfoBoxProps {
   displayOrbit?: boolean;
   isOrbiting?: boolean;
   onOrbitToggle?: () => void;
+  additionalSecondaryInfoBoxElements?: ReactNode[];
 }
 
 const FeatureInfoBox = ({
@@ -60,6 +61,7 @@ const FeatureInfoBox = ({
   displayOrbit = false,
   isOrbiting = false,
   onOrbitToggle,
+  additionalSecondaryInfoBoxElements = [],
 }: InfoBoxProps) => {
   const [open, setOpen] = useState(false);
   const [shouldRenderLoadingInfobox, setShouldRenderLoadingInfobox] =
@@ -291,6 +293,19 @@ const FeatureInfoBox = ({
     return <></>;
   }
 
+  const visibleSecondaryInfoBoxElements =
+    selectedFeature.properties.foto || selectedFeature.properties.fotos
+      ? [
+          ...additionalSecondaryInfoBoxElements,
+          ...featureHeaders,
+          <InfoBoxFotoPreview
+            currentFeature={selectedFeature}
+            lightBoxDispatchContext={lightBoxDispatchContext}
+            urlManipulation={updateUrl}
+          />,
+        ]
+      : [...additionalSecondaryInfoBoxElements, ...featureHeaders];
+
   return (
     <>
       <InfoBox
@@ -328,18 +343,7 @@ const FeatureInfoBox = ({
           )
         }
         noCurrentFeatureContent=""
-        secondaryInfoBoxElements={
-          selectedFeature.properties.foto || selectedFeature.properties.fotos
-            ? [
-                ...featureHeaders,
-                <InfoBoxFotoPreview
-                  currentFeature={selectedFeature}
-                  lightBoxDispatchContext={lightBoxDispatchContext}
-                  urlManipulation={updateUrl}
-                />,
-              ]
-            : featureHeaders
-        }
+        secondaryInfoBoxElements={visibleSecondaryInfoBoxElements}
         links={links}
       />
       {open && Modal && (

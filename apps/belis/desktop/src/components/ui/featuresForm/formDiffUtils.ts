@@ -67,8 +67,39 @@ export const isFormDirty = (
   return !isFormValueEqual(originalValues, draftValues);
 };
 
+/**
+ * Like {@link isFormDirty}, but only compares the top-level slices the draft
+ * actually carries. A draft holds exactly the slices its form manages; the
+ * baseline (`originalValues`) may carry extra context slices the form cannot
+ * edit — e.g. a view-mode Leuchte's parent `mast`, seeded into the baseline so
+ * the "remember" memory can capture it (#645). Those baseline-only slices must
+ * never count as unsaved changes, otherwise a draft can never revert to clean
+ * (the cleanup branch in `setDraft` would keep deleting-then-keeping it).
+ *
+ * Within-slice differences are still detected — a field present in the original
+ * slice but missing from the draft slice recurses to "not equal" as before.
+ */
+export const isFormDirtyManaged = (
+  originalValues: Record<string, unknown> | undefined,
+  draftValues: Record<string, unknown> | undefined
+): boolean => {
+  if (!draftValues) return false;
+  if (!originalValues) return Object.keys(draftValues).length > 0;
+  for (const key of Object.keys(draftValues)) {
+    if (!isFormValueEqual(originalValues[key], draftValues[key])) return true;
+  }
+  return false;
+};
+
+// A dayjs instance is technically a non-array object, but it must be treated
+// as a leaf value — never recursed into. Without the dayjs guard, getChangedPaths
+// would descend into a date's internals ($D/$M/$y/…) and record those instead
+// of the field path itself, so the field never gets the changed/gray highlight.
 const isPlainObj = (v: unknown): v is Record<string, unknown> =>
-  v !== null && typeof v === "object" && !Array.isArray(v);
+  v !== null &&
+  typeof v === "object" &&
+  !Array.isArray(v) &&
+  !dayjs.isDayjs(v);
 
 /**
  * Get a set of changed field paths between original and draft values.
@@ -110,4 +141,74 @@ export const getChangedPaths = (
 
   collect(original, draft, "");
   return changed;
+};
+
+const walkPath = (
+  obj: Record<string, unknown> | undefined,
+  path: string
+): unknown => {
+  if (!obj) return undefined;
+  const parts = path.split(".");
+  let cur: unknown = obj;
+  for (const p of parts) {
+    if (!isPlainObj(cur)) return undefined;
+    cur = (cur as Record<string, unknown>)[p];
+  }
+  return cur;
+};
+
+// Whether `obj` has a value recorded at `path` — including an explicit `null`
+// marker left when a draft cleared a previously-remembered field. Distinct
+// from `walkPath(...) == null`, which cannot tell a recorded-but-empty field
+// from one that was never recorded at all.
+const hasPath = (
+  obj: Record<string, unknown> | undefined,
+  path: string
+): boolean => {
+  if (!obj) return false;
+  const parts = path.split(".");
+  let cur: unknown = obj;
+  for (let i = 0; i < parts.length - 1; i++) {
+    if (!isPlainObj(cur)) return false;
+    cur = (cur as Record<string, unknown>)[parts[i]];
+  }
+  return isPlainObj(cur) && parts[parts.length - 1] in cur;
+};
+
+/**
+ * Get the set of allowlisted ("tracked") paths that should render with the
+ * green highlight.
+ *
+ * A tracked field is green when it has never been recorded into the memory
+ * (the very first draft of a feature type) or when its value still equals the
+ * remembered default. Once the field has been recorded — even as an explicit
+ * empty marker, written when a draft cleared it — any draft whose value
+ * diverges from that default, including one holding a value where the memory
+ * was cleared, loses the green highlight and renders gray.
+ */
+export const getPrefilledPaths = (
+  draft: Record<string, unknown> | undefined,
+  allowlistedPaths?: Set<string>,
+  currentDefaults?: Record<string, unknown>
+): Set<string> => {
+  const matched = new Set<string>();
+  if (!allowlistedPaths || allowlistedPaths.size === 0) {
+    return matched;
+  }
+  for (const path of allowlistedPaths) {
+    const draftVal = walkPath(draft, path);
+    // Never recorded yet → green (the first draft of a feature type, before
+    // any value — empty or not — has been written to the memory).
+    if (!hasPath(currentDefaults, path)) {
+      matched.add(path);
+      continue;
+    }
+    // Recorded: green only while this draft's value still matches the
+    // remembered one. A diverged value — or a value where the memory holds an
+    // empty marker — falls through to the gray "changed" highlight.
+    if (isFormValueEqual(draftVal, walkPath(currentDefaults, path))) {
+      matched.add(path);
+    }
+  }
+  return matched;
 };

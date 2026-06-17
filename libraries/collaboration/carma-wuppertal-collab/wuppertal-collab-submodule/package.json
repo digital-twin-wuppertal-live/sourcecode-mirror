@@ -1,7 +1,7 @@
 {
   "name": "carma-wuppertal-collab-vite",
   "private": true,
-  "version": "1.1.70",
+  "version": "1.3.6",
   "type": "module",
   "scripts": {
     "init:carma": "git clone https://github.com/cismet/carma.git _carma_monorepo",
@@ -11,6 +11,8 @@
     "sync": "npm run sync:carma && npm run sync:paths && npm run sync:packages",
     "dev": "nx serve",
     "build": "nx vite:build",
+    "typecheck": "node scripts/typecheck-src.cjs",
+    "typecheck:all": "tsc --noEmit --composite false -p tsconfig.app.json",
     "lint": "nx eslint:lint",
     "preview": "nx vite:preview",
     "storybook": "nx serve:storybook",

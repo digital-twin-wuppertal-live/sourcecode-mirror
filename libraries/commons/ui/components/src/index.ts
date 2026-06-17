@@ -3,6 +3,12 @@ export {
   type CarmaResponsiveInfoBoxProps,
 } from "./lib/components/CarmaResponsiveInfoBox";
 export {
+  ConnectorRibbon,
+  type ConnectorRibbonAnchor,
+  type ConnectorRibbonCurveMode,
+  type ConnectorRibbonProps,
+} from "./lib/components/ConnectorRibbon";
+export {
   default as CarmaCard,
   type CarmaCardProps,
 } from "./lib/components/CarmaCard";
@@ -18,6 +24,12 @@ export {
   DismissibleHelpBox,
   type DismissibleHelpBoxProps,
 } from "./lib/components/DismissibleHelpBox";
+export {
+  DevelopmentOnlyUiBackdrop,
+  DevelopmentOnlyPatternBackground,
+  type DevelopmentOnlyUiBackdropProps,
+  type DevelopmentOnlyPatternBackgroundProps,
+} from "./lib/components/DevBackground/DevelopmentOnlyPatternBackground";
 export {
   VisibilityToggleButton,
   type VisibilityToggleButtonProps,
@@ -67,9 +79,20 @@ export {
   type AnnotationCursorLayeredDomElementOptions,
   type AnnotationCursorShadowSvgElementOptions,
 } from "./lib/utils/annotation-cursor-dom";
+export {
+  DeleteConfirmationModal,
+  type DeleteConfirmationModalProps,
+} from "./lib/components/DeleteConfirmationModal";
 export { FileUploader } from "./lib/components/FileUploader";
 export { MODES } from "./lib/components/responsiveInfoBoxModes";
 export { uploadImage } from "./lib/utils/uploadImage";
+export {
+  resolveBackspaceDisplayLabel,
+  resolveKeyboardDisplayLabels,
+  resolveKeyboardDisplayPlatform,
+  type KeyboardDisplayLabels,
+  type KeyboardDisplayPlatform,
+} from "./lib/utils/keyboardDisplay";
 export {
   createToolManager,
   type ToolDescriptor,
@@ -87,6 +110,19 @@ export {
   readFrostedGlassShadow,
   readFrostedGlassShadowStyle,
 } from "./lib/utils/frostedGlass";
+export {
+  DEVELOPMENT_ONLY_LABEL,
+  DEVELOPMENT_ONLY_PATTERN_TEXT,
+  DEVELOPMENT_ONLY_PATTERN_TEXT_DE,
+  DEVELOPMENT_ONLY_PATTERN_TEXT_EN,
+  DEVELOPMENT_ONLY_UI_BACKDROP_PATTERN_TEXT,
+  buildDevelopmentOnlyPatternDataUrl,
+  buildDevelopmentOnlyPatternSvgMarkup,
+  readDevelopmentOnlyPatternStyle,
+  readDevelopmentOnlyUiBackdropStyle,
+  type DevelopmentOnlyPatternStyleOptions,
+  type DevelopmentOnlyUiBackdropStyleOptions,
+} from "./lib/components/DevBackground/developmentOnlyPattern";
 export {
   ANNOTATION_CURSOR_OVERLAY_CENTER_DOT_SIZE_PX,
   ANNOTATION_CURSOR_OVERLAY_CENTER_GAP_PX,

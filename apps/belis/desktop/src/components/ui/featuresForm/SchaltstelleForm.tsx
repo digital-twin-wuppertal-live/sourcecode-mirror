@@ -9,6 +9,8 @@ import { getJWT } from "../../../store/slices/auth";
 import { DokumentItem } from "../DocumentPreview";
 import { getDocumentKey } from "../FilePreview";
 import FeatureFormLayout from "./FeatureFormLayout";
+import { useCreateFeatureDraft } from "../useCreateFeatureDraft";
+import { extractListItem } from "../BelisSidebar";
 import SchaltstelleFormFields from "./SchaltstelleFormFields";
 import { updateDataByClassName } from "../../../helper/apiMethods";
 import { uploadDraftFiles } from "../../../helper/uploadDraftFiles";
@@ -40,7 +42,9 @@ interface SchaltstelleFormProps {
   draftFiles?: DraftFile[];
   hasDraft?: boolean;
   isCreation?: boolean;
+  featureId?: string;
   formHeaderContent?: ReactNode;
+  geometrySelector?: ReactNode;
   onDraftChange?: (values: Record<string, unknown>) => void;
   onDraftFilesChange?: (files: DraftFile[]) => void;
   onOriginalValues?: (values: Record<string, unknown>) => void;
@@ -60,7 +64,9 @@ const SchaltstelleForm = ({
   draftValues,
   draftFiles,
   hasDraft,
+  featureId,
   formHeaderContent,
+  geometrySelector,
   onDraftChange,
   onDraftFilesChange,
   onOriginalValues,
@@ -77,6 +83,7 @@ const SchaltstelleForm = ({
     null
   );
   const jwt = useSelector(getJWT);
+  const createFeatureDraft = useCreateFeatureDraft();
 
   const setFormInstance = useCallback((form: FormInstance) => {
     formRef.current = form;
@@ -125,17 +132,19 @@ const SchaltstelleForm = ({
   const subtitle =
     (rawProps?.bauart_bezeichnung as string) ||
     (rawProps?.bezeichnung as string) ||
+    // `bauart` is the denormalized Bauart label — set on real tile features
+    // and on drafts (via enrichSyntheticProps' fk_bauart rule). Matches the
+    // sidebar extractor's `bezeichnung || bauart` fallback.
+    (rawProps?.bauart as string) ||
     "-ohne Bezeichnung-";
 
   // Compute sidebar main title to display in form header
   const isCreation =
     typeof rawProps?.id === "string" && isCreationDraftKey(rawProps.id);
 
-  const sidebarMain = rawProps?.schaltstellen_nummer
-    ? `S ${rawProps.schaltstellen_nummer}`
-    : rawProps?.id && !isCreation
-    ? `ID: ${rawProps.id}`
-    : "";
+  // Header identifier comes from the shared sidebar extractor, so the sticky
+  // header reads identically to the sidebar row — drafts included.
+  const sidebarMain = extractListItem("schaltstelle", rawFeature).main;
 
   const cancelBTn = rawProps?.schaltstellen_nummer
     ? `S ${rawProps.schaltstellen_nummer}`
@@ -231,7 +240,7 @@ const SchaltstelleForm = ({
 
   return (
     <FeatureFormLayout
-      title={isCreation ? "Neue Schaltstelle" : sidebarMain ? `Schaltstelle ${sidebarMain}` : "Schaltstelle"}
+      title={`Schaltstelle ${sidebarMain}`}
       cancelLabel={cancelBTn || ""}
       isCreation={isCreation}
       formHeaderContent={formHeaderContent}
@@ -251,11 +260,25 @@ const SchaltstelleForm = ({
       onToggleReadOnly={onToggleReadOnly}
       onCancel={onCancel}
       onSave={handleSave}
+      onCreateRelatedDraft={
+        isCreation
+          ? () =>
+              createFeatureDraft(
+                "schaltstelle",
+                draftValues
+                  ? { seedValues: draftValues }
+                  : { seedFromSelection: true }
+              )
+          : undefined
+      }
+      createDraftButtonVariant="white"
     >
       <SchaltstelleFormFields
         schaltstelle={ss}
         readOnly={readOnly}
         isCreation={isCreation}
+        featureId={featureId}
+        geometrySelector={geometrySelector}
         onFormInstance={setFormInstance}
         draftValues={draftValues}
         onValuesChange={handleValuesChange}

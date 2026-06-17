@@ -1,8 +1,10 @@
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   ArrowLeftOutlined,
+  CopyOutlined,
   EditOutlined,
   ExclamationCircleOutlined,
+  PlusOutlined,
 } from "@ant-design/icons";
 import { Badge, Button, Spin, Tooltip } from "antd";
 import { useSelector, useDispatch } from "react-redux";
@@ -10,10 +12,20 @@ import {
   getDraftFeaturesCount,
   getAllDrafts,
   removeDraft,
+  promoteDraftHiddenToPermanent,
+  markFeatureDeleted,
 } from "../../../store/slices/featuresForms";
 import { getJWT } from "../../../store/slices/auth";
 import { incrementFeatureDataVersion } from "../../../store/slices/featureCollection";
-import { handleSaveAllDrafts } from "../../../helper/featureFormSaveHelpers";
+import {
+  getMeasurements,
+  setMeasurements,
+} from "../../../store/slices/measurements";
+import {
+  handleSaveAllDrafts,
+  buildStrassenschluesselByPk,
+} from "../../../helper/featureFormSaveHelpers";
+import { getKeyTablesData } from "../../../store/slices/keyTables";
 import { useSingleSave } from "./FeaturesFormsWrapper";
 import { useDatasheet } from "@carma-mapping/engines/maplibre";
 import SendOrDiscardAllDraftsButton from "../SendOrDiscardAllDraftsButton";
@@ -33,6 +45,9 @@ interface FormHeaderProps {
   isCreation?: boolean;
   customDraftsCount?: number;
   onSaveAll?: () => void;
+  onCreateRelatedDraft?: () => void;
+  createDraftButtonVariant?: "green" | "white";
+  onCopyValues?: () => void;
 }
 
 const FormHeader = ({
@@ -50,14 +65,51 @@ const FormHeader = ({
   isCreation,
   customDraftsCount,
   onSaveAll,
+  onCreateRelatedDraft,
+  createDraftButtonVariant = "green",
+  onCopyValues,
 }: FormHeaderProps) => {
   const dispatch = useDispatch();
   const featureDraftsCount = useSelector(getDraftFeaturesCount);
   const drafts = useSelector(getAllDrafts);
   const jwt = useSelector(getJWT);
+  const measurements = useSelector(getMeasurements);
+  const keyTablesData = useSelector(getKeyTablesData);
+  const strassenschluesselByPk = useMemo(
+    () =>
+      buildStrassenschluesselByPk(
+        keyTablesData["straßenschlüssel"] as
+          | ReadonlyArray<{ id?: unknown; pk?: unknown }>
+          | undefined
+      ),
+    [keyTablesData]
+  );
   const [savingAll, setSavingAll] = useState(false);
   const { onSaveSingle, savingSingle } = useSingleSave();
   const { closeDatasheet } = useDatasheet();
+
+  // The copy button is "hidden" until the user holds Alt — keeps the header
+  // uncluttered while exposing the power-user copy action on demand.
+  const [isAltPressed, setIsAltPressed] = useState(false);
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.altKey) setIsAltPressed(true);
+    };
+    const handleKeyUp = (e: KeyboardEvent) => {
+      if (!e.altKey) setIsAltPressed(false);
+    };
+    // Reset when the window loses focus so the button does not stay stuck
+    // visible after an Alt+Tab away.
+    const handleBlur = () => setIsAltPressed(false);
+    window.addEventListener("keydown", handleKeyDown);
+    window.addEventListener("keyup", handleKeyUp);
+    window.addEventListener("blur", handleBlur);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+      window.removeEventListener("keyup", handleKeyUp);
+      window.removeEventListener("blur", handleBlur);
+    };
+  }, []);
 
   const draftsCount = customDraftsCount ?? featureDraftsCount;
 
@@ -73,15 +125,27 @@ const FormHeader = ({
       setSaving: setSavingAll,
       dispatch,
       removeDraft,
+      promoteDraftHiddenToPermanent,
+      markFeatureDeleted,
       incrementFeatureDataVersion,
+      measurements,
+      setMeasurements,
       // After at least one draft saved, the form on the right pane is
       // bound to a draft that no longer exists — return to the map.
       onSuccess: closeDatasheet,
+      strassenschluesselByPk,
     });
   };
 
   return (
-    <div className="flex flex-col border-b border-gray-100">
+    <div className="relative flex flex-col border-b border-gray-100">
+      {/* Edit-mode indicator in the top-left corner —
+          only shown while the form is editable */}
+      {!readOnly && (
+        <span className="absolute top-0 left-0 inline-flex items-center px-2.5 py-0.5 bg-[#f9fafb] opacity-90 text-[10px] font-medium text-gray-500 whitespace-nowrap">
+          Bearbeitungsmodus
+        </span>
+      )}
       <div className="flex items-center justify-between flex-wrap p-6 gap-4">
         <div className="flex items-center gap-3 flex-shrink-0">
           {onBack && (
@@ -118,6 +182,73 @@ const FormHeader = ({
                   nicht gespeicherte Änderungen
                 </span>
               )}
+              {!readOnly && onCreateRelatedDraft && (
+                <Tooltip
+                  title={
+                    createDraftButtonVariant === "white"
+                      ? "Neuen Datensatz anlegen"
+                      : "Neuen Datensatz mit diesen Werten anlegen"
+                  }
+                >
+                  <button
+                    type="button"
+                    aria-label={
+                      createDraftButtonVariant === "white"
+                        ? "Neuen Datensatz anlegen"
+                        : "Neuen Datensatz mit diesen Werten anlegen"
+                    }
+                    onClick={onCreateRelatedDraft}
+                    style={{
+                      display: "inline-flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      width: 24,
+                      height: 24,
+                      padding: 0,
+                      border:
+                        createDraftButtonVariant === "white"
+                          ? "1px solid #d9d9d9"
+                          : "1px solid #b7eb8f",
+                      borderRadius: 4,
+                      backgroundColor:
+                        createDraftButtonVariant === "white"
+                          ? "#ffffff"
+                          : "#f6ffed",
+                      color:
+                        createDraftButtonVariant === "white"
+                          ? "#8c8c8c"
+                          : "#52c41a",
+                      cursor: "pointer",
+                    }}
+                  >
+                    <PlusOutlined style={{ fontSize: 12 }} />
+                  </button>
+                </Tooltip>
+              )}
+              {!readOnly && onCopyValues && isAltPressed && (
+                <Tooltip title="Werte merken">
+                  <button
+                    type="button"
+                    aria-label="Werte merken"
+                    onClick={onCopyValues}
+                    style={{
+                      display: "inline-flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      width: 24,
+                      height: 24,
+                      padding: 0,
+                      border: "1px solid #b7eb8f",
+                      borderRadius: 4,
+                      backgroundColor: "#f6ffed",
+                      color: "#52c41a",
+                      cursor: "pointer",
+                    }}
+                  >
+                    <CopyOutlined style={{ fontSize: 12 }} />
+                  </button>
+                </Tooltip>
+              )}
             </div>
             <p className="text-sm text-gray-500">{subtitle}</p>
           </div>
@@ -125,10 +256,9 @@ const FormHeader = ({
         <div className="flex items-center gap-2">
           {!readOnly && (
             <>
-              {/* temporarily hidden — re-enable when needed */}
-              {/* {customDraftsCount === undefined && (
+              {customDraftsCount === undefined && (
                 <SendOrDiscardAllDraftsButton />
-              )} */}
+              )}
               <span style={!hasDraft ? { cursor: "not-allowed" } : undefined}>
                 <Button
                   onClick={hasDraft ? onCancel : undefined}
@@ -160,9 +290,7 @@ const FormHeader = ({
               >
                 <Button
                   type="primary"
-                  onClick={
-                    hasDraft && onSaveSingle ? onSaveSingle : undefined
-                  }
+                  onClick={hasDraft && onSaveSingle ? onSaveSingle : undefined}
                   loading={savingSingle}
                   style={
                     !hasDraft || !onSaveSingle

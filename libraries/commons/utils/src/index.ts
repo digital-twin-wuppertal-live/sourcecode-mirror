@@ -2,13 +2,45 @@
 // prefer use namespace when importing to keep import statements clean
 // {react} @carma-commons/utils/
 
-export * from "./lib";
+import * as Colors from "./lib/colors";
+
+export { Colors };
+
+export {
+  COLORS,
+  COLORS_HEX,
+  DISPLAY_P3_COLORS,
+  UNIT_ALPHA,
+  formatDisplayP3Css,
+  formatHexRgbCss,
+  formatHexRgbaCss,
+  formatRgb255Css,
+  formatRgba255Css,
+  hexToRgb255,
+  resolveDisplayP3CssColor,
+  resolveDisplayP3WhiteCssColor,
+  supportsDisplayP3CssColor,
+} from "./lib/colors";
+export type { DisplayP3, Rgb255, UnitRgba } from "./lib/colors";
 
 export { useMemoMergedDefaultOptions } from "./lib/react/hooks/useMemoMergedDefaultOptions";
 
+export { isLocalhostHostname } from "./lib/hostname";
+export {
+  Deployment,
+  useDeployment,
+  useDevDeployment,
+  useLiveDeployment,
+  type DeploymentTarget,
+} from "./lib/react/hooks/useDeployment";
+
 export { isNumberArrayEqual } from "./lib/arrays";
 
-export { extractCarmaConfig } from "./lib/carmaConfig";
+export {
+  extractCarmaConfig,
+  resolveLayerTitle,
+  resolveLayerDescription,
+} from "./lib/carmaConfig";
 
 export { logOnce, warnOnce } from "./lib/console";
 
@@ -36,7 +68,7 @@ export {
   formatFixedNumber,
 } from "./lib/numbers";
 
-export * from "./lib/promise";
+export { promiseWithTimeout, waitFrames } from "./lib/promise";
 
 export {
   PROJ4_CONVERTERS,
@@ -54,8 +86,11 @@ export {
   DEFAULT_HASH_LAUNCH_ALTITUDE_KEYS,
   DEFAULT_HASH_LAUNCH_2D_VIEW_KEYS,
   HASH_LAUNCH_MODE,
+  buildHashLaunchModeParams,
+  buildOrderedSearchParamsString,
   readHashLaunchMode,
   resolveHashLaunchMode,
+  isTruthyHashValue,
   updateHashHistoryState,
   getHashParams,
   diffHashParams,
@@ -79,7 +114,7 @@ export type { VersionData } from "./lib/version";
 
 export { detectWebGLContext } from "./lib/webgl";
 
-export * from "./lib/window";
+export { carmaWindow, cjsGlobalShim } from "./lib/window";
 
 export {
   createRingBuffer,

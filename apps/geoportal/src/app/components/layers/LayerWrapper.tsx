@@ -1,7 +1,13 @@
 /* eslint-disable jsx-a11y/no-static-element-interactions */
 /* eslint-disable jsx-a11y/click-events-have-key-events */
 
-import { useContext, useEffect, useState } from "react";
+import {
+  useCallback,
+  useContext,
+  useEffect,
+  useState,
+  type WheelEvent,
+} from "react";
 import { useDispatch, useSelector } from "react-redux";
 
 import {
@@ -36,17 +42,27 @@ import {
   getSelectedLayerIndexIsNoSelection,
   getShowLeftScrollButton,
   getShowRightScrollButton,
+  changeVisibility,
   setLayers,
   setSelectedLayerIndex,
   setShowLeftScrollButton,
   setShowRightScrollButton,
 } from "../../store/slices/mapping";
-import GeoportalLayerButton from "./GeoportalLayerButton";
+import GeoportalLayerButtonSlot from "./GeoportalLayerButtonSlot";
 import SecondaryView from "./SecondaryView";
 
 import "./button.css";
 import { useMapFrameworkSwitcherContext } from "@carma-mapping/components";
 import InteractionView from "./InteractionView";
+import { shouldShowAdhocLayerInLayerList } from "../../helper/adhoc-feature-utils";
+import { getLayerVisibilityToggleProps } from "./layer-visibility-toggle-props";
+
+const scrollLayerBarBy = (left: number) => {
+  document.getElementById("scrollWrapper")?.scrollBy({
+    left,
+    behavior: "smooth",
+  });
+};
 
 const LayerWrapper = () => {
   const dispatch: AppDispatch = useDispatch();
@@ -61,7 +77,7 @@ const LayerWrapper = () => {
   const showLeftScrollButton = useSelector(getShowLeftScrollButton);
   const showRightScrollButton = useSelector(getShowRightScrollButton);
 
-  const { isLeaflet } = useMapFrameworkSwitcherContext();
+  const { isCesium, isLeaflet } = useMapFrameworkSwitcherContext();
 
   const [isDragging, setIsDragging] = useState(false);
 
@@ -72,9 +88,25 @@ const LayerWrapper = () => {
     color: isOver ? "green" : undefined,
   };
 
-  const pinnedFirstLayers = layers.filter((l) => l.pinned === "first");
-  const sortableLayers = layers.filter((l) => !l.pinned);
-  const pinnedLastLayers = layers.filter((l) => l.pinned === "last");
+  const listedLayers = layers.filter((layer) =>
+    shouldShowAdhocLayerInLayerList(layer, isCesium)
+  );
+  const pinnedFirstLayers = listedLayers.filter((l) => l.pinned === "first");
+  const sortableLayers = listedLayers.filter((l) => !l.pinned);
+  const pinnedLastLayers = listedLayers.filter((l) => l.pinned === "last");
+  const selectedLayer =
+    selectedLayerIndex >= 0 ? layers[selectedLayerIndex] : backgroundLayer;
+  const handleLayerVisibilityChange = useCallback(
+    (layerId: string, visible: boolean) => {
+      dispatch(changeVisibility({ id: layerId, visible }));
+    },
+    [dispatch]
+  );
+  const selectedLayerVisibilityToggleProps = getLayerVisibilityToggleProps({
+    isCesium,
+    layer: selectedLayer,
+    onChangeLayerVisibility: handleLayerVisibilityChange,
+  });
 
   const getLayerPos = (id) => layers.findIndex((layer) => layer.id === id);
 
@@ -102,6 +134,24 @@ const LayerWrapper = () => {
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 2 } })
   );
+  const handleDragStart = useCallback(() => {
+    setIsDragging(true);
+    routedMapRef?.leafletMap?.leafletElement.dragging.disable();
+  }, [routedMapRef]);
+  const handleScrollLeft = useCallback(() => {
+    scrollLayerBarBy(-300);
+  }, []);
+  const handleScrollRight = useCallback(() => {
+    scrollLayerBarBy(300);
+  }, []);
+  const handleLayerBarWheel = useCallback(
+    (event: WheelEvent<HTMLDivElement>) => {
+      if (event.deltaY !== 0) {
+        event.currentTarget.scrollLeft += event.deltaY;
+      }
+    },
+    []
+  );
 
   useEffect(() => {
     if (size.width < 640 && (showLeftScrollButton || showRightScrollButton)) {
@@ -117,10 +167,7 @@ const LayerWrapper = () => {
       <DndContext
         onDragEnd={handleDragEnd}
         sensors={sensors}
-        onDragStart={() => {
-          setIsDragging(true);
-          routedMapRef?.leafletMap?.leafletElement.dragging.disable();
-        }}
+        onDragStart={handleDragStart}
         modifiers={[restrictToHorizontalAxis]}
       >
         <div
@@ -136,12 +183,7 @@ const LayerWrapper = () => {
                   "absolute left-14 top-0.5 bg-neutral-100 w-fit min-w-max flex items-center gap-2 px-3 rounded-3xl h-8 z-[99999999] button-shadow pointer-events-auto"
                 )}
                 role="button"
-                onClick={() => {
-                  document.getElementById("scrollWrapper").scrollBy({
-                    left: -300,
-                    behavior: "smooth",
-                  });
-                }}
+                onClick={handleScrollLeft}
               >
                 <FontAwesomeIcon icon={faChevronLeft} />
               </div>
@@ -152,18 +194,13 @@ const LayerWrapper = () => {
                   "absolute -right-7 top-0.5 bg-neutral-100 w-fit min-w-max flex items-center gap-2 px-3 rounded-3xl h-8 z-[99999999] button-shadow pointer-events-auto"
                 )}
                 role="button"
-                onClick={() => {
-                  document.getElementById("scrollWrapper").scrollBy({
-                    left: 300,
-                    behavior: "smooth",
-                  });
-                }}
+                onClick={handleScrollRight}
               >
                 <FontAwesomeIcon icon={faChevronRight} />
               </div>
             )}
             <div className="w-full flex justify-center items-center h-full gap-2 pointer-events-none [&>*]:pointer-events-auto">
-              <GeoportalLayerButton
+              <GeoportalLayerButtonSlot
                 layer={backgroundLayer}
                 index={-1}
                 id={backgroundLayer.id}
@@ -175,14 +212,10 @@ const LayerWrapper = () => {
                 <div
                   id="scrollWrapper"
                   className="flex overflow-x-auto items-center h-20 gap-2 scrollbar-hide"
-                  onWheel={(e) => {
-                    if (e.deltaY !== 0) {
-                      e.currentTarget.scrollLeft += e.deltaY;
-                    }
-                  }}
+                  onWheel={handleLayerBarWheel}
                 >
                   {pinnedFirstLayers.map((layer) => (
-                    <GeoportalLayerButton
+                    <GeoportalLayerButtonSlot
                       title={layer.title}
                       id={layer.id}
                       key={layer.id}
@@ -196,7 +229,7 @@ const LayerWrapper = () => {
                     strategy={horizontalListSortingStrategy}
                   >
                     {sortableLayers.map((layer) => (
-                      <GeoportalLayerButton
+                      <GeoportalLayerButtonSlot
                         title={layer.title}
                         id={layer.id}
                         key={layer.id}
@@ -207,7 +240,7 @@ const LayerWrapper = () => {
                     ))}
                   </SortableContext>
                   {pinnedLastLayers.map((layer) => (
-                    <GeoportalLayerButton
+                    <GeoportalLayerButtonSlot
                       title={layer.title}
                       id={layer.id}
                       key={layer.id}
@@ -226,9 +259,8 @@ const LayerWrapper = () => {
       <InteractionView isDragging={isDragging} />
       {!isNoSelectionIndex &&
         !(
-          selectedLayerIndex >= 0 &&
-          layers[selectedLayerIndex]?.skipSelection
-        ) && <SecondaryView />}
+          selectedLayerIndex >= 0 && layers[selectedLayerIndex]?.skipSelection
+        ) && <SecondaryView {...selectedLayerVisibilityToggleProps} />}
     </>
   );
 };

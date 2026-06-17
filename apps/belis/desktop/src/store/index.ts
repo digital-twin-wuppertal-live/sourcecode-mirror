@@ -56,7 +56,7 @@ if (stateLoggingEnabled === true) {
 const authConfig = {
   key: "auth",
   storage: localForage,
-  whitelist: ["jwt", "login"],
+  whitelist: ["jwt", "login", "permissions"],
 };
 
 const mapSettingsConfig = {
@@ -71,8 +71,8 @@ const mapSettingsConfig = {
     "inSearchMode",
     "enabledLeitungstypen",
     "enabledCategoryFilters",
-    "regularLayerEnabled",
-    "brandnewLayerEnabled",
+    "snappingEnabled",
+    "dangerousDeleteMode",
   ],
 };
 
@@ -106,6 +106,12 @@ const creationDefaultsConfig = {
   whitelist: ["defaults", "draftIdToType"],
 };
 
+const measurementsConfig = {
+  key: "@belis-desktop.measurements",
+  storage: localForage,
+  whitelist: ["features"],
+};
+
 const store = configureStore({
   reducer: {
     auth: persistReducer(authConfig, authSlice.reducer),
@@ -132,9 +138,10 @@ const store = configureStore({
       creationDefaultsConfig,
       creationDefaultsSlice.reducer
     ),
-    // Intentionally NOT persisted: refresh wipes measurements until a
-    // sidebar UI with explicit delete + a real persist story lands.
-    measurements: measurementsSlice.reducer,
+    measurements: persistReducer(
+      measurementsConfig,
+      measurementsSlice.reducer
+    ),
   },
   devTools: devToolsEnabled === true && inProduction === false,
   middleware,

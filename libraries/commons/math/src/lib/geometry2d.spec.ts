@@ -10,6 +10,8 @@ import {
   getEquilateralTrianglePathD,
   getEquilateralTriangleViewBox,
   getLeftPerpendicular2d,
+  hasPolygonSelfIntersection2d,
+  hasPolylineRetracedSegment2d,
   getPolygonCentroid2d,
   getMidpoint2d,
   getPolygonArea2d,
@@ -63,6 +65,110 @@ describe("geometry2d", () => {
     expect(getSignedPolygonArea2d(ccwSquare)).toBeCloseTo(4);
     expect(getSignedPolygonArea2d(cwSquare)).toBeCloseTo(-4);
     expect(getPolygonArea2d(cwSquare)).toBeCloseTo(4);
+  });
+
+  it("detects polygon self-intersections", () => {
+    expect(
+      hasPolygonSelfIntersection2d({
+        points: [
+          { x: 0, y: 0 },
+          { x: 10, y: 0 },
+          { x: 10, y: 10 },
+          { x: 3, y: -2 },
+          { x: 0, y: 10 },
+        ],
+      })
+    ).toBe(true);
+
+    expect(
+      hasPolygonSelfIntersection2d({
+        points: [
+          { x: 0, y: 0 },
+          { x: 10, y: 0 },
+          { x: 10, y: 10 },
+          { x: 2, y: 0 },
+          { x: 8, y: 0 },
+          { x: 0, y: 10 },
+        ],
+      })
+    ).toBe(true);
+
+    expect(
+      hasPolygonSelfIntersection2d({
+        points: [
+          { x: 0, y: 0 },
+          { x: 10, y: 0 },
+          { x: 10, y: 10 },
+          { x: 0, y: 10 },
+        ],
+      })
+    ).toBe(false);
+
+    expect(
+      hasPolygonSelfIntersection2d({
+        points: [
+          { x: 0, y: 0 },
+          { x: 10, y: 0 },
+          { x: 0, y: 10 },
+          { x: 5, y: 0 },
+        ],
+      })
+    ).toBe(false);
+  });
+
+  it("detects retraced open polyline segments without treating bowties as invalid", () => {
+    expect(
+      hasPolylineRetracedSegment2d({
+        points: [
+          { x: 0, y: 0 },
+          { x: 10, y: 0 },
+          { x: 10, y: 10 },
+          { x: 3, y: -2 },
+        ],
+      })
+    ).toBe(false);
+
+    expect(
+      hasPolylineRetracedSegment2d({
+        points: [
+          { x: 0, y: 10 },
+          { x: 5, y: 5 },
+          { x: 0, y: 0 },
+        ],
+      })
+    ).toBe(false);
+
+    expect(
+      hasPolylineRetracedSegment2d({
+        points: [
+          { x: 0, y: 0 },
+          { x: 10, y: 0 },
+          { x: 0, y: 10 },
+          { x: 10, y: 10 },
+        ],
+      })
+    ).toBe(false);
+
+    expect(
+      hasPolylineRetracedSegment2d({
+        points: [
+          { x: 0, y: 0 },
+          { x: 10, y: 0 },
+          { x: 0, y: 0 },
+        ],
+      })
+    ).toBe(true);
+
+    expect(
+      hasPolylineRetracedSegment2d({
+        points: [
+          { x: 0, y: 0 },
+          { x: 10, y: 0 },
+          { x: 10, y: 10 },
+          { x: 10, y: 0 },
+        ],
+      })
+    ).toBe(true);
   });
 
   it("computes polygon centroids and handles degenerate polygons", () => {

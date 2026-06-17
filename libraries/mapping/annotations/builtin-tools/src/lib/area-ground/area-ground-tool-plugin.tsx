@@ -1,0 +1,233 @@
+import { VectorSquareIcon } from "@carma-commons/ui/components";
+import {
+  ANNOTATION_COMMON_SHORTCUT_ACTIONS,
+  formatMeasurementShortLabelToken,
+  resolveAnnotationCommonShortcutAction,
+  ANNOTATION_TYPES,
+} from "@carma-mapping/annotations/core";
+import {
+  AREA_EDGE_CROSSING_PROJECTION_MODES,
+  canAppendAreaPointWithoutActualEdgeCrossing,
+  createPolygonAuthoringController,
+} from "@carma-mapping/annotations/runtime";
+import { RUNTIME_POLYGON_FILL_PLACEMENT } from "@carma-mapping/annotations/runtime";
+import { ANNOTATION_TOOL_PLUGIN_CAPABILITIES } from "@carma-mapping/annotations/runtime";
+import {
+  AUTHORING_MEASUREMENT_PLUGIN_CAPABILITIES,
+  createMeasurementToolPlugin,
+  resolveAreaOcclusionStyleOptions,
+  type AreaOcclusionStyleOptions,
+  type AnnotationLineStyleOptions,
+} from "@carma-mapping/annotations/runtime";
+import type { AnnotationToolDraftState } from "@carma-mapping/annotations/runtime";
+import {
+  appendAreaPreviewPoint,
+  commitAreaMeasurement,
+  undoAreaPreviewPoint,
+} from "../area-shared/node-chain-area-tool-actions";
+import { resolveAreaToolAddAnnotationOptions } from "../area-shared/resolve-area-tool-add-annotation-options";
+import { createNodeChainAreaToolInfoBoxSlots } from "../area-shared/node-chain-area-tool-info-box-slots";
+import {
+  buildNodeChainAreaToolRenderModels,
+  createNodeChainAreaToolVisuals,
+} from "../area-shared/node-chain-area-tool-render-models";
+import { ANNOTATION_DEFAULT_LABEL_THEME } from "@carma-mapping/annotations/runtime";
+import type { DefaultAnnotationToolTexts } from "../annotation-mode-text";
+import { defaultAnnotationToolTexts } from "../annotation-mode-text";
+const { AREA_GROUND: ANNOTATION_TYPE_AREA_GROUND } = ANNOTATION_TYPES;
+
+const toolType = ANNOTATION_TYPE_AREA_GROUND;
+const labelTheme = ANNOTATION_DEFAULT_LABEL_THEME;
+const AREA_GROUND_REJECTED_POINT_FEEDBACK =
+  "Der letzte Punkt wurde nicht übernommen: Die neue Kante würde die Fläche schneiden.";
+
+export type AreaGroundToolPluginOptions = {
+  occlusionStyleOptions?: AreaOcclusionStyleOptions;
+  annotationLineStyleOptions?: AnnotationLineStyleOptions;
+  texts?: DefaultAnnotationToolTexts;
+};
+
+export const createAreaGroundToolPlugin = ({
+  occlusionStyleOptions,
+  annotationLineStyleOptions,
+  texts = defaultAnnotationToolTexts,
+}: AreaGroundToolPluginOptions = {}) => {
+  const text = texts.areaGround;
+  const getAreaGroundToolInfoBoxSlots = createNodeChainAreaToolInfoBoxSlots(
+    toolType,
+    {
+      headingTitle: text.headingTitle,
+      headingColor: labelTheme.scheme.colorPrimary,
+      formatLabelToken: (counter) =>
+        formatMeasurementShortLabelToken(toolType, counter),
+      actionLabels: texts.actions,
+      navigationLabels: texts.navigation,
+      metricLabels: text.metricLabels,
+    }
+  );
+  const resolvedOcclusionStyleOptions = resolveAreaOcclusionStyleOptions(
+    occlusionStyleOptions
+  );
+  const areaGroundToolVisuals = createNodeChainAreaToolVisuals({
+    fillType: toolType,
+    annotationLineStyleOptions,
+  });
+
+  return createMeasurementToolPlugin({
+    id: toolType,
+    annotationType: toolType,
+    descriptor: {
+      id: toolType,
+      order: 45,
+      label: text.label,
+      tooltip: text.tooltip,
+      shortcutKey: "A",
+      icon: <VectorSquareIcon fontSize="1.33em" />,
+    },
+    helpText: text.helpText,
+    capabilities: [
+      ...AUTHORING_MEASUREMENT_PLUGIN_CAPABILITIES,
+      ANNOTATION_TOOL_PLUGIN_CAPABILITIES.ADD_ANNOTATION,
+      ANNOTATION_TOOL_PLUGIN_CAPABILITIES.INFO_BOX,
+    ],
+    session: {
+      createSession: ({ drafts, setActiveToolType, addAnnotation }) => ({
+        toolType,
+        requestStart: () => {
+          setActiveToolType(toolType);
+        },
+        requestFinish: () => {
+          const draft = drafts.get(toolType);
+          const nextMeasurement = commitAreaMeasurement({
+            toolType,
+            coordinates: draft.coordinates,
+            linkedNodeGroupIds: draft.linkedNodeGroupIds,
+            addAnnotation,
+            sourceToolId: toolType,
+          });
+
+          drafts.clear(toolType);
+          return Boolean(nextMeasurement);
+        },
+        discardDraft: () => {
+          drafts.clear(toolType);
+        },
+        onNodeCreated: (coordinate, linkedNodeGroupId) => {
+          const currentDraft = drafts.get(toolType);
+          const nextDraft: AnnotationToolDraftState = {
+            coordinates: appendAreaPreviewPoint(
+              currentDraft.coordinates,
+              coordinate
+            ),
+            linkedNodeGroupIds: appendAreaPreviewPoint(
+              currentDraft.linkedNodeGroupIds,
+              linkedNodeGroupId ?? null
+            ),
+            feedback: null,
+          };
+          if (
+            !canAppendAreaPointWithoutActualEdgeCrossing({
+              previousCoordinates: currentDraft.coordinates,
+              nextCoordinates: nextDraft.coordinates,
+              projectionMode:
+                AREA_EDGE_CROSSING_PROJECTION_MODES.GROUND_GEODESIC,
+            })
+          ) {
+            drafts.set(toolType, {
+              ...currentDraft,
+              feedback: {
+                kind: "warning",
+                message: AREA_GROUND_REJECTED_POINT_FEEDBACK,
+              },
+            });
+            return;
+          }
+
+          drafts.set(toolType, nextDraft);
+        },
+        finishesOnLoopClosure: true,
+      }),
+    },
+    pointQuery: {
+      onPointCreated: ({
+        coordinate,
+        linkedNodeGroupId,
+        activeToolSession,
+      }) => {
+        activeToolSession?.onNodeCreated?.(coordinate, linkedNodeGroupId);
+      },
+    },
+    addAnnotation: {
+      resolveOptions: resolveAreaToolAddAnnotationOptions,
+    },
+    authoringVisuals: {
+      createController: (context) =>
+        createPolygonAuthoringController({
+          toolType,
+          context,
+          occlusionStyleOptions: resolvedOcclusionStyleOptions,
+          annotationLineStyleOptions,
+        }),
+    },
+    keyboard: {
+      onKeyDown: ({ event, activeToolSession, sessionContext }) => {
+        const shortcutAction = resolveAnnotationCommonShortcutAction(event);
+        if (
+          shortcutAction ===
+          ANNOTATION_COMMON_SHORTCUT_ACTIONS.CANCEL_ACTIVE_TOOL
+        ) {
+          activeToolSession?.discardDraft();
+          event.preventDefault();
+          return true;
+        }
+
+        if (
+          shortcutAction === ANNOTATION_COMMON_SHORTCUT_ACTIONS.UNDO_LAST_POINT
+        ) {
+          const currentDraft = sessionContext.drafts.get(toolType);
+          if (currentDraft.coordinates.length === 0) {
+            return false;
+          }
+
+          sessionContext.drafts.set(toolType, {
+            coordinates: undoAreaPreviewPoint(currentDraft.coordinates),
+            linkedNodeGroupIds: undoAreaPreviewPoint(
+              currentDraft.linkedNodeGroupIds
+            ),
+          });
+          event.preventDefault();
+          return true;
+        }
+
+        return false;
+      },
+    },
+    visualModels: {
+      build: ({
+        nodes,
+        annotationEntries,
+        selectedAnnotationIds,
+        setSelectedAnnotationId,
+        formatOptions,
+        onNodeLongPress,
+      }) =>
+        buildNodeChainAreaToolRenderModels({
+          toolType,
+          visuals: areaGroundToolVisuals,
+          nodes,
+          annotations: annotationEntries,
+          selectedAnnotationIds: selectedAnnotationIds,
+          fillPlacement: RUNTIME_POLYGON_FILL_PLACEMENT.GROUND,
+          formatOptions,
+          onSelect: setSelectedAnnotationId,
+          onNodeLongPress,
+          occlusionStyleOptions: resolvedOcclusionStyleOptions,
+        }),
+    },
+    infoBox: {
+      getSlots: getAreaGroundToolInfoBoxSlots,
+    },
+  });
+};
+
+export const areaGroundToolPlugin = createAreaGroundToolPlugin();

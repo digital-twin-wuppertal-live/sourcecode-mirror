@@ -131,6 +131,9 @@ export type ShapesToFeatureCollectionLayerInfo = {
   description?: string;
   keywords?: string[];
   metaDataText?: string;
+  thumbnail?: string;
+  source?: string;
+  visibility?: "2d" | "3d";
 };
 
 type LabelFeature = {
@@ -204,8 +207,10 @@ export function shapesToFeatureCollection(
           title: "Messungen",
           icon: "measurement",
           description: "",
-          metaDataText: `Messungs-Steuerelemente stellen eine oder mehrere Messungsgeometrien zur Verfügung, die eine Nutzerin bzw. ein Nutzer unter einer selbst gewählten Bezeichnung abgespeichert hat. Ihre eigenen Messungen werden für Sie bis zum Löschen des Cache-Speichers Ihres Browsers im Dialog "Karteninhalte hinzufügen" unter "Objekte / Meine Messungen" festgehalten. Eine andere Nutzerin / ein anderer Nutzer kann Ihnen Messungen über einen mit der Funktion "Teilen" erzeugten Link bereitstellen. Diese Messungen sind zunächst nur über das Messungs-Steuerelement für Sie verfügbar. Benutzen Sie die Favorisieren-Funktion im Messungs-Steuerelement, um die Messungen längerfristig zu speichern. Sie sind dann auch verfügbar, wenn Sie das Geoportal nicht über den spezifischen Teilen-Link öffnen.`,
+          metaDataText: `Messung-Steuerelemente stellen eine oder mehrere Messungsgeometrien zur Verfügung, die eine Nutzerin bzw. ein Nutzer unter einer selbst gewählten Bezeichnung abgespeichert hat. Ihre eigenen Messungen werden für Sie bis zum Löschen des Cache-Speichers Ihres Browsers im Dialog "Karteninhalte hinzufügen" unter "Objekte / Meine Messungen" festgehalten. Eine andere Nutzerin / ein anderer Nutzer kann Ihnen Messungen über einen mit der Funktion "Teilen" erzeugten Link bereitstellen. Diese Messungen sind zunächst nur über das Messung-Steuerelement für Sie verfügbar. Benutzen Sie die Favorisieren-Funktion im Messung-Steuerelement, um die Messungen längerfristig zu speichern. Sie sind dann auch verfügbar, wenn Sie das Geoportal nicht über den spezifischen Teilen-Link öffnen.`,
           keywords: ["carmaconf://lazyInfoBox"],
+          vectorLegend:
+            "https://wupp-digitaltwin-assets.cismet.de/v2/geoportal/legenden/measurements.png",
           ...layerInfoOverrides,
         },
       },

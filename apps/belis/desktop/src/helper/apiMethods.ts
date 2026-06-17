@@ -38,6 +38,18 @@ import {
   arbeitsauftraegeByTeamQuery,
   arbeitsauftraegeByIdsQuery,
 } from "../constants/belis";
+import store from "../store";
+import { getIsReadOnly } from "../store/slices/auth";
+
+// Defensive guard: read-only ("Gast") users must never trigger a write/mutation
+// request. UI entry points are hidden too, but this backs them up.
+const assertWritable = () => {
+  if (getIsReadOnly(store.getState())) {
+    throw new Error(
+      "READ_ONLY: write operations are disabled for Gast users."
+    );
+  }
+};
 
 export const savebauart = async (jwt: string) => {
   try {
@@ -84,13 +96,16 @@ export const saveTeam = async (
 export const updateDataByClassName = async <T extends Record<string, unknown>>(
   jwt: string,
   className: string,
-  dataToSave: T
+  dataToSave: T,
+  extraParams?: Record<string, string>
 ) => {
+  assertWritable();
   const formData = new FormData();
   const taskparams = JSON.stringify({
     parameters: {
       className,
       data: JSON.stringify(dataToSave),
+      ...(extraParams ?? {}),
     },
   });
 
@@ -128,6 +143,7 @@ export const executeAction = async (
   actionName: string,
   params: Record<string, string>
 ) => {
+  assertWritable();
   const formData = new FormData();
   const taskparams = JSON.stringify({ parameters: params });
 
@@ -165,6 +181,7 @@ export const removeDataByClassName = async <T extends Record<string, unknown>>(
   className: string,
   dataToSave: T
 ) => {
+  assertWritable();
   const formData = new FormData();
   const taskparams = JSON.stringify({
     parameters: {
@@ -1122,6 +1139,10 @@ export const uploadBelisDocument = async (
   jwt: string,
   params: UploadDocumentParams
 ): Promise<UploadDocumentResult> => {
+  if (getIsReadOnly(store.getState())) {
+    return { success: false, error: "READ_ONLY: uploads disabled" };
+  }
+
   const { name, data } = params;
 
   const formData = new FormData();

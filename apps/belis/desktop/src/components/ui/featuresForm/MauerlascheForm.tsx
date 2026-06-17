@@ -9,6 +9,8 @@ import { getJWT } from "../../../store/slices/auth";
 import { DokumentItem } from "../DocumentPreview";
 import { getDocumentKey } from "../FilePreview";
 import FeatureFormLayout from "./FeatureFormLayout";
+import { useCreateFeatureDraft } from "../useCreateFeatureDraft";
+import { extractListItem } from "../BelisSidebar";
 import MauerlascheFormFields from "./MauerlascheFormFields";
 import toTitleCase from "../../../helper/toTitleCase";
 import { updateDataByClassName } from "../../../helper/apiMethods";
@@ -41,7 +43,9 @@ interface MauerlascheFormProps {
   draftFiles?: DraftFile[];
   hasDraft?: boolean;
   isCreation?: boolean;
+  featureId?: string;
   formHeaderContent?: ReactNode;
+  geometrySelector?: ReactNode;
   onDraftChange?: (values: Record<string, unknown>) => void;
   onDraftFilesChange?: (files: DraftFile[]) => void;
   onOriginalValues?: (values: Record<string, unknown>) => void;
@@ -61,7 +65,9 @@ const MauerlascheForm = ({
   draftValues,
   draftFiles,
   hasDraft,
+  featureId,
   formHeaderContent,
+  geometrySelector,
   onDraftChange,
   onDraftFilesChange,
   onOriginalValues,
@@ -78,6 +84,7 @@ const MauerlascheForm = ({
     null
   );
   const jwt = useSelector(getJWT);
+  const createFeatureDraft = useCreateFeatureDraft();
 
   const setFormInstance = useCallback((form: FormInstance) => {
     formRef.current = form;
@@ -135,11 +142,9 @@ const MauerlascheForm = ({
 
   const isCreation =
     typeof rawProps?.id === "string" && isCreationDraftKey(rawProps.id);
-  const sidebarMain = rawProps?.laufende_nummer
-    ? `M - ${rawProps.laufende_nummer}`
-    : rawProps?.id && !isCreation
-    ? `M - ${rawProps.id}`
-    : "";
+  // Header identifier comes from the shared sidebar extractor, so the sticky
+  // header reads identically to the sidebar row — drafts included.
+  const sidebarMain = extractListItem("mauerlaschen", rawFeature).main;
 
   const handleSave = async () => {
     if (!jwt) {
@@ -231,7 +236,7 @@ const MauerlascheForm = ({
 
   return (
     <FeatureFormLayout
-      title={isCreation ? "Neue Mauerlasche" : sidebarMain ? `Mauerlasche ${sidebarMain}` : "Mauerlasche"}
+      title={`Mauerlasche ${sidebarMain}`}
       cancelLabel={sidebarMain || ""}
       isCreation={isCreation}
       formHeaderContent={formHeaderContent}
@@ -251,11 +256,21 @@ const MauerlascheForm = ({
       onToggleReadOnly={onToggleReadOnly}
       onCancel={onCancel}
       onSave={handleSave}
+      onCreateRelatedDraft={() =>
+        createFeatureDraft(
+          "mauerlasche",
+          isCreation && draftValues
+            ? { seedValues: draftValues }
+            : { seedFromSelection: true }
+        )
+      }
     >
       <MauerlascheFormFields
         mauerlasche={ml}
         readOnly={readOnly}
         isCreation={isCreation}
+        featureId={featureId}
+        geometrySelector={geometrySelector}
         onFormInstance={setFormInstance}
         draftValues={draftValues}
         onValuesChange={handleValuesChange}

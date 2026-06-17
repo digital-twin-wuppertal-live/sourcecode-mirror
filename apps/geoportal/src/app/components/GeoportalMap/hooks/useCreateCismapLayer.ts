@@ -1,6 +1,7 @@
 import {
   createElement,
   CSSProperties,
+  useContext,
   useEffect,
   useRef,
   useState,
@@ -11,6 +12,7 @@ import type maplibregl from "maplibre-gl";
 import centroid from "@turf/centroid";
 
 import CismapLayer from "react-cismap/CismapLayer";
+import { TopicMapContext } from "react-cismap/contexts/TopicMapContextProvider";
 
 import type { Layer } from "@carma-mapping/layers";
 import { useFeatureFlags } from "@carma-providers/feature-flag";
@@ -28,6 +30,7 @@ import {
 } from "../../../store/slices/mapping";
 import {
   applyDynamicStyling,
+  extractCarmaConf,
   setLastAppliedSelection,
 } from "@carma-mapping/components";
 
@@ -40,6 +43,7 @@ import {
 } from "../topicmap.utils";
 import { utils } from "@carma-appframeworks/portals";
 import { selectionPadding } from "../../../constants/selection";
+import { is3dAnnotationAdhocLayer } from "../../../helper/adhoc-feature-utils";
 
 const MAX_ZOOM = 26;
 
@@ -77,8 +81,23 @@ interface VectorLayerProps {
   onMapLibreCoreMapReady?: (map: any) => void;
 }
 
-const createCismapLayer = (props: WMTSLayerProps | VectorLayerProps) => {
+const CismapLayerWhenLeafletReady = (
+  props: WMTSLayerProps | VectorLayerProps
+) => {
+  const { routedMapRef } = useContext<typeof TopicMapContext>(TopicMapContext);
+
+  if (
+    props.additionalLayerUniquePane &&
+    !routedMapRef?.leafletMap?.leafletElement
+  ) {
+    return null;
+  }
+
   return createElement(CismapLayer, props);
+};
+
+const createCismapLayer = (props: WMTSLayerProps | VectorLayerProps) => {
+  return createElement(CismapLayerWhenLeafletReady, props);
 };
 
 export const useCreateCismapLayers = (
@@ -98,7 +117,7 @@ export const useCreateCismapLayers = (
     dispatch: Dispatch;
     zoom: number;
     selectedFeature: any;
-    leafletMap: LeafletMap;
+    leafletMap?: LeafletMap | null;
     maplibreMapsRef?: React.MutableRefObject<Map<string, any>>;
     store: Store;
     selectionSemanticIdentifierRef?: React.MutableRefObject<string | undefined>;
@@ -247,7 +266,7 @@ export const useCreateCismapLayers = (
         );
         if (selectedVectorFeature.setSelection) {
           selectedVectorFeature.setSelection(true);
-          if (selectedVectorFeature?.state?.selected) {
+          if (selectedVectorFeature?.state?.selected && leafletMap) {
             utils.zoomToFeature({
               selectedFeature: foundFeatures[lastObject.key],
               leafletMap,
@@ -286,18 +305,21 @@ export const useCreateCismapLayers = (
   }, [selectedFeature, globalHits]);
 
   useEffect(() => {
-    if (
-      Object.keys(idleLayers).length ===
-      layers.filter((l) => l.layerType === "vector").length
-    ) {
+    const renderedVectorLayerCount = layers.filter(
+      (l) =>
+        l.layerType === "vector" && l.visible && !is3dAnnotationAdhocLayer(l)
+    ).length;
+    if (Object.keys(idleLayers).length === renderedVectorLayerCount) {
       dispatch(setLayersIdle(true));
     }
   }, [idleLayers]);
 
   // const ntList = [""];
 
-  return layers.filter((layer) => layer.props).map((layer, i) => {
-    if (layer.visible) {
+  const cismapLayers = layers.filter((layer) => layer.props);
+
+  return cismapLayers.map((layer, i) => {
+    if (layer.visible && !is3dAnnotationAdhocLayer(layer)) {
       switch (layer.layerType) {
         case "wmts-nt":
           return createCismapLayer({
@@ -358,6 +380,18 @@ export const useCreateCismapLayers = (
                   latestLayer.dynamicStylingSelection !== null
                     ? latestLayer.dynamicStylingSelection
                     : {};
+                const initialCarmaConf = extractCarmaConf(
+                  map.style?.stylesheet
+                );
+                if (initialCarmaConf) {
+                  dispatch(
+                    updateLayerFromLayerInfo({
+                      id: layer.id,
+                      layerInfo: {},
+                      carmaConf: initialCarmaConf,
+                    })
+                  );
+                }
                 configs.forEach((config, idx) => {
                   const sel = latestSelections[idx];
                   const effectiveSel = sel ?? config.default;
@@ -365,17 +399,21 @@ export const useCreateCismapLayers = (
                     setLastAppliedSelection(layer.id, idx, effectiveSel);
                     return;
                   }
-                  if (config.type === "list") {
-                    const layerInfo = applyDynamicStyling(
+                  if (config.type === "list" || config.type === "toggle") {
+                    const result = applyDynamicStyling(
                       map,
                       layer.id,
                       config,
                       sel
                     );
                     setLastAppliedSelection(layer.id, idx, sel);
-                    if (layerInfo) {
+                    if (result?.layerInfo || result?.carmaConf) {
                       dispatch(
-                        updateLayerFromLayerInfo({ id: layer.id, layerInfo })
+                        updateLayerFromLayerInfo({
+                          id: layer.id,
+                          layerInfo: result.layerInfo ?? {},
+                          carmaConf: result.carmaConf ?? undefined,
+                        })
                       );
                     }
                   }

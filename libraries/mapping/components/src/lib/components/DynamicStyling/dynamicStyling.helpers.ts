@@ -1,4 +1,4 @@
-import type { DynamicStylingListConfig } from "@carma-mapping/layers";
+import type { DynamicStylingOptionsConfig } from "@carma-mapping/layers";
 
 export const ICON_PREFIX =
   "https://geo.wuppertal.de/geoportal/geoportal_icon_legends/";
@@ -35,7 +35,7 @@ const defaultLayerValues: Record<string, Record<string, unknown>> = {};
 export const captureDefaults = (
   stylesheet: any,
   carmaLayerId: string,
-  config: DynamicStylingListConfig
+  config: DynamicStylingOptionsConfig
 ) => {
   if (defaultLayerValues[carmaLayerId]) return defaultLayerValues[carmaLayerId];
 
@@ -107,6 +107,17 @@ export const setKeywordValue = (
 
 export const extractLayerInfo = (stylesheet: any): LayerInfo | null => {
   return stylesheet?.metadata?.carmaConf?.layerInfo ?? null;
+};
+
+export const extractCarmaConf = (
+  stylesheet: any
+): Record<string, unknown> | null => {
+  const carmaConf = stylesheet?.metadata?.carmaConf;
+  if (!carmaConf || typeof carmaConf !== "object") {
+    return null;
+  }
+  const { layerInfo, ...rest } = carmaConf;
+  return rest;
 };
 
 const lastAppliedDynamicStyling: Map<string, Record<number, string>> = new Map();

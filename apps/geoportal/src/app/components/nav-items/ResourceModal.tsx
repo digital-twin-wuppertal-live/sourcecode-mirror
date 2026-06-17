@@ -34,6 +34,7 @@ import {
 } from "../../store/slices/ui";
 import { apiUrl } from "../../constants/discover";
 import store from "../../store";
+import { withSavedMeasurementCarrierImport } from "../layers/measurement-import-utils";
 import { createResourceLayerUpdater } from "./resource-layer-updater";
 import { useCarmaMapAPIActions } from "@carma-mapping/carma-map-api";
 
@@ -73,20 +74,23 @@ const ResourceModal = () => {
     [getIsCesium, getIsLeaflet]
   );
 
-  const updateLayers = createResourceLayerUpdater({
-    dispatch,
-    activeLayers,
-    addFeature,
-    setSelectedFeatureById,
-    setShouldFocusSelected,
-    clearFeatureCollections,
-    toggleFramework: toggle,
-    getFrameworkMode,
-    routedMap,
-    setCurrentStyle,
-    messageApi,
-    addLayerById,
-  });
+  const updateLayers = withSavedMeasurementCarrierImport(
+    createResourceLayerUpdater({
+      dispatch,
+      activeLayers,
+      addFeature,
+      setSelectedFeatureById,
+      setShouldFocusSelected,
+      clearFeatureCollections,
+      toggleFramework: toggle,
+      getFrameworkMode,
+      routedMap,
+      setCurrentStyle,
+      messageApi,
+      addLayerById,
+    }),
+    { measurements }
+  );
 
   return (
     <>
@@ -160,7 +164,7 @@ const ResourceModal = () => {
               }),
             id: "favoriteLayers",
           },
-          isLeaflet && {
+          {
             Title: "Meine Messungen",
             layers: measurements.map((measurement) => {
               return {
@@ -191,6 +195,34 @@ const ResourceModal = () => {
         ].filter(Boolean)}
         updateActiveLayer={(layer) => {
           dispatch(updateLayer(layer));
+
+          if (layer.layerType !== "vector" || !layer.props?.style) {
+            return;
+          }
+
+          const entry = store
+            .getState()
+            .mapping.maplibreMaps.find((e) => e.id === layer.id);
+          if (!entry?.map) {
+            return;
+          }
+
+          const raw = layer.props.style;
+          let updatedStyle = raw;
+          if (typeof raw === "string" && raw.trim().startsWith("{")) {
+            try {
+              updatedStyle = JSON.parse(raw);
+            } catch (err) {
+              console.error("parse failed", err);
+              throw err;
+            }
+          }
+          try {
+            entry.map.setStyle(updatedStyle);
+          } catch (err) {
+            console.error("setStyle failed", err);
+            throw err;
+          }
         }}
         removeLastLayer={() => {
           dispatch(removeLastLayer());

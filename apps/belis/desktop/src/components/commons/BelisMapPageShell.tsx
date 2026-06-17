@@ -15,6 +15,7 @@ import {
   getGlobalEditMode,
   toggleGlobalEditMode,
 } from "../../store/slices/featuresForms";
+import { getIsReadOnly } from "../../store/slices/auth";
 import { getKeyTablesLoading } from "../../store/slices/keyTables";
 import {
   getSelectedTeamId,
@@ -24,16 +25,8 @@ import {
   setDraftMode,
 } from "../../store/slices/arbeitsauftraege";
 import { getTotalDraftCount } from "../../store/slices/arbeitsauftraegeDrafts";
-import {
-  isRegularLayerEnabled,
-  isBrandnewLayerEnabled,
-  setRegularLayerEnabled,
-  setBrandnewLayerEnabled,
-} from "../../store/slices/mapSettings";
-import {
-  BELIS_FILTER_CATEGORIES,
-  BELIS_BRAND_NEW_FC_URL,
-} from "../../config/mapLayerConfigs";
+import { BELIS_FILTER_CATEGORIES } from "../../config/mapLayerConfigs";
+import { BELIS_BRAND_NEW_FC_URL } from "../../constants/belis";
 import LeitungstypDropdown from "../ui/LeitungstypDropdown";
 import TeamSelect from "../ui/TeamSelect";
 import SearchModal from "../ui/SearchModal";
@@ -60,6 +53,7 @@ const BelisMapPageShell = () => {
   const dispatch: AppDispatch = useDispatch();
   const keyTablesLoading = useSelector(getKeyTablesLoading);
   const globalEditMode = useSelector(getGlobalEditMode);
+  const isReadOnly = useSelector(getIsReadOnly);
 
   const selectedTeamId = useSelector(getSelectedTeamId);
   const draftMode = useSelector(getDraftMode);
@@ -107,8 +101,8 @@ const BelisMapPageShell = () => {
     () => window.location.hostname === "localhost",
     []
   );
-  const regularLayerEnabled = useSelector(isRegularLayerEnabled);
-  const brandnewLayerEnabled = useSelector(isBrandnewLayerEnabled);
+  const [regularLayerEnabled, setRegularLayerEnabled] = useState(true);
+  const [brandnewLayerEnabled, setBrandnewLayerEnabled] = useState(true);
   const [brandnewCount, setBrandnewCount] = useState<number | null>(null);
 
   useEffect(() => {
@@ -165,7 +159,9 @@ const BelisMapPageShell = () => {
     [streets]
   );
 
-  const cardGaps = 24 + 24 + 1;
+  // Horizontal chrome around the map wrapper inside the Card:
+  // mx-3 margins (12+12) + Card body padding (12+12) + Card borders (1+1).
+  const cardGaps = 24 + 24 + 2;
   const navbarHeight = 60;
 
   const mapStyle = {
@@ -175,7 +171,8 @@ const BelisMapPageShell = () => {
     clear: "both",
   };
 
-  const editModeButton = (
+  // Read-only ("Gast") users cannot enter edit mode, so the toggle is hidden.
+  const editModeButton = isReadOnly ? null : (
     <Tooltip title={globalEditMode ? "Bearbeitung sperren" : "Alle bearbeiten"}>
       <Button
         icon={globalEditMode ? <LockOutlined /> : <EditOutlined />}
@@ -190,12 +187,14 @@ const BelisMapPageShell = () => {
     <Spin spinning={keyTablesLoading}>
       <div className="mx-3 mt-1">
         <CustomCard
+          className="belis-map-card"
           title={
             windowWidth > 1364 ? (
               <div className="flex items-center gap-2 my-1">
                 <span>{isDatasheetOpen ? "Datenblatt" : title}</span>
                 {editModeButton}
-                {sidebarVariant === "arbeitsauftraege" &&
+                {!isReadOnly &&
+                  sidebarVariant === "arbeitsauftraege" &&
                   totalDraftCount > 0 && (
                     <Badge
                       count={totalDraftCount}
@@ -233,7 +232,8 @@ const BelisMapPageShell = () => {
           extra={
             <div className="flex items-center gap-4">
               {windowWidth <= 1364 && editModeButton}
-              {windowWidth <= 1364 &&
+              {!isReadOnly &&
+                windowWidth <= 1364 &&
                 sidebarVariant === "arbeitsauftraege" &&
                 totalDraftCount > 0 && (
                   <Badge
@@ -342,9 +342,7 @@ const BelisMapPageShell = () => {
                         checkedChildren="regular"
                         unCheckedChildren="regular"
                         checked={regularLayerEnabled}
-                        onChange={(checked) =>
-                          dispatch(setRegularLayerEnabled(checked))
-                        }
+                        onChange={setRegularLayerEnabled}
                         style={
                           regularLayerEnabled
                             ? { backgroundColor: "#eab308" }
@@ -361,9 +359,7 @@ const BelisMapPageShell = () => {
                           checkedChildren="brandnew"
                           unCheckedChildren="brandnew"
                           checked={brandnewLayerEnabled}
-                          onChange={(checked) =>
-                            dispatch(setBrandnewLayerEnabled(checked))
-                          }
+                          onChange={setBrandnewLayerEnabled}
                           style={
                             brandnewLayerEnabled
                               ? { backgroundColor: "#eab308" }

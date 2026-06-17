@@ -8,6 +8,8 @@ import { getJWT } from "../../../store/slices/auth";
 import { DokumentItem } from "../DocumentPreview";
 import { getDocumentKey } from "../FilePreview";
 import FeatureFormLayout from "./FeatureFormLayout";
+import { useCreateFeatureDraft } from "../useCreateFeatureDraft";
+import { extractListItem } from "../BelisSidebar";
 import LeitungFormFields from "./LeitungFormFields";
 import { updateDataByClassName } from "../../../helper/apiMethods";
 import { uploadDraftFiles } from "../../../helper/uploadDraftFiles";
@@ -25,7 +27,9 @@ interface LeitungFormProps {
   draftFiles?: DraftFile[];
   hasDraft?: boolean;
   isCreation?: boolean;
+  featureId?: string;
   formHeaderContent?: ReactNode;
+  geometrySelector?: ReactNode;
   onDraftChange?: (values: Record<string, unknown>) => void;
   onDraftFilesChange?: (files: DraftFile[]) => void;
   onOriginalValues?: (values: Record<string, unknown>) => void;
@@ -45,7 +49,9 @@ const LeitungForm = ({
   draftValues,
   draftFiles,
   hasDraft,
+  featureId,
   formHeaderContent,
+  geometrySelector,
   onDraftChange,
   onDraftFilesChange,
   onOriginalValues,
@@ -62,6 +68,7 @@ const LeitungForm = ({
     null
   );
   const jwt = useSelector(getJWT);
+  const createFeatureDraft = useCreateFeatureDraft();
 
   const setFormInstance = useCallback((form: FormInstance) => {
     formRef.current = form;
@@ -115,9 +122,9 @@ const LeitungForm = ({
   // Compute sidebar main title to display in form header
   const isCreation =
     typeof rawProps?.id === "string" && isCreationDraftKey(rawProps.id);
-  const sidebarMain = rawProps?.id && !isCreation
-    ? `L - ${rawProps.id}`
-    : "";
+  // Header identifier comes from the shared sidebar extractor, so the sticky
+  // header reads identically to the sidebar row — drafts included.
+  const sidebarMain = extractListItem("leitungen", rawFeature).main;
 
   const handleSave = async () => {
     if (!jwt) {
@@ -208,7 +215,7 @@ const LeitungForm = ({
 
   return (
     <FeatureFormLayout
-      title={isCreation ? "Neue Leitung" : sidebarMain ? `Leitung ${sidebarMain}` : "Leitung"}
+      title={`Leitung ${sidebarMain}`}
       cancelLabel={sidebarMain || ""}
       isCreation={isCreation}
       formHeaderContent={formHeaderContent}
@@ -228,10 +235,20 @@ const LeitungForm = ({
       onToggleReadOnly={onToggleReadOnly}
       onCancel={onCancel}
       onSave={handleSave}
+      onCreateRelatedDraft={() =>
+        createFeatureDraft(
+          "leitung",
+          isCreation && draftValues
+            ? { seedValues: draftValues }
+            : { seedFromSelection: true }
+        )
+      }
     >
       <LeitungFormFields
         leitung={lt}
         readOnly={readOnly}
+        featureId={featureId}
+        geometrySelector={geometrySelector}
         onFormInstance={setFormInstance}
         draftValues={draftValues}
         onValuesChange={handleValuesChange}

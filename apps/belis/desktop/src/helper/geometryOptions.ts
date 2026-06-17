@@ -1,6 +1,7 @@
 import proj4 from "proj4";
 import { proj4crs4326def } from "@carma-mapping/utils";
 import type { Feature } from "geojson";
+import toTitleCase from "./toTitleCase";
 
 const proj4crs25832def = "+proj=utm +zone=32 +ellps=GRS80 +units=m +no_defs";
 
@@ -8,47 +9,6 @@ const CRS_25832 = {
   type: "name" as const,
   properties: { name: "urn:ogc:def:crs:EPSG::25832" },
 };
-
-const HARDCODED_POINT_TOELLETURM = {
-  type: "Point" as const,
-  crs: CRS_25832,
-  coordinates: [374503.93, 5679879.3],
-};
-
-const HARDCODED_LINE = {
-  type: "LineString" as const,
-  crs: CRS_25832,
-  coordinates: [
-    [374503.93, 5679879.3],
-    [374523.93, 5679899.3],
-    [374543.93, 5679919.3],
-  ],
-};
-
-export type GeometryKey = "point_toelleturm" | "line";
-
-export const GEOMETRY_OPTIONS: {
-  key: GeometryKey;
-  label: string;
-  geometry: typeof HARDCODED_POINT_TOELLETURM | typeof HARDCODED_LINE;
-}[] = [
-  {
-    key: "point_toelleturm",
-    label: "Punkt – Tölleturm",
-    geometry: HARDCODED_POINT_TOELLETURM,
-  },
-  {
-    key: "line",
-    label: "Linie – Tölleturm",
-    geometry: HARDCODED_LINE,
-  },
-];
-
-export const getGeometryByKey = (key: GeometryKey) =>
-  GEOMETRY_OPTIONS.find((o) => o.key === key)!.geometry;
-
-export const getDefaultGeometryKey = (featureType: string): GeometryKey =>
-  featureType === "leitung" ? "line" : "point_toelleturm";
 
 type MeasurementGeometry =
   | { type: "Point"; crs: typeof CRS_25832; coordinates: [number, number] }
@@ -62,12 +22,41 @@ export interface MeasurementGeometryOption {
   key: string;
   label: string;
   geometry: MeasurementGeometry;
+  // Original WGS84 point preserved before reprojection. Only set for
+  // Standort-derived options today, because the Leuchte-for-existing-Standort
+  // save path sends this as a sibling `geometry` SaveObject parameter in
+  // EPSG:4326. Measurement-derived options leave this unset.
+  geometryWgs84?: { type: "Point"; coordinates: [number, number] };
 }
 
 const wgs84CoordTo25832 = (c: number[]): [number, number] =>
   proj4(proj4crs4326def, proj4crs25832def, [c[0], c[1]]) as [number, number];
 
 export const STANDORT_OPTION_PREFIX = "standort.";
+
+// Geometry-edit flow ("change an existing feature's shape to a measurement").
+// The first option in the selector reproduces the feature's *current*
+// geometry so the user can always revert to it before saving.
+export const CURRENT_OPTION_PREFIX = "current.";
+
+// Build the "Momentane Geometrie" option from an existing feature's own
+// `geom.geo_field`. Unlike measurement/Standort options this geometry is
+// already EPSG:25832 (it comes straight from the DB record), so it is passed
+// through unprojected — re-selecting it must yield the exact original
+// coordinates with no reprojection round-trip drift. Supports Point (the point
+// features) and LineString (Leitungen).
+export const buildCurrentGeometryOption = (
+  geoField: GeoJSON.Geometry | null | undefined,
+  featureDbId: number | string | undefined
+): MeasurementGeometryOption | null => {
+  if (!geoField || featureDbId == null) return null;
+  if (geoField.type !== "Point" && geoField.type !== "LineString") return null;
+  return {
+    key: `${CURRENT_OPTION_PREFIX}${String(featureDbId)}`,
+    label: "Momentane Geometrie",
+    geometry: geoField as MeasurementGeometryOption["geometry"],
+  };
+};
 
 export const parseStandortIdFromKey = (
   geometryKey: string | undefined
@@ -76,6 +65,33 @@ export const parseStandortIdFromKey = (
     return undefined;
   const id = Number(geometryKey.slice(STANDORT_OPTION_PREFIX.length));
   return Number.isFinite(id) ? id : undefined;
+};
+
+// Human label for a Standort, e.g. "Standort 19 (Neviandstr.)" — the number
+// from `lfd_nummer` (matches the sidebar) and the street address title-cased.
+// Raw map-tile features carry a flat `strasse`; DB-record features (sidebar
+// selection) nest it under `fk_strassenschluessel`. Falls back to the
+// number-only form when no street is available.
+export const formatStandortLabel = (
+  props: Record<string, unknown> | null | undefined
+): string => {
+  const p = props ?? {};
+  const lfd = p.lfd_nummer;
+  const numberPart = lfd != null ? String(lfd) : "?";
+  const nested = p.fk_strassenschluessel;
+  const strasseRaw =
+    p.strasse ??
+    p.strassenschluessel ??
+    (nested && typeof nested === "object"
+      ? (nested as Record<string, unknown>).strasse
+      : undefined);
+  const strasse =
+    typeof strasseRaw === "string" && strasseRaw.trim() !== ""
+      ? toTitleCase(strasseRaw.trim())
+      : null;
+  return strasse
+    ? `Standort ${numberPart} (${strasse})`
+    : `Standort ${numberPart}`;
 };
 
 export const buildStandortGeometryOption = (
@@ -106,6 +122,7 @@ export const buildStandortGeometryOption = (
       crs: CRS_25832,
       coordinates: projected,
     },
+    geometryWgs84: { type: "Point", coordinates: [x, y] },
   };
 };
 

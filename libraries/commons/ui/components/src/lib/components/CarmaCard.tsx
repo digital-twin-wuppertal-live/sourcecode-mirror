@@ -44,6 +44,7 @@ const isPerceptuallyDark = ([r, g, b]: [number, number, number]): boolean => {
 export interface CarmaCardProps {
   header?: React.ReactNode;
   headerColor?: string;
+  headerStyle?: React.CSSProperties;
   bodyStyle?: React.CSSProperties;
   /** Always-visible line below header (not collapsed). */
   subtitle?: React.ReactNode;
@@ -52,6 +53,7 @@ export interface CarmaCardProps {
   content?: React.ReactNode;
   /** Always-visible line below collapsible content. */
   footer?: React.ReactNode;
+  hideFooterWhenCollapsed?: boolean;
   collapsed?: boolean;
   onCollapsedChange?: (collapsed: boolean) => void;
   collapsible?: boolean;
@@ -73,11 +75,13 @@ export interface CarmaCardProps {
 const CarmaCard = ({
   header,
   headerColor,
+  headerStyle,
   bodyStyle,
   subtitle,
   hideSubtitleWhenCollapsed = false,
   content,
   footer,
+  hideFooterWhenCollapsed = false,
   collapsed,
   onCollapsedChange,
   collapsible = false,
@@ -130,6 +134,9 @@ const CarmaCard = ({
   const showSubtitle =
     hasNode(subtitle) &&
     !(collapsible && Boolean(collapsed) && hideSubtitleWhenCollapsed);
+  const showFooter =
+    hasNode(footer) &&
+    !(collapsible && Boolean(collapsed) && hideFooterWhenCollapsed);
   const headerTextColor =
     React.isValidElement(header) &&
     (header.props as { style?: React.CSSProperties })?.style?.color
@@ -419,6 +426,7 @@ const CarmaCard = ({
             position: "relative",
             zIndex: 1,
             backgroundColor: headerColor,
+            ...headerStyle,
             backdropFilter: "blur(3px)",
             WebkitBackdropFilter: "blur(3px)",
             padding: "3px 0px",
@@ -534,7 +542,7 @@ const CarmaCard = ({
             >
               <div ref={collapsibleContentRef}>{content}</div>
             </div>
-            {footer ? <div style={{ paddingTop: 2 }}>{footer}</div> : null}
+            {showFooter ? <div style={{ paddingTop: 2 }}>{footer}</div> : null}
           </div>
           {collapsible && !shouldRenderCollapseInHeader
             ? renderCollapseToggle(false)

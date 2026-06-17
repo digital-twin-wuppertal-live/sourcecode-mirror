@@ -22,14 +22,25 @@ export type DynamicStylingOption = {
   [key: string]: unknown;
 };
 
-export type DynamicStylingListConfig = {
-  type: "list";
+type DynamicStylingOptionsConfigBase = {
   label: string;
   default: string;
   options: DynamicStylingOption[];
   targets: Record<string, string[]>;
   showIcon?: boolean;
 };
+
+export type DynamicStylingListConfig = DynamicStylingOptionsConfigBase & {
+  type: "list";
+};
+
+export type DynamicStylingToggleConfig = DynamicStylingOptionsConfigBase & {
+  type: "toggle";
+};
+
+export type DynamicStylingOptionsConfig =
+  | DynamicStylingListConfig
+  | DynamicStylingToggleConfig;
 
 export type DynamicStylingVisibilityConfig = {
   type: "visibility";
@@ -43,6 +54,7 @@ export type DynamicStylingVisibilityConfig = {
 
 export type DynamicStylingConfig =
   | DynamicStylingListConfig
+  | DynamicStylingToggleConfig
   | DynamicStylingVisibilityConfig;
 
 export type BackgroundLayer = BaseLayer & {
@@ -182,6 +194,8 @@ type BaseLayer = {
     vectorLegend?: string;
     metaDataText?: string;
     vectorLegendTitle?: string;
+    vectorTitle?: string;
+    vectorDescription?: string;
     [key: string]: unknown;
   };
 };
@@ -304,9 +318,14 @@ export type Item = {
   vectorStyle?: string;
   vectorLegend?: string;
   vectorLegendTitle?: string;
+  vectorTitle?: string;
+  vectorDescription?: string;
   ff?: string;
   replaceId?: string;
   mergeId?: string;
+  createdAt?: string;
+  createdBy?: string;
+  updatedAt?: string;
 } & (TmpLayer | Link | Feature | Collection);
 
 export interface WMSLatLonBoundingBox {

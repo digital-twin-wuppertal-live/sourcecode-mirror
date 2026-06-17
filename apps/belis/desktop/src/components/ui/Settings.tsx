@@ -1,5 +1,6 @@
 import { useDispatch, useSelector } from "react-redux";
-import { Checkbox, Radio, Slider, Switch } from "antd";
+import { Button, Checkbox, Popconfirm, Radio, Slider, Switch, message } from "antd";
+import { clearAllDefaults } from "../../store/slices/creationDefaults";
 import {
   getActiveBackgroundLayer,
   getBackgroundLayerOpacities,
@@ -11,6 +12,8 @@ import {
   setAdditionalLayerOpacities,
   isInPaleMode,
   setPaleModeActive,
+  isDangerousDeleteModeActive,
+  setDangerousDeleteMode,
 } from "../../store/slices/mapSettings";
 
 import {
@@ -100,9 +103,10 @@ const Settings = () => {
   const activeAdditionalLayers = useSelector(getActiveAdditionalLayers);
   const additionalLayerOpacities = useSelector(getAdditionalLayerOpacities);
   const inPaleMode = useSelector(isInPaleMode);
+  const dangerousDeleteMode = useSelector(isDangerousDeleteModeActive);
 
   return (
-    <div className="flex flex-col gap-10 h-full">
+    <div className="flex flex-col gap-10 min-h-full">
       <div className="flex flex-col gap-2 flex-1">
         <h2 className="text-2xl font-medium">Karte</h2>
 
@@ -174,6 +178,42 @@ const Settings = () => {
               })}
             </div>
           </Radio.Group>
+        </div>
+      </div>
+      <div className="flex flex-col gap-2">
+        <h4 className="text-lg font-medium">Gemerkte Vorbelegung</h4>
+        <Popconfirm
+          title="Gemerkte Felder zurücksetzen"
+          description="Alle gemerkten Vorbelegungen werden gelöscht. Fortfahren?"
+          okText="Zurücksetzen"
+          cancelText="Abbrechen"
+          onConfirm={() => {
+            dispatch(clearAllDefaults());
+            message.success("Gemerkte Felder zurückgesetzt");
+          }}
+        >
+          <Button block>Gemerkte Felder zurücksetzen</Button>
+        </Popconfirm>
+      </div>
+      <div className="flex flex-col gap-2 rounded-md border border-[#f5c2c7] overflow-hidden">
+        <div className="bg-[#fff5f5] px-3 py-2 border-b border-[#f5c2c7]">
+          <span className="text-[#cf222e] font-semibold text-sm">
+            Löschmodus
+          </span>
+        </div>
+        <div className="flex items-center justify-between gap-3 px-3 pb-3 pt-1">
+          <div className="flex flex-col">
+            <span className="text-[12px] text-gray-500">
+              Blendet im Fachobjekt einen Button zum Löschen ein.
+            </span>
+          </div>
+          <Switch
+            checked={dangerousDeleteMode}
+            onChange={(checked) =>
+              dispatch(setDangerousDeleteMode(checked))
+            }
+            style={{ transform: "scale(1.2)", transformOrigin: "right center" }}
+          />
         </div>
       </div>
       <VersionInfo version={getApplicationVersion(versionData)} />

@@ -17,6 +17,12 @@ import BodenfeuchteStory, {
 import BaudenkmaleStory, {
   SecondaryInfo as Baudenkmale,
 } from "./_baudenkmale-sim.stories";
+import UvmSensorenStory, {
+  SecondaryInfo as UvmSensoren,
+} from "./_uvm-sensoren-sim.stories";
+import FahrradzaehlerStory, {
+  SecondaryInfo as Fahrradzaehler,
+} from "./_fahrradzaehler-sim.stories";
 import SIMComponentDictionary from ".";
 import { PI_VALUES } from "@carma-commons/math";
 
@@ -78,3 +84,9 @@ export { Bodenfeuchte };
 
 Baudenkmale.argTypes = BaudenkmaleStory.argTypes;
 export { Baudenkmale };
+
+UvmSensoren.argTypes = UvmSensorenStory.argTypes;
+export { UvmSensoren };
+
+Fahrradzaehler.argTypes = FahrradzaehlerStory.argTypes;
+export { Fahrradzaehler };

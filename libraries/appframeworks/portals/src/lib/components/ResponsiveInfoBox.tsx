@@ -1,7 +1,10 @@
 import CollapsibleWell from "react-cismap/commons/CollapsibleWell";
 import CollapsibleABWell from "react-cismap/commons/CollapsibleABWell";
 import { useContext, useEffect, useState } from "react";
-import { Control } from "@carma-mapping/map-controls-layout";
+import {
+  Control,
+  DEFAULT_CONTROL_STYLE_OPTIONS,
+} from "@carma-mapping/map-controls-layout";
 // @ts-ignore
 import { ResponsiveTopicMapDispatchContext } from "react-cismap/contexts/ResponsiveTopicMapContextProvider";
 
@@ -15,6 +18,8 @@ interface ResponsiveInfoBoxProps {
   panelClick: (event: React.MouseEvent) => void;
   pixelwidth: number;
   header: React.ReactNode;
+  headerBackgroundColor?: string;
+  headerStyle?: React.CSSProperties;
   collapsedInfoBox?: boolean;
   setCollapsedInfoBox?: (value: boolean) => void;
   isCollapsible?: boolean;
@@ -31,12 +36,16 @@ interface ResponsiveInfoBoxProps {
   mode?: string;
   mapWidth?: number | null;
   infoBoxBottomMargin?: number;
+  controlOrder?: number;
+  infoBoxDataAttributes?: Record<string, string>;
 }
 
 export const ResponsiveInfoBox = ({
   panelClick,
   pixelwidth,
   header,
+  headerBackgroundColor,
+  headerStyle,
   collapsedInfoBox,
   setCollapsedInfoBox,
   isCollapsible = true,
@@ -53,12 +62,37 @@ export const ResponsiveInfoBox = ({
   mode = MODES.DEFAULT,
   mapWidth,
   infoBoxBottomMargin = 0,
+  controlOrder = 11,
+  infoBoxDataAttributes,
 }: ResponsiveInfoBoxProps) => {
   const [collapsed, setCollapsed] = useState(false);
   const mapAppWidth = mapWidth ? mapWidth : window.innerWidth;
 
   const { setInfoBoxPixelWidth } =
     useContext(ResponsiveTopicMapDispatchContext) || defaultContextValues;
+  const {
+    contentInsetLeft,
+    defaultFontFamily,
+    defaultFontSize,
+    headerInsetOffset,
+  } = DEFAULT_CONTROL_STYLE_OPTIONS.layout;
+  const headerInsetLeft = `calc(${contentInsetLeft} + ${headerInsetOffset})`;
+  const renderedHeader = headerBackgroundColor ? (
+    <div
+      style={{
+        backgroundColor: headerBackgroundColor,
+        boxSizing: "border-box",
+        color: "white",
+        paddingLeft: headerInsetLeft,
+        width: "100%",
+        ...headerStyle,
+      }}
+    >
+      {header}
+    </div>
+  ) : (
+    header
+  );
 
   // For BIG_MOBILE_ICONS mode, use the external collapsed state or internal state
   const actualCollapsed =
@@ -95,18 +129,19 @@ export const ResponsiveInfoBox = ({
 
   return (
     <div>
-      <Control position="bottomright" order={11}>
+      <Control position="bottomright" order={controlOrder}>
         <div
+          {...infoBoxDataAttributes}
           data-test-id="info-box"
           style={{
             ...infoBoxStyle,
             marginBottom: infoBoxBottomMargin,
-            fontFamily: "Helvetica Neue, Arial, Helvetica, sans-serif",
-            fontSize: "0.75rem",
+            fontFamily: defaultFontFamily,
+            fontSize: defaultFontSize,
             pointerEvents: "auto",
           }}
         >
-          {header}
+          {renderedHeader}
           {mode === MODES.DEFAULT && (
             <CollapsibleWell
               collapsed={collapsed}
@@ -114,7 +149,7 @@ export const ResponsiveInfoBox = ({
               style={{
                 pointerEvents: "auto",
                 padding: 0,
-                paddingLeft: 9,
+                paddingLeft: contentInsetLeft,
                 ...collapsibleStyle,
               }}
               debugBorder={0}
@@ -135,7 +170,7 @@ export const ResponsiveInfoBox = ({
               style={{
                 pointerEvents: "auto",
                 padding: 0,
-                paddingLeft: 9,
+                paddingLeft: contentInsetLeft,
                 ...collapsibleStyle,
               }}
               debugBorder={0}
@@ -162,7 +197,7 @@ export const ResponsiveInfoBox = ({
               style={{
                 pointerEvents: "auto",
                 padding: 0,
-                paddingLeft: 9,
+                paddingLeft: contentInsetLeft,
                 ...collapsibleStyle,
               }}
               debugBorder={0}
@@ -181,7 +216,7 @@ export const ResponsiveInfoBox = ({
       {secondaryInfoBoxElements.map((element, index) => (
         <Control
           position="bottomright"
-          order={10 - index}
+          order={controlOrder - 1 - index}
           key={"secondaryElement_" + index}
         >
           <div

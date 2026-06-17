@@ -50,19 +50,22 @@ export const getSupportRadius2d = (points: Point2[]): number => {
   return maxProjectedRadius;
 };
 
+const normalizePointComponent2d = (value: number): number =>
+  Object.is(value, -0) ? 0 : value;
+
 export const addPoint2d = (left: Point2, right: Point2): Point2 => ({
-  x: left.x + right.x,
-  y: left.y + right.y,
+  x: normalizePointComponent2d(left.x + right.x),
+  y: normalizePointComponent2d(left.y + right.y),
 });
 
 export const subtractPoint2d = (left: Point2, right: Point2): Point2 => ({
-  x: left.x - right.x,
-  y: left.y - right.y,
+  x: normalizePointComponent2d(left.x - right.x),
+  y: normalizePointComponent2d(left.y - right.y),
 });
 
 export const scalePoint2d = (point: Point2, scalar: number): Point2 => ({
-  x: point.x * scalar,
-  y: point.y * scalar,
+  x: normalizePointComponent2d(point.x * scalar),
+  y: normalizePointComponent2d(point.y * scalar),
 });
 
 export const dotPoint2d = (left: Point2, right: Point2): number =>
@@ -75,8 +78,8 @@ export const getMidpoint2d = (left: Point2, right: Point2): Point2 =>
   scalePoint2d(addPoint2d(left, right), 0.5);
 
 export const getLeftPerpendicular2d = (point: Point2): Point2 => ({
-  x: -point.y,
-  y: point.x,
+  x: normalizePointComponent2d(-point.y),
+  y: normalizePointComponent2d(point.x),
 });
 
 export const getSegmentFrame2d = ({
@@ -163,6 +166,167 @@ const normalizeConvexPolygonWinding = (
 
 const cross2d = (left: Point2, right: Point2): number =>
   left.x * right.y - left.y * right.x;
+
+const getOrientation2d = (a: Point2, b: Point2, c: Point2): number =>
+  cross2d(subtractPoint2d(b, a), subtractPoint2d(c, a));
+
+const getRangeOverlapLength = (
+  firstStart: number,
+  firstEnd: number,
+  secondStart: number,
+  secondEnd: number
+): number =>
+  Math.min(Math.max(firstStart, firstEnd), Math.max(secondStart, secondEnd)) -
+  Math.max(Math.min(firstStart, firstEnd), Math.min(secondStart, secondEnd));
+
+const doCollinearSegmentsOverlap2d = (
+  a: Point2,
+  b: Point2,
+  c: Point2,
+  d: Point2,
+  abC: number,
+  abD: number,
+  epsilon: number
+): boolean => {
+  if (Math.abs(abC) > epsilon || Math.abs(abD) > epsilon) {
+    return false;
+  }
+
+  const overlapLengths = [
+    ...(Math.abs(a.x - b.x) > epsilon
+      ? [getRangeOverlapLength(a.x, b.x, c.x, d.x)]
+      : []),
+    ...(Math.abs(a.y - b.y) > epsilon
+      ? [getRangeOverlapLength(a.y, b.y, c.y, d.y)]
+      : []),
+  ];
+  return (
+    overlapLengths.length > 0 &&
+    overlapLengths.every((overlapLength) => overlapLength > epsilon)
+  );
+};
+
+const doSegmentsIntersect2d = (
+  a: Point2,
+  b: Point2,
+  c: Point2,
+  d: Point2,
+  epsilon: number
+): boolean => {
+  const abC = getOrientation2d(a, b, c);
+  const abD = getOrientation2d(a, b, d);
+  const cdA = getOrientation2d(c, d, a);
+  const cdB = getOrientation2d(c, d, b);
+
+  if (
+    ((abC > epsilon && abD < -epsilon) ||
+      (abC < -epsilon && abD > epsilon)) &&
+    ((cdA > epsilon && cdB < -epsilon) ||
+      (cdA < -epsilon && cdB > epsilon))
+  ) {
+    return true;
+  }
+
+  return doCollinearSegmentsOverlap2d(a, b, c, d, abC, abD, epsilon);
+};
+
+const arePolygonEdgesAdjacent = (
+  firstEdgeIndex: number,
+  secondEdgeIndex: number,
+  vertexCount: number
+): boolean =>
+  Math.abs(firstEdgeIndex - secondEdgeIndex) === 1 ||
+  (firstEdgeIndex === 0 && secondEdgeIndex === vertexCount - 1);
+
+export const hasPolygonSelfIntersection2d = ({
+  points,
+  epsilon = 1e-7,
+}: {
+  points: readonly Point2[];
+  epsilon?: number;
+}): boolean => {
+  if (points.length < 3) {
+    return false;
+  }
+
+  for (
+    let firstEdgeIndex = 0;
+    firstEdgeIndex < points.length;
+    firstEdgeIndex += 1
+  ) {
+    const firstStart = points[firstEdgeIndex]!;
+    const firstEnd = points[(firstEdgeIndex + 1) % points.length]!;
+
+    for (
+      let secondEdgeIndex = firstEdgeIndex + 1;
+      secondEdgeIndex < points.length;
+      secondEdgeIndex += 1
+    ) {
+      if (
+        arePolygonEdgesAdjacent(firstEdgeIndex, secondEdgeIndex, points.length)
+      ) {
+        continue;
+      }
+
+      if (
+        doSegmentsIntersect2d(
+          firstStart,
+          firstEnd,
+          points[secondEdgeIndex]!,
+          points[(secondEdgeIndex + 1) % points.length]!,
+          epsilon
+        )
+      ) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+};
+
+export const hasPolylineRetracedSegment2d = ({
+  points,
+  epsilon = 1e-7,
+}: {
+  points: readonly Point2[];
+  epsilon?: number;
+}): boolean => {
+  if (points.length < 3) {
+    return false;
+  }
+
+  for (
+    let firstEdgeIndex = 0;
+    firstEdgeIndex < points.length - 1;
+    firstEdgeIndex += 1
+  ) {
+    const firstStart = points[firstEdgeIndex]!;
+    const firstEnd = points[firstEdgeIndex + 1]!;
+
+    for (
+      let secondEdgeIndex = firstEdgeIndex + 1;
+      secondEdgeIndex < points.length - 1;
+      secondEdgeIndex += 1
+    ) {
+      if (
+        doCollinearSegmentsOverlap2d(
+          firstStart,
+          firstEnd,
+          points[secondEdgeIndex]!,
+          points[secondEdgeIndex + 1]!,
+          getOrientation2d(firstStart, firstEnd, points[secondEdgeIndex]!),
+          getOrientation2d(firstStart, firstEnd, points[secondEdgeIndex + 1]!),
+          epsilon
+        )
+      ) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+};
 
 const isPointInsideDirectedEdge = (
   point: Point2,

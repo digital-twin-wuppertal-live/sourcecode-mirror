@@ -9,9 +9,17 @@ interface UseBrandnewFcSyncOptions {
   /** Base data URL; the hook polls `${dataUrl}.md5` and reloads the FC when the digest changes. */
   dataUrl: string;
   intervalMs: number;
+  /** Monotonic counter bumped by the host on every successful save (the app's
+   * `featureDataVersion`). Each change triggers an immediate poll plus a short
+   * burst of fast (1s) polls, so the user's own freshly-saved brandnew feature
+   * shows up quickly; afterwards the loop returns to the normal `intervalMs`. */
+  syncVersion?: number;
   /** Notified with the new feature count on every transition (baseline,
    * md5 change, missing → 0, reappear). */
   onCountChange?: (count: number) => void;
+  /** Notified with the FC the hook just pushed to the map. Lets sibling
+   * surfaces (e.g. the mini-map) mirror the same data without polling again. */
+  onDataChange?: (fc: GeoJSON.FeatureCollection) => void;
 }
 
 const LOG_PREFIX = "[BRAND-NEW-SYNC]";
@@ -21,19 +29,43 @@ const EMPTY_FC: GeoJSON.FeatureCollection = {
   features: [],
 };
 
+// While a save-triggered burst is active the loop polls every second instead
+// of `intervalMs` (capped at `intervalMs` so localhost's cadence is never
+// slowed down).
+const BURST_INTERVAL_MS = 1000;
+// How long the fast burst lasts after a save before falling back to the
+// normal cadence — long enough to outlast the server-side regeneration of
+// brand.new.features.json.
+const BURST_DURATION_MS = 15000;
+
 export const useBrandnewFcSync = ({
   map,
   enabled,
   source,
   dataUrl,
   intervalMs,
+  syncVersion,
   onCountChange,
+  onDataChange,
 }: UseBrandnewFcSyncOptions): void => {
   const onCountChangeRef = useRef(onCountChange);
   onCountChangeRef.current = onCountChange;
+  const onDataChangeRef = useRef(onDataChange);
+  onDataChangeRef.current = onDataChange;
+  // Tracks the syncVersion the running poll loop was started for, so the
+  // effect can tell a save-triggered restart from an unrelated one.
+  const prevSyncVersionRef = useRef(syncVersion);
 
   useEffect(() => {
     if (!map || !enabled) return;
+
+    // A change in syncVersion (bumped by the host on every successful save)
+    // means the user just saved something. Run a short burst of fast (1s)
+    // polls so their own brandnew feature appears quickly; unrelated restarts
+    // keep the normal interval.
+    const isSaveTrigger = syncVersion !== prevSyncVersionRef.current;
+    prevSyncVersionRef.current = syncVersion;
+    const burstUntil = isSaveTrigger ? Date.now() + BURST_DURATION_MS : 0;
 
     let stopped = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
@@ -62,10 +94,12 @@ export const useBrandnewFcSync = ({
       fcMissing = true;
       lastMd5 = null;
       reportCount(0);
+      onDataChangeRef.current?.(EMPTY_FC);
     };
 
     const tick = async () => {
       if (stopped) return;
+      let sourceNotReady = false;
       try {
         const md5Res = await fetch(`${dataUrl}.md5`, { cache: "no-store" });
         if (!md5Res.ok) {
@@ -104,6 +138,7 @@ export const useBrandnewFcSync = ({
         const count = fc.features?.length ?? 0;
         const src = getSource();
         if (!src || typeof src.setData !== "function") {
+          sourceNotReady = true;
           console.warn(
             LOG_PREFIX,
             "source not yet registered on map; will retry:",
@@ -111,9 +146,24 @@ export const useBrandnewFcSync = ({
           );
           return;
         }
+        // The server's brandnew FC still ships soft-deleted rows flagged with
+        // `is_deleted: true`. They must never be rendered: a deleted feature
+        // drawn on top of (or next to) its live counterpart produces an
+        // overlapping ghost that steals clicks and corrupts selection. Strip
+        // them here so the map source only ever receives live features —
+        // regardless of which writer (this hook, or the BelisMapWrapper
+        // re-merge effect) last set the data. The full, unfiltered `fc` is
+        // still passed to `onDataChange` below, so downstream consumers that
+        // need to see deletions (stale-id pruning, counts) keep working.
+        const visibleFc: GeoJSON.FeatureCollection = {
+          ...fc,
+          features: (fc.features ?? []).filter(
+            (f) => f.properties?.is_deleted !== true
+          ),
+        };
         const wasBaseline = lastMd5 === null && !fcMissing;
         const wasMissing = fcMissing;
-        src.setData(fc);
+        src.setData(visibleFc);
         lastMd5 = md5;
         fcMissing = false;
         if (wasBaseline) {
@@ -124,12 +174,19 @@ export const useBrandnewFcSync = ({
           console.log(LOG_PREFIX, "md5 changed, loaded FC", { md5, count });
         }
         reportCount(count);
+        onDataChangeRef.current?.(fc);
       } catch (err) {
         // Network error (offline, DNS, etc.) — keep current data; only an
         // explicit non-ok response clears the layer.
         console.warn(LOG_PREFIX, "tick failed:", (err as Error).message);
       } finally {
-        if (!stopped) timer = setTimeout(tick, intervalMs);
+        if (!stopped) {
+          const nextDelay =
+            sourceNotReady || Date.now() < burstUntil
+              ? Math.min(BURST_INTERVAL_MS, intervalMs)
+              : intervalMs;
+          timer = setTimeout(tick, nextDelay);
+        }
       }
     };
 
@@ -139,5 +196,5 @@ export const useBrandnewFcSync = ({
       stopped = true;
       if (timer !== null) clearTimeout(timer);
     };
-  }, [map, enabled, source, dataUrl, intervalMs]);
+  }, [map, enabled, source, dataUrl, intervalMs, syncVersion]);
 };

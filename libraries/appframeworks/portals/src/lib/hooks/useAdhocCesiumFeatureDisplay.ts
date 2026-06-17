@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   BoundingSphere,
+  Cartesian3,
+  ClippingPolygon,
+  ClippingPolygonCollection,
   Color,
   Model,
   ScreenSpaceEventHandler,
@@ -17,31 +20,58 @@ import {
 } from "@carma-mapping/engines/cesium/core";
 
 import { type Easing as EasingFunction } from "@carma-commons/math";
-import type { ModelConfig } from "@carma-mapping/engines/cesium/core";
+import type {
+  CesiumModelStyleConfig,
+  ModelConfig,
+} from "@carma-mapping/engines/cesium/core";
 import type { FeatureInfo } from "@carma-mapping/utils";
 import {
   createExtrudedWallVisualizer,
   createGroundPolygonVisualizer,
   createGroundPolylineVisualizer,
-  useCesiumModelManager,
+  isValidTileset,
   type ExtrudedWallVisualizer,
   type GroundPolygonVisualizer,
   type GroundPolylineVisualizer,
 } from "@carma-mapping/engines/cesium/legacy";
+import {
+  modelShader,
+  type ModelShaderSamplingOptions,
+  type ModelShaderSelectionOptions,
+  useCesiumModelShader,
+  useCesiumModelManager,
+} from "@carma-mapping/engines/cesium/react/primitives";
 import type { Feature, FeatureCollection } from "geojson";
 import { extractRingsFromGeoJson } from "@carma-geo/utils";
 
 import {
   useAdhocFeatureDisplay,
   type AdhocFeature,
+  type AdhocFeatureCollectionMetadata,
   type SelectedAdhocFeature,
 } from "../components/AdhocFeatureDisplayProvider";
-import { DEFAULT_ADHOC_FEATURE_LAYER_ID } from "../constants/adhoc";
+import {
+  ADHOC_LAYER_SOURCES,
+  DEFAULT_ADHOC_FEATURE_LAYER_ID,
+} from "../constants/adhoc";
 import {
   buildAdhocFeatureInfo,
   getAdhocAccentColor,
+  getCarmaConf3D,
   getGeoJsonFromFeature,
 } from "../utils/adhoc-feature-utils";
+import {
+  DEFAULT_ADHOC_UNSELECTED_RENDER_STYLE,
+  DEFAULT_ADHOC_UNSELECTED_RENDER_TINT_MIX,
+  resolveAdhocUnselectedRenderStyle,
+  resolveAdhocUnselectedRenderTintColor,
+  resolveAdhocUnselectedRenderTintMix,
+  type AdhocUnselectedRenderStyle,
+} from "../utils/adhoc-render-style";
+import {
+  getCarmaConf3DClippingPolygonRing,
+  type CarmaConf3DClippingPolygonRing,
+} from "../utils/carma-conf3d-clipping";
 import {
   areEqualStringSets,
   buildAdhocFeatureInfoForSelection,
@@ -57,6 +87,14 @@ import {
   toGeoJsonFeatureId,
   toSelectionIdSet,
 } from "../utils/adhoc-cesium-feature-display-utils";
+
+export type AdhocCesiumModelShaderOptions = {
+  sampling?: Omit<ModelShaderSamplingOptions, "getScene">;
+  selection?: Omit<
+    ModelShaderSelectionOptions,
+    "enabled" | "getPrimitiveBySelectionId" | "selected"
+  >;
+};
 
 export type UseAdhocCesiumFeatureDisplayOptions = {
   isCesiumEnabled: boolean;
@@ -74,6 +112,11 @@ export type UseAdhocCesiumFeatureDisplayOptions = {
     easing?: EasingFunction;
   };
   selectionLineWidthPixels?: number;
+  selectionEnabled?: boolean;
+  deselectOnEmptyClick?: boolean;
+  deselectOnNonModelClick?: boolean;
+  modelHighlightStyle?: CesiumModelStyleConfig;
+  modelShader?: AdhocCesiumModelShaderOptions;
   onFeatureInfoChange?: (feature: FeatureInfo | null) => void;
 };
 
@@ -84,14 +127,27 @@ export type UseAdhocCesiumFeatureDisplayResult = {
 
 type AdhocFeatureEntry = {
   feature: AdhocFeature;
+  collectionMetadata?: AdhocFeatureCollectionMetadata;
   id: string;
   collectionId: string;
   layerId: string;
   key: string;
 };
 
+const is2dMeasurementAdhocFeature = (feature: AdhocFeature): boolean =>
+  (feature.data as { source?: unknown }).source ===
+  ADHOC_LAYER_SOURCES.TWO_D_MEASUREMENTS;
+
+const isRuntimeAnnotationAdhocFeature = (feature: AdhocFeature): boolean =>
+  (feature.data as { source?: unknown }).source ===
+  ADHOC_LAYER_SOURCES.ANNOTATIONS;
+
 type VisualizerType = "ground-polygon" | "ground-polyline" | "extruded-wall";
 type ElementType = "polygon" | "polyline" | "wall" | "model";
+type TilesetClippingPolygon = {
+  coordinates: CarmaConf3DClippingPolygonRing;
+  inverse: boolean;
+};
 
 const FEATURE_KEY_SEPARATOR = "::";
 
@@ -160,6 +216,180 @@ const withPrimitiveMetadata = (
   };
 };
 
+const getTilesetClippingPolygon = (
+  feature: AdhocFeature
+): TilesetClippingPolygon | null => {
+  const modelVisible = (
+    feature.metadata as { modelVisible?: unknown } | undefined
+  )?.modelVisible;
+  if (modelVisible === false) {
+    return null;
+  }
+
+  const carmaConf3D = getCarmaConf3D(feature);
+  const clippingPolygon = carmaConf3D?.clippingPolygon;
+  if (!clippingPolygon) {
+    return null;
+  }
+
+  if (clippingPolygon.enabled === false) {
+    return null;
+  }
+
+  const ring = getCarmaConf3DClippingPolygonRing(clippingPolygon);
+  if (!ring) {
+    return null;
+  }
+
+  return {
+    coordinates: ring,
+    inverse: clippingPolygon.inverse ?? true,
+  };
+};
+
+type AdhocUnselectedRenderStyleConfig = {
+  modelPresentationSignature: string;
+  modelShaderSignature: string;
+  outlineColor?: Color;
+  outlineWidthPx?: number;
+  style: AdhocUnselectedRenderStyle;
+  tintColor: Color;
+  tintMix: number;
+  signature: string;
+};
+
+const getModelStyleFillColor = (
+  style: CesiumModelStyleConfig | undefined
+): string | undefined => style?.fill?.color;
+
+const getModelStyleOutlineColor = (
+  style: CesiumModelStyleConfig | undefined
+): string | undefined =>
+  style?.type === "silhouette" ? style.outline?.color : undefined;
+
+const getModelStyleOutlineWidthPx = (
+  style: CesiumModelStyleConfig | undefined
+): number | undefined =>
+  style?.type === "silhouette" ? style.outline?.widthPx : undefined;
+
+const getModelStyleOutlineOpacity = (
+  style: CesiumModelStyleConfig | undefined
+): number =>
+  style?.type === "silhouette" &&
+  typeof style.outline?.opacity === "number" &&
+  Number.isFinite(style.outline.opacity)
+    ? Math.min(1, Math.max(0, style.outline.opacity))
+    : 1;
+
+const getAdhocUnselectedRenderStyleConfig = (
+  feature: AdhocFeature,
+  modelHighlightStyle: CesiumModelStyleConfig | undefined
+): AdhocUnselectedRenderStyleConfig => {
+  const rawStyle = feature.metadata?.unselectedRenderStyle as unknown;
+  const style = resolveAdhocUnselectedRenderStyle(rawStyle);
+  const usesLegacyTintStyle =
+    rawStyle === "tint" ||
+    rawStyle === "flat-tint" ||
+    rawStyle === "monochrome-tint";
+  const defaultTintColorCss = resolveAdhocUnselectedRenderTintColor(
+    getModelStyleFillColor(modelHighlightStyle)
+  );
+  const defaultTintMix = getModelStyleFillColor(modelHighlightStyle)
+    ? 1
+    : DEFAULT_ADHOC_UNSELECTED_RENDER_TINT_MIX;
+  const tintColorCss = resolveAdhocUnselectedRenderTintColor(
+    feature.metadata?.unselectedRenderTintColor ?? defaultTintColorCss
+  );
+  const tintMix = resolveAdhocUnselectedRenderTintMix(
+    usesLegacyTintStyle
+      ? defaultTintMix
+      : feature.metadata?.unselectedRenderTintMix ?? defaultTintMix
+  );
+  const outlineColorCss = resolveAdhocUnselectedRenderTintColor(
+    getModelStyleOutlineColor(modelHighlightStyle)
+  );
+  const outlineWidthPx = getModelStyleOutlineWidthPx(modelHighlightStyle);
+  const outlineOpacity = getModelStyleOutlineOpacity(modelHighlightStyle);
+  const outlineColor = modelShader.createNonAccumulatingSilhouetteColor(
+    Color.fromCssColorString(outlineColorCss),
+    outlineOpacity
+  );
+  const hasOutline =
+    style !== DEFAULT_ADHOC_UNSELECTED_RENDER_STYLE &&
+    typeof outlineWidthPx === "number" &&
+    Number.isFinite(outlineWidthPx) &&
+    outlineWidthPx > 0;
+  const outlineSignature = hasOutline
+    ? `:${outlineColorCss.toLowerCase()}:${outlineOpacity.toFixed(
+        3
+      )}:${outlineWidthPx.toFixed(3)}`
+    : "";
+  return {
+    modelPresentationSignature:
+      style === DEFAULT_ADHOC_UNSELECTED_RENDER_STYLE
+        ? DEFAULT_ADHOC_UNSELECTED_RENDER_STYLE
+        : `${style}${outlineSignature}`,
+    modelShaderSignature: "integrated-highlight",
+    ...(hasOutline
+      ? {
+          outlineColor,
+          outlineWidthPx,
+        }
+      : {}),
+    style,
+    tintColor: Color.fromCssColorString(tintColorCss),
+    tintMix,
+    signature:
+      style === DEFAULT_ADHOC_UNSELECTED_RENDER_STYLE
+        ? DEFAULT_ADHOC_UNSELECTED_RENDER_STYLE
+        : `${style}:${tintColorCss.toLowerCase()}:${tintMix.toFixed(
+            3
+          )}${outlineSignature}`,
+  };
+};
+
+const toAdhocPrimitiveColor = (color: string | Color): Color =>
+  typeof color === "string" ? Color.fromCssColorString(color) : color;
+
+const mixAdhocPrimitiveColor = (
+  baseColor: string | Color,
+  tintColor: Color,
+  tintMix: number
+): Color => {
+  const normalizedBaseColor = toAdhocPrimitiveColor(baseColor);
+  return new Color(
+    normalizedBaseColor.red +
+      (tintColor.red - normalizedBaseColor.red) * tintMix,
+    normalizedBaseColor.green +
+      (tintColor.green - normalizedBaseColor.green) * tintMix,
+    normalizedBaseColor.blue +
+      (tintColor.blue - normalizedBaseColor.blue) * tintMix,
+    normalizedBaseColor.alpha
+  );
+};
+
+const resolveAdhocUnselectedPrimitiveColor = (
+  baseColor: string | Color,
+  renderStyle: AdhocUnselectedRenderStyleConfig
+): string | Color =>
+  renderStyle.style === DEFAULT_ADHOC_UNSELECTED_RENDER_STYLE
+    ? baseColor
+    : mixAdhocPrimitiveColor(
+        baseColor,
+        renderStyle.tintColor,
+        renderStyle.tintMix
+      );
+
+const resolveAdhocUnselectedPrimitiveOpacity = (
+  baseOpacity: number | undefined,
+  renderStyle: AdhocUnselectedRenderStyleConfig,
+  fallbackOpacity: number
+): number | undefined =>
+  renderStyle.style === DEFAULT_ADHOC_UNSELECTED_RENDER_STYLE ||
+  typeof baseOpacity === "number"
+    ? baseOpacity
+    : fallbackOpacity;
+
 export const useAdhocCesiumFeatureDisplay = (
   options: UseAdhocCesiumFeatureDisplayOptions
 ): UseAdhocCesiumFeatureDisplayResult => {
@@ -173,12 +403,18 @@ export const useAdhocCesiumFeatureDisplay = (
     wallOpacity,
     wallOpacityAnimation,
     selectionLineWidthPixels,
+    selectionEnabled = true,
+    deselectOnEmptyClick = true,
+    deselectOnNonModelClick = true,
+    modelHighlightStyle,
+    modelShader: modelShaderOptions,
     onFeatureInfoChange,
   } = options;
 
   const {
     featureCollections,
     selectedFeature: selectedAdhocFeature,
+    selectedFeatureFlashRequest,
     setSelectedFeatureById,
     clearSelectedFeature,
     shouldFocusSelected,
@@ -190,9 +426,17 @@ export const useAdhocCesiumFeatureDisplay = (
     () =>
       featureCollections.flatMap((collection) =>
         collection.features
-          .filter((feature) => feature.metadata?.shouldRemove !== true)
+          .filter(
+            (feature) =>
+              feature.metadata?.shouldRemove !== true &&
+              !isRuntimeAnnotationAdhocFeature(feature) &&
+              !is2dMeasurementAdhocFeature(feature)
+          )
           .map((feature) => ({
             feature,
+            ...(collection.metadata
+              ? { collectionMetadata: collection.metadata }
+              : {}),
             id: feature.id,
             collectionId: collection.id,
             layerId: feature.layerId ?? DEFAULT_ADHOC_FEATURE_LAYER_ID,
@@ -204,6 +448,14 @@ export const useAdhocCesiumFeatureDisplay = (
           }))
       ),
     [featureCollections]
+  );
+  const tilesetClippingPolygons = useMemo<TilesetClippingPolygon[]>(
+    () =>
+      adhocFeatureEntries.flatMap((entry) => {
+        const clippingPolygon = getTilesetClippingPolygon(entry.feature);
+        return clippingPolygon ? [clippingPolygon] : [];
+      }),
+    [adhocFeatureEntries]
   );
 
   const adhocFeatureByKey = useMemo(
@@ -276,6 +528,17 @@ export const useAdhocCesiumFeatureDisplay = (
         ?.get(selectedAdhocFeature.id) ?? null
     );
   }, [geoJsonSelectionLookup, selectedAdhocFeature, selectedFeatureKey]);
+  const selectedFeatureFlashKey = useMemo(
+    () =>
+      selectedFeatureFlashRequest
+        ? toAdhocFeatureKey(selectedFeatureFlashRequest)
+        : null,
+    [
+      selectedFeatureFlashRequest?.collectionId,
+      selectedFeatureFlashRequest?.id,
+      selectedFeatureFlashRequest?.layerId,
+    ]
+  );
 
   const resolveAdhocFeatureEntryByFeatureId = useCallback(
     (featureId: string): AdhocFeatureEntry | null => {
@@ -354,6 +617,7 @@ export const useAdhocCesiumFeatureDisplay = (
     featureKey: string;
     selectionId: string;
     primitiveId: string;
+    renderStyleSignature: string;
     visualizerType: VisualizerType;
     elementType: ElementType;
     visualizer:
@@ -413,6 +677,13 @@ export const useAdhocCesiumFeatureDisplay = (
     },
     []
   );
+
+  const requestCesiumRender = useCallback(() => {
+    const scene = getScene();
+    if (scene && !scene.isDestroyed()) {
+      scene.requestRender();
+    }
+  }, [getScene]);
 
   const onModelAddedToScene = useCallback(
     (primitiveId: string, primitive: Model) => {
@@ -521,6 +792,19 @@ export const useAdhocCesiumFeatureDisplay = (
       if (!areEqualStringSets(expectedPrimitiveIds, registeredPrimitiveIds)) {
         return true;
       }
+
+      const expectedRenderStyleSignature = getAdhocUnselectedRenderStyleConfig(
+        entry.feature,
+        modelHighlightStyle
+      ).signature;
+      const hasRenderStyleMismatch = [...visualizersRef.current.values()].some(
+        (candidate) =>
+          candidate.featureKey === entry.key &&
+          candidate.renderStyleSignature !== expectedRenderStyleSignature
+      );
+      if (hasRenderStyleMismatch) {
+        return true;
+      }
     }
 
     return false;
@@ -528,17 +812,47 @@ export const useAdhocCesiumFeatureDisplay = (
     adhocFeatureEntries,
     geojsonFeatureKeys,
     isCesiumRenderingEnabled,
+    modelHighlightStyle,
     registeredFeatureKeys,
   ]);
 
   const needsSyncRef = useRef<boolean>(needsSync);
   needsSyncRef.current = needsSync;
 
+  const activeAdhocFeatureKeys = useMemo(
+    () => adhocFeatureEntries.map((entry) => entry.key),
+    [adhocFeatureEntries]
+  );
+  const { resolveHighlight: resolveModelHighlight } = useCesiumModelShader({
+    requestRender: requestCesiumRender,
+    sampling: {
+      ...modelShaderOptions?.sampling,
+      enabled:
+        isCesiumEnabled && Boolean(modelShaderOptions?.sampling?.enabled),
+      getScene,
+    },
+    highlight: {
+      activeKeys: activeAdhocFeatureKeys,
+      fade: modelShaderOptions?.selection?.fade,
+    },
+  });
+
   const adhocModelConfigs = useMemo(() => {
     return adhocFeatureEntries.flatMap((entry) => {
       const modelConfig = getModelConfig(entry.feature);
       if (!modelConfig) return [];
 
+      const renderStyle = getAdhocUnselectedRenderStyleConfig(
+        entry.feature,
+        modelHighlightStyle
+      );
+      const customShader = resolveModelHighlight({
+        color: renderStyle.tintColor,
+        highlighted:
+          renderStyle.style !== DEFAULT_ADHOC_UNSELECTED_RENDER_STYLE,
+        key: entry.key,
+        opacity: renderStyle.tintMix,
+      });
       const featureInfo = buildModelFeatureInfo(entry.feature);
       const baseProperties = featureInfo?.properties ?? {};
       const modelPropertiesWithoutId = {
@@ -563,13 +877,23 @@ export const useAdhocCesiumFeatureDisplay = (
             ...(modelConfig.scale !== undefined
               ? { scale: modelConfig.scale }
               : {}),
+            renderStylePresentationSignature:
+              renderStyle.modelPresentationSignature,
+            renderStyleShaderSignature: renderStyle.modelShaderSignature,
+            customShader,
+            ...(renderStyle.outlineColor
+              ? { renderStyleOutlineColor: renderStyle.outlineColor }
+              : {}),
+            ...(typeof renderStyle.outlineWidthPx === "number"
+              ? { renderStyleOutlineWidthPx: renderStyle.outlineWidthPx }
+              : {}),
           },
           properties: modelPropertiesWithoutId as FeatureInfo["properties"],
           name: entry.key,
         } satisfies ModelConfig,
       ];
     });
-  }, [adhocFeatureEntries]);
+  }, [adhocFeatureEntries, modelHighlightStyle, resolveModelHighlight]);
 
   const cesiumModelConfigs = useMemo(
     () => [...baseModels, ...adhocModelConfigs],
@@ -577,14 +901,91 @@ export const useAdhocCesiumFeatureDisplay = (
   );
 
   const hasCesiumModels = cesiumModelConfigs.length > 0;
+  useEffect(() => {
+    if (!isCesiumRenderingEnabled) {
+      return;
+    }
+
+    const scene = getScene();
+    if (!scene || scene.isDestroyed?.()) {
+      return;
+    }
+
+    const clippedTilesets: Array<{
+      clipping: ClippingPolygonCollection;
+      tileset: unknown;
+    }> = [];
+    const primitiveCount = scene.primitives.length;
+    for (let i = 0; i < primitiveCount; i += 1) {
+      const primitive = scene.primitives.get(i);
+      if (!isValidTileset(primitive)) {
+        continue;
+      }
+
+      if (tilesetClippingPolygons.length === 0) {
+        if (primitive.clippingPolygons) {
+          primitive.clippingPolygons.enabled = false;
+          primitive.clippingPolygons.removeAll?.();
+        }
+        continue;
+      }
+
+      const clipping = new ClippingPolygonCollection({
+        enabled: true,
+        inverse: tilesetClippingPolygons[0]?.inverse ?? true,
+        polygons: tilesetClippingPolygons.map(
+          (clippingPolygon) =>
+            new ClippingPolygon({
+              positions: clippingPolygon.coordinates.map(([lon, lat]) =>
+                Cartesian3.fromDegrees(lon, lat)
+              ),
+            })
+        ),
+      });
+      primitive.clippingPolygons = clipping;
+      clippedTilesets.push({ clipping, tileset: primitive });
+    }
+
+    scene.requestRender();
+
+    return () => {
+      clippedTilesets.forEach(({ clipping, tileset }) => {
+        if (!isValidTileset(tileset)) {
+          return;
+        }
+        clipping.removeAll?.();
+      });
+    };
+  }, [getScene, isCesiumRenderingEnabled, tilesetClippingPolygons]);
+
+  const isAdhocRenderStyleEditing = useMemo(
+    () =>
+      adhocFeatureEntries.some(
+        (entry) =>
+          entry.feature.metadata?.unselectedRenderStyleEditing === true ||
+          entry.collectionMetadata?.unselectedRenderStyleEditing === true
+      ),
+    [adhocFeatureEntries]
+  );
 
   const useCesiumModelOptions = useMemo(() => {
     return {
       models: cesiumModelConfigs,
       enabled: isCesiumRenderingEnabled && hasCesiumModels,
+      getScene,
       selection: {
-        enabled: isCesiumEnabled && hasCesiumModels,
-        deselectOnEmptyClick: true,
+        enabled:
+          isCesiumEnabled &&
+          hasCesiumModels &&
+          selectionEnabled &&
+          !isAdhocRenderStyleEditing,
+        deselectOnEmptyClick,
+        deselectOnNonModelClick,
+        shader: modelShaderOptions?.selection,
+        silhouettePickRadiusPx:
+          modelShaderOptions?.selection?.style?.edge?.widthPx,
+        selectedFlashKey: selectedFeatureFlashKey,
+        selectedFlashVersion: selectedFeatureFlashRequest?.version,
         selectedId: selectedFeatureKey,
         onModelAdded: onModelAddedToScene,
         onModelFirstRendered: (primitiveId: string, primitive: Model) => {
@@ -645,10 +1046,18 @@ export const useAdhocCesiumFeatureDisplay = (
     };
   }, [
     cesiumModelConfigs,
+    getScene,
     hasCesiumModels,
     isCesiumRenderingEnabled,
     isCesiumEnabled,
+    isAdhocRenderStyleEditing,
+    selectionEnabled,
+    deselectOnEmptyClick,
+    deselectOnNonModelClick,
+    modelShaderOptions?.selection,
     onFeatureInfoChange,
+    selectedFeatureFlashKey,
+    selectedFeatureFlashRequest?.version,
     selectedFeatureKey,
     clearSelectedFeature,
     onModelAddedToScene,
@@ -831,6 +1240,20 @@ export const useAdhocCesiumFeatureDisplay = (
 
       if (!areEqualStringSets(expectedSelectionIds, registeredSelectionIds)) {
         staleFeatureKeys.add(entry.key);
+        continue;
+      }
+
+      const expectedRenderStyleSignature = getAdhocUnselectedRenderStyleConfig(
+        entry.feature,
+        modelHighlightStyle
+      ).signature;
+      const hasRenderStyleMismatch = [...visualizersRef.current.values()].some(
+        (candidate) =>
+          candidate.featureKey === entry.key &&
+          candidate.renderStyleSignature !== expectedRenderStyleSignature
+      );
+      if (hasRenderStyleMismatch) {
+        staleFeatureKeys.add(entry.key);
       }
     }
 
@@ -880,7 +1303,7 @@ export const useAdhocCesiumFeatureDisplay = (
     let cancelled = false;
 
     const createVisualizers = async () => {
-      const newlyRegistered: string[] = [];
+      const processedFeatureKeys = new Set<string>();
 
       for (const entry of featuresToCreate) {
         if (cancelled) break;
@@ -961,7 +1384,10 @@ export const useAdhocCesiumFeatureDisplay = (
           featureKey,
           resolvedGeojson
         );
-        if (geoJsonFeatures.length === 0) continue;
+        if (geoJsonFeatures.length === 0) {
+          processedFeatureKeys.add(featureKey);
+          continue;
+        }
 
         const visualizersToCreate: Array<{
           key: string;
@@ -976,6 +1402,10 @@ export const useAdhocCesiumFeatureDisplay = (
         }> = [];
 
         const config = normalizeCarmaConf3D(feature);
+        const renderStyle = getAdhocUnselectedRenderStyleConfig(
+          feature,
+          modelHighlightStyle
+        );
 
         for (const geoJsonFeature of geoJsonFeatures) {
           const polygonRings = extractRingsFromGeoJson(geoJsonFeature.geojson, {
@@ -985,21 +1415,30 @@ export const useAdhocCesiumFeatureDisplay = (
             continue;
           }
 
-          if (config.groundPolygon) {
+          if (config.groundPolygon && polygonRings.length > 0) {
             const gpOptions =
               typeof config.groundPolygon === "object"
                 ? config.groundPolygon
                 : {};
+            const groundPolygonOpacity = resolveAdhocUnselectedPrimitiveOpacity(
+              typeof gpOptions.opacity === "number"
+                ? gpOptions.opacity
+                : undefined,
+              renderStyle,
+              0.35
+            );
             const groundPolygonVisualizer = createGroundPolygonVisualizer(
               geoJsonFeature.selectionId,
               geoJsonFeature.geojson,
               {
-                fillColor:
+                fillColor: resolveAdhocUnselectedPrimitiveColor(
                   gpOptions.fillColor ??
-                  getAdhocAccentColor(feature) ??
-                  "#3A7CEB",
-                ...(typeof gpOptions.opacity === "number"
-                  ? { opacity: gpOptions.opacity }
+                    getAdhocAccentColor(feature) ??
+                    "#3A7CEB",
+                  renderStyle
+                ),
+                ...(typeof groundPolygonOpacity === "number"
+                  ? { opacity: groundPolygonOpacity }
                   : {}),
               }
             );
@@ -1023,10 +1462,12 @@ export const useAdhocCesiumFeatureDisplay = (
               geoJsonFeature.selectionId,
               geoJsonFeature.geojson,
               {
-                lineColor:
+                lineColor: resolveAdhocUnselectedPrimitiveColor(
                   gpOptions.lineColor ??
-                  getAdhocAccentColor(feature) ??
-                  "#3A7CEB",
+                    getAdhocAccentColor(feature) ??
+                    "#3A7CEB",
+                  renderStyle
+                ),
                 opacity: gpOptions.opacity ?? wallOpacity?.default ?? 0.7,
                 lineWidth: gpOptions.lineWidth ?? 5,
               }
@@ -1050,7 +1491,10 @@ export const useAdhocCesiumFeatureDisplay = (
               geoJsonFeature.selectionId,
               geoJsonFeature.geojson,
               {
-                wallColor: getAdhocAccentColor(feature) ?? "#3A7CEB",
+                wallColor: resolveAdhocUnselectedPrimitiveColor(
+                  getAdhocAccentColor(feature) ?? "#3A7CEB",
+                  renderStyle
+                ),
                 opacity: wallOpacity?.default ?? 0.7,
                 selectedOpacity: wallOpacity?.selected ?? 0.4,
                 selectionLineWidth: selectionLineWidthPixels,
@@ -1077,6 +1521,10 @@ export const useAdhocCesiumFeatureDisplay = (
           visualizersToCreate.map((entry) => entry.primitiveId)
         );
         if (uniqueSelectionIds.size === 0) {
+          processedFeatureKeys.add(featureKey);
+          console.debug("[ADHOC|VIS] no Cesium visualizer for feature", {
+            featureKey,
+          });
           continue;
         }
         let attachedVisualizerCount = 0;
@@ -1097,6 +1545,7 @@ export const useAdhocCesiumFeatureDisplay = (
             featureKey,
             selectionId,
             primitiveId,
+            renderStyleSignature: renderStyle.signature,
             visualizerType,
             elementType,
             visualizer,
@@ -1104,7 +1553,6 @@ export const useAdhocCesiumFeatureDisplay = (
 
           try {
             await visualizer.attach(scene, () => scene.requestRender());
-            newlyRegistered.push(featureKey);
             attachedVisualizerCount += 1;
           } catch {
             // Visualizer failed to attach, remove from map
@@ -1131,6 +1579,7 @@ export const useAdhocCesiumFeatureDisplay = (
           failed: failedVisualizerCount,
           uniqueSelections: uniqueSelectionIds.size,
         });
+        processedFeatureKeys.add(featureKey);
 
         // Set initial selection state and potentially fly to
         const firstSelectionId = [...uniqueSelectionIds][0] ?? null;
@@ -1243,8 +1692,9 @@ export const useAdhocCesiumFeatureDisplay = (
               next.delete(featureKey);
             }
           }
-          // Add newly registered IDs
-          for (const featureKey of newlyRegistered) {
+          // Add processed IDs. A malformed or non-renderable adhoc import must
+          // not keep the 2D->3D transition waiting for the staging timeout.
+          for (const featureKey of processedFeatureKeys) {
             next.add(featureKey);
           }
           return next;
@@ -1265,6 +1715,7 @@ export const useAdhocCesiumFeatureDisplay = (
     geojsonFeatureKeys,
     getScene,
     getTerrainProvider,
+    modelHighlightStyle,
     needsSync,
     registeredFeatureKeys,
     elevationSampling,
@@ -1641,6 +2092,13 @@ export const useAdhocCesiumFeatureDisplay = (
   useEffect(() => {
     if (!isCesiumEnabled) return;
 
+    if (!selectionEnabled) {
+      setShouldFocusSelected(false);
+      clearSelectedFeature();
+      onFeatureInfoChange?.(null);
+      return;
+    }
+
     let disposed = false;
     let retryTimeout: ReturnType<typeof setTimeout> | null = null;
     let handler: ScreenSpaceEventHandler | null = null;
@@ -1657,6 +2115,7 @@ export const useAdhocCesiumFeatureDisplay = (
       handler = new ScreenSpaceEventHandler(scene.canvas);
       handler.setInputAction((event: { position: Cartesian2 }) => {
         const picked = scene.pick(event.position);
+        const hasPick = picked != null;
         const pickedId = picked?.id;
         const pickedPrimitiveId =
           typeof pickedId === "string"
@@ -1747,7 +2206,7 @@ export const useAdhocCesiumFeatureDisplay = (
           }
         }
 
-        // No visualizer picked - deselect if not a model pick
+        // No visualizer picked - apply model/empty-click selection policy.
         const isModelPickId =
           (pickedId as { is3dModel?: boolean } | undefined)?.is3dModel === true;
         const isModelPickPrimitive =
@@ -1759,6 +2218,16 @@ export const useAdhocCesiumFeatureDisplay = (
             ? resolveAdhocFeatureEntryFromPrimitiveId(pickedPrimitiveId)
             : null;
           if (!modelEntry) {
+            if (deselectOnEmptyClick && deselectOnNonModelClick) {
+              if (selectedFeatureKey) {
+                selectedPrimitiveIdByFeatureRef.current.delete(
+                  selectedFeatureKey
+                );
+              }
+              setShouldFocusSelected(false);
+              clearSelectedFeature();
+              onFeatureInfoChange?.(null);
+            }
             return;
           }
           setShouldFocusSelected(false);
@@ -1778,7 +2247,7 @@ export const useAdhocCesiumFeatureDisplay = (
           onFeatureInfoChange?.(info);
           return;
         }
-        if (!isModelPick) {
+        if (deselectOnEmptyClick && (!hasPick || deselectOnNonModelClick)) {
           if (selectedFeatureKey) {
             selectedPrimitiveIdByFeatureRef.current.delete(selectedFeatureKey);
           }
@@ -1802,6 +2271,9 @@ export const useAdhocCesiumFeatureDisplay = (
     adhocFeatureByKey,
     getScene,
     isCesiumEnabled,
+    selectionEnabled,
+    deselectOnEmptyClick,
+    deselectOnNonModelClick,
     onFeatureInfoChange,
     selectedFeatureKey,
     clearSelectedFeature,

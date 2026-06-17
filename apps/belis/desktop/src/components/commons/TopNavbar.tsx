@@ -6,13 +6,15 @@ import {
   CaretDownFilled,
 } from "@ant-design/icons";
 import type { MenuProps } from "antd";
-import { storeJWT, storeLogin } from "../../store/slices/auth";
-import { getJWT } from "../../store/slices/auth";
+import { storeJWT, storeLogin, storePermissions } from "../../store/slices/auth";
+import { getJWT, getIsReadOnly } from "../../store/slices/auth";
 import { useDispatch, useSelector } from "react-redux";
 import { NavLink, useNavigate } from "react-router-dom";
 import SettingsUi from "../ui/SettingsUi";
 import SyncMenuModal from "../ui/SyncMenuModal";
 import { useMapHighlight } from "@carma-mapping/engines/maplibre";
+import { getApplicationVersion } from "@carma-commons/utils";
+import versionData from "../../version.json";
 import { useMapPage } from "../../contexts/MapPageContext";
 import CreateAAModal from "../ui/CreateAAModal";
 import {
@@ -40,12 +42,19 @@ const TopNavbar = () => {
   const highlightCount = activeHighlights?.length ?? 0;
 
   const jwt = useSelector(getJWT) as string | null;
+  const isReadOnly = useSelector(getIsReadOnly) as boolean;
   const selectedAAId = useSelector(getSelectedAAId) as number | null;
   const selectedAAData = useSelector(getSelectedAAData) as Record<
     string,
     unknown
   > | null;
   const draftMode = useSelector(getDraftMode) as boolean;
+
+  // Show the dev marker whenever this is not a live build (stamped with
+  // `triggered: "live"` in version.json — the same signal getApplicationVersion
+  // uses). Everything else (local dev, dev/PR builds) counts as dev.
+  const isLiveVersion =
+    (versionData as { triggered?: string | null }).triggered === "live";
 
   const isOnAAPage = config.sidebarVariant === "arbeitsauftraege";
   const canAddToExistingAA =
@@ -113,7 +122,12 @@ const TopNavbar = () => {
     : "";
 
   return (
-    <div className="flex items-center mx-3 mb-4 mt-2">
+    <div className="relative flex items-center mx-3 mb-4 mt-3">
+      {!isLiveVersion && (
+        <span className="absolute left-1/2 -translate-x-1/2 text-[11px] font-medium tracking-wide text-gray-400 whitespace-nowrap pointer-events-none">
+          Entwicklungsversion
+        </span>
+      )}
       <span className="font-semibold mr-8">BelISDesktop</span>
       <div className="flex items-center gap-4">
         <NavLink
@@ -126,8 +140,7 @@ const TopNavbar = () => {
         >
           Fachobjekte
         </NavLink>
-        {/* temporarily hidden — re-enable when needed */}
-        {/* <CreateFeatureDropdown /> */}
+        {!isReadOnly && <CreateFeatureDropdown />}
         <NavLink
           to="/arbeitsauftraege"
           className={({ isActive }) => `text-base hover:text-gray-600`}
@@ -137,7 +150,8 @@ const TopNavbar = () => {
         >
           Arbeitsaufträge
         </NavLink>
-        {hasHighlights &&
+        {!isReadOnly &&
+          hasHighlights &&
           (isOnAAPage && selectedAAId != null && selectedAAData != null ? (
             <Dropdown menu={{ items: dropdownItems }} trigger={["click"]}>
               <div className="flex items-center gap-0.5">
@@ -206,6 +220,7 @@ const TopNavbar = () => {
             onClick={() => {
               dispatch(storeJWT(null));
               dispatch(storeLogin(null));
+              dispatch(storePermissions(undefined));
               navigate("/login");
             }}
           />

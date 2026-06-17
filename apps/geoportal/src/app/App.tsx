@@ -1,5 +1,5 @@
 // Built-in Modules
-import { useMemo } from "react";
+import { useMemo, type ReactNode } from "react";
 import { useDispatch, useSelector } from "react-redux";
 
 // 3rd party Modules
@@ -16,7 +16,11 @@ import {
   backgroundSettings,
   mobileInfo,
 } from "@carma-collab/wuppertal/geoportal";
-import { TAILWIND_CLASSNAMES_FULLSCREEN_FIXED } from "@carma-commons/utils";
+import {
+  COLORS_HEX,
+  TAILWIND_CLASSNAMES_FULLSCREEN_FIXED,
+  useDeployment,
+} from "@carma-commons/utils";
 import {
   MapFrameworkSwitcherProvider,
   MobileWarningMessage,
@@ -34,6 +38,7 @@ import {
 
 // Local Modules
 import AppErrorFallback from "./components/AppErrorFallback";
+import { AnnotationProvider } from "./components/annotations/AnnotationProvider";
 import MapWrapper from "./components/GeoportalMap/controls/MapWrapper";
 import LoginForm from "./components/LoginForm";
 
@@ -47,21 +52,16 @@ import { useManageLayers } from "./hooks/useManageLayers";
 import { useSyncToken } from "./hooks/useSyncToken";
 import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
 import { useMeasurementLayerButton } from "./hooks/useMeasurementLayerButton";
+import { useGeoportalAppSearchParams } from "./hooks/use-geoportal-app-search-params";
 
 import { APP_KEY, layerMap } from "./config";
 import { geoportalMapStyleConfig } from "./config/mapStyleConfig";
 
 import { CESIUM_CONFIG, CONFIG_BASE_URL } from "./config/app.config";
-import store from "./store";
-import { featureFlagConfig } from "./config/featureFlags";
+import store, { geoportalInitialHashState } from "./store";
+import { getFeatureFlagConfig } from "./config/featureFlags";
 
 import { OBLIQUE_CONFIG, CAMERA_ID_TO_DIRECTION } from "./oblique/config";
-import {
-  COLORS_HEX,
-  getHashParams,
-  HASH_LAUNCH_MODE,
-  resolveHashLaunchMode,
-} from "@carma-commons/utils";
 
 // Stable config objects
 const MEASUREMENTS_BASE_CONFIG = {
@@ -90,17 +90,6 @@ import "react-cismap/topicMaps.css";
 import "./index.css";
 // import { setDrawingShape } from "./store/slices/measurements";
 
-const readInitialFrameworkFromHash = (): "leaflet" | "cesium" => {
-  if (typeof window === "undefined") {
-    return "leaflet";
-  }
-
-  const mode = resolveHashLaunchMode(getHashParams(), {
-    defaultMode: HASH_LAUNCH_MODE.TWO_D,
-  });
-  return mode === HASH_LAUNCH_MODE.THREE_D ? "cesium" : "leaflet";
-};
-
 function CesiumDevConsoleIntegration() {
   const flags = useFeatureFlags();
   // Explicitly pass through flag; hook no longer performs URL inference
@@ -119,7 +108,7 @@ function MeasurementsWrapper({
   externalMode,
   setModeExternal,
 }: {
-  children: React.ReactNode;
+  children: ReactNode;
   baseConfig: typeof MEASUREMENTS_BASE_CONFIG;
   externalMode: MEASUREMENT_MODE;
   setModeExternal: (mode: MEASUREMENT_MODE) => void;
@@ -151,12 +140,9 @@ function MeasurementLayerSyncInner() {
   return null;
 }
 
-function MeasurementLayerSync() {
-  const flags = useFeatureFlags();
-  if (!flags.featureFlagMeasurementLayerButton) {
-    return null;
-  }
-  return <MeasurementLayerSyncInner />;
+function GeoportalAppSearchParamsIntegration() {
+  useGeoportalAppSearchParams();
+  return null;
 }
 
 function App({ published }: { published?: boolean }) {
@@ -167,6 +153,7 @@ function App({ published }: { published?: boolean }) {
   const syncToken = useSyncToken();
   useKeyboardShortcuts();
   const customFeatureFlags = useSelector(getCustomFeatureFlags);
+  const deployment = useDeployment();
   const uiMode = useSelector(getUIMode);
   const mode =
     uiMode === UIMode.MEASUREMENT
@@ -182,15 +169,15 @@ function App({ published }: { published?: boolean }) {
 
   // Memoize config objects to prevent recreation on every render
   const featureFlagsMergedConfig = useMemo(
-    () => ({ ...featureFlagConfig, ...customFeatureFlags }),
-    [customFeatureFlags]
+    () => ({ ...getFeatureFlagConfig(deployment), ...customFeatureFlags }),
+    [deployment, customFeatureFlags]
   );
 
   const overlayOptions = useMemo(
     () => ({ background: backgroundSettings }),
     []
   );
-  const initialFramework = readInitialFrameworkFromHash();
+  const { initialMapFramework } = geoportalInitialHashState;
 
   if (isLoadingConfig === null) {
     // wait for the loading state to be determined to prevent re-rendering
@@ -203,7 +190,7 @@ function App({ published }: { published?: boolean }) {
       <FeatureFlagProvider config={featureFlagsMergedConfig}>
         <MatomoTracker>
           <CesiumDevConsoleIntegration />
-          <MapFrameworkSwitcherProvider initialFramework={initialFramework}>
+          <MapFrameworkSwitcherProvider initialFramework={initialMapFramework}>
             <CarmaMapProviderWrapper
               cesiumOptions={CESIUM_CONFIG}
               overlayOptions={overlayOptions}
@@ -214,54 +201,57 @@ function App({ published }: { published?: boolean }) {
                 config={OBLIQUE_CONFIG}
                 fallbackDirectionConfig={CAMERA_ID_TO_DIRECTION}
               >
+                <GeoportalAppSearchParamsIntegration />
                 <MeasurementsWrapper
                   externalMode={mode}
                   setModeExternal={handleSetMode}
                   baseConfig={MEASUREMENTS_BASE_CONFIG}
                 >
-                  <MeasurementLayerSync />
-                  <ErrorBoundary FallbackComponent={AppErrorFallback}>
-                    <AdhocFeatureRehydration />
-                    <div className={TAILWIND_CLASSNAMES_FULLSCREEN_FIXED}>
-                      {isLoadingConfig && (
-                        <div
-                          id="loading"
-                          className="absolute flex flex-col items-center text-white justify-center h-screen w-full bg-black/50 z-[9999999999999]"
-                        >
-                          <h2>Lade Konfiguration</h2>
-                          <FontAwesomeIcon size="2x" icon={faSpinner} spin />
-                        </div>
-                      )}
-                      {!published && <TopNavbar />}
-                      <MapWrapper />
-                      <MobileWarningMessage
-                        headerText={mobileInfo.headerText}
-                        bodyText={mobileInfo.bodyText}
-                        confirmButtonText={mobileInfo.confirmButtonText}
-                      />
-
-                      <Modal
-                        open={showLoginModal}
-                        closable={false}
-                        footer={null}
-                        styles={{
-                          content: {
-                            padding: "0px",
-                            width: window.innerWidth < 600 ? "100%" : "450px",
-                          },
-                        }}
-                      >
-                        <LoginForm
-                          onSuccess={() => dispatch(setShowLoginModal(false))}
-                          closeLoginForm={() =>
-                            dispatch(setShowLoginModal(false))
-                          }
-                          showHelpText={false}
-                          style={{ padding: "20px" }}
+                  <AnnotationProvider>
+                    <MeasurementLayerSyncInner />
+                    <ErrorBoundary FallbackComponent={AppErrorFallback}>
+                      <AdhocFeatureRehydration />
+                      <div className={TAILWIND_CLASSNAMES_FULLSCREEN_FIXED}>
+                        {isLoadingConfig && (
+                          <div
+                            id="loading"
+                            className="absolute flex flex-col items-center text-white justify-center h-screen w-full bg-black/50 z-[9999999999999]"
+                          >
+                            <h2>Lade Konfiguration</h2>
+                            <FontAwesomeIcon size="2x" icon={faSpinner} spin />
+                          </div>
+                        )}
+                        {!published && <TopNavbar />}
+                        <MapWrapper />
+                        <MobileWarningMessage
+                          headerText={mobileInfo.headerText}
+                          bodyText={mobileInfo.bodyText}
+                          confirmButtonText={mobileInfo.confirmButtonText}
                         />
-                      </Modal>
-                    </div>
-                  </ErrorBoundary>
+
+                        <Modal
+                          open={showLoginModal}
+                          closable={false}
+                          footer={null}
+                          styles={{
+                            content: {
+                              padding: "0px",
+                              width: window.innerWidth < 600 ? "100%" : "450px",
+                            },
+                          }}
+                        >
+                          <LoginForm
+                            onSuccess={() => dispatch(setShowLoginModal(false))}
+                            closeLoginForm={() =>
+                              dispatch(setShowLoginModal(false))
+                            }
+                            showHelpText={false}
+                            style={{ padding: "20px" }}
+                          />
+                        </Modal>
+                      </div>
+                    </ErrorBoundary>
+                  </AnnotationProvider>
                 </MeasurementsWrapper>
               </ObliqueProvider>
             </CarmaMapProviderWrapper>

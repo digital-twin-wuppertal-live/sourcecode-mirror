@@ -13,7 +13,11 @@ import { useSelector } from "react-redux";
 import { getKeyTablesData } from "../../../store/slices/keyTables";
 import StrassenschluesselFields from "./StrassenschluesselFields";
 import StrassenschluesselFieldsModal from "./StrassenschluesselFieldsModal";
-import { getFormClassName, getPlaceholder } from "./readOnlyFormUtils";
+import {
+  LOCKED_FIELD_CLASSES,
+  getFormClassName,
+  getPlaceholder,
+} from "./readOnlyFormUtils";
 import { FormItem } from "./DraftFieldHighlight";
 import toTitleCase from "../../../helper/toTitleCase";
 import dayjs from "dayjs";
@@ -45,9 +49,28 @@ interface LeuchteFormFieldsProps {
   namePrefix?: string;
   readOnly?: boolean;
   isCreation?: boolean;
+  /** Identity of the underlying draft/feature. Used to re-run the form
+   * reset effect when the user switches between drafts that all share the
+   * same `leuchte` reference (e.g. multiple in-progress creation drafts
+   * where `leuchte` is always null). */
+  featureId?: string;
+  /** When true, omit the Strassenschluessel field. Used in the new-Leuchte
+   * creation flow where the field is rendered on the Standort tab instead. */
+  hideStrassenschluessel?: boolean;
+  /** When true, paint all form fields with the locked-gray fill (same look
+   * as the linked-Mast Standort tab). Used on the read-only Bestand Leuchten
+   * tabs so they read as locked, not as freshly typed values. */
+  locked?: boolean;
   form?: import("antd").FormInstance;
   onFormInstance?: (form: import("antd").FormInstance) => void;
   draftValues?: Record<string, unknown>;
+  /** Current Mast/Standort draft slice. When passed in the creation flow, the
+   * form subscribes to Strassenschluessel/Kennziffer changes and applies them
+   * locally — Strassenschluessel unconditionally, Kennziffer with a sticky
+   * per-form override (once the user edits this tab's Kennziffer, it stops
+   * accepting Standort updates). Pull-from-Redux replaces the older parent-
+   * pushed mirror so newly added Leuchten tabs catch up at mount. */
+  mastDraftValues?: Record<string, unknown>;
   onValuesChange?: (
     changedValues: Record<string, unknown>,
     allValues: Record<string, unknown>
@@ -111,15 +134,20 @@ const LeuchteFormFields = ({
   namePrefix,
   readOnly = true,
   isCreation,
+  featureId,
+  hideStrassenschluessel = false,
+  locked = false,
   form: externalForm,
   onFormInstance,
   draftValues,
+  mastDraftValues,
   onValuesChange,
   onOriginalValues,
 }: LeuchteFormFieldsProps) => {
   const [localForm] = Form.useForm();
   const form = externalForm ?? localForm;
   const draftApplied = useRef(false);
+  const appliedForFeatureRef = useRef<string | number | undefined>(undefined);
   useEffect(() => {
     if (!externalForm) onFormInstance?.(form);
   }, [form, onFormInstance, externalForm]);
@@ -194,10 +222,25 @@ const LeuchteFormFields = ({
 
   useEffect(() => {
     if (externalForm) return;
-    form.resetFields();
-    draftApplied.current = false;
+    if (!leuchte) return;
 
-    if (leuchte) {
+    const featureChanged = appliedForFeatureRef.current !== featureId;
+    const isCreationFeature = String(featureId ?? "").startsWith("create:");
+
+    // During creation, the synthetic record gets a fresh reference per
+    // keystroke. Re-running with the same featureId would call resetFields()
+    // and steal focus. Bail unless this is the first arrival for this draft.
+    if (!featureChanged && isCreationFeature) return;
+
+    if (featureChanged) {
+      // First time we see this feature — clear any stale state. For post-save
+      // refresh on the same feature, skip resetFields so AntD keeps the DOM
+      // intact (preserves scroll position and focus).
+      form.resetFields();
+      draftApplied.current = false;
+    }
+
+    {
       const strassenschluessel = leuchte.tkey_strassenschluessel as
         | NestedObject
         | undefined;
@@ -290,35 +333,152 @@ const LeuchteFormFields = ({
         draftApplied.current = true;
       }
     }
+
+    appliedForFeatureRef.current = featureId;
+    // Depend on the `leuchte` reference so post-save refetches re-populate
+    // automatically; the featureChanged/isCreationFeature guards above filter
+    // out the synthetic-record churn during creation.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [leuchte, form]);
+  }, [featureId, leuchte, form]);
 
   useEffect(() => {
     if (externalForm) return;
-    if (draftApplied.current || !draftValues) return;
-    form.setFieldsValue(draftValues);
-    draftApplied.current = true;
+    if (!draftValues) return;
+    if (!draftApplied.current) {
+      // First arrival of a draft slice — populate the form wholesale and
+      // latch. Subsequent draftValues identity changes go through the
+      // empty-field-only branch below so a re-render can't reset user typing
+      // to a stale earlier value.
+      form.setFieldsValue(draftValues);
+      draftApplied.current = true;
+      return;
+    }
+    // Late draftValues update (e.g. the parent seeded `bestand[0]` onto a
+    // "+ Leuchte zu Standort N" draft once the Mast fetch resolved, well
+    // after this form's first apply). Walk the incoming slice and copy in
+    // only the keys whose form field is still empty — never clobber a value
+    // the user is mid-typing.
+    const toApply: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(draftValues)) {
+      if (v == null || v === "") continue;
+      const current = form.getFieldValue(k);
+      if (current != null && current !== "") continue;
+      toApply[k] = v;
+    }
+    if (Object.keys(toApply).length > 0) {
+      form.setFieldsValue(toApply);
+    }
   }, [draftValues, form, externalForm]);
+
+  // `setFieldsValue` doesn't trigger antd's `onValuesChange`, so the parent's
+  // Redux draft wouldn't learn about the mirrored Strassenschluessel/Kennziffer
+  // until the user touches some other field. That delay leaves green-highlight
+  // diffs reading stale `undefined` values on first render. The ref lets the
+  // subscription effects below propagate manually without adding the (often
+  // re-created) callback to their dep arrays.
+  const onValuesChangeRef = useRef(onValuesChange);
+  useEffect(() => {
+    onValuesChangeRef.current = onValuesChange;
+  });
+
+  // Strassenschluessel subscription: in the creation flow the Strassenschluessel
+  // input lives on the Standort tab, not on the Leuchte tab — hideStrassenschluessel
+  // hides it locally, but the Leuchte payload still needs fk_strassenschluessel
+  // on save. We mirror the current Mast slice into the local form whenever the
+  // Mast values change. No per-tab override semantics here: Strassenschluessel
+  // is a property of the Standort, every Leuchte at that Standort shares it.
+  const mastStrassePk = mastDraftValues?.strassenschluessel_pk;
+  const mastStrasseName = mastDraftValues?.strassenschluessel_strasse;
+  const mastFkStrasse = mastDraftValues?.fk_strassenschluessel;
+  useEffect(() => {
+    if (!hideStrassenschluessel) return;
+    if (mastFkStrasse == null && mastStrassePk == null) return;
+    const changed = {
+      strassenschluessel_pk: mastStrassePk,
+      strassenschluessel_strasse: mastStrasseName,
+      fk_strassenschluessel: mastFkStrasse,
+    };
+    form.setFieldsValue(changed);
+    onValuesChangeRef.current?.(changed, form.getFieldsValue());
+  }, [
+    hideStrassenschluessel,
+    mastFkStrasse,
+    mastStrassePk,
+    mastStrasseName,
+    form,
+  ]);
+
+  // Kennziffer subscription with sticky per-form override. While the Leuchte's
+  // own fk_kennziffer is empty (or still equals what we last applied), Standort
+  // changes flow through. Once the user types a different Kennziffer here, this
+  // form opts out — `lastAppliedKennzRef` no longer matches `current`, and the
+  // condition gates further updates. Other Leuchten tabs (each with their own
+  // ref) are unaffected.
+  const lastAppliedKennzRef = useRef<unknown>(undefined);
+  const mastKennz = mastDraftValues?.fk_kennziffer;
+  useEffect(() => {
+    if (!isCreation) return;
+    if (mastKennz == null) return;
+    const current = form.getFieldValue("fk_kennziffer");
+    const isEmpty = current == null || current === "";
+    const userOverrode = !isEmpty && current !== lastAppliedKennzRef.current;
+    if (userOverrode) return;
+    if (current === mastKennz) return;
+    form.setFieldsValue({ fk_kennziffer: mastKennz });
+    lastAppliedKennzRef.current = mastKennz;
+    onValuesChangeRef.current?.(
+      { fk_kennziffer: mastKennz },
+      form.getFieldsValue()
+    );
+  }, [mastKennz, isCreation, form]);
+
+  // Laufende Nr. mirror. In the creation flow `lfd_nummer` is a Standort
+  // property shared by every Leuchte at that Standort — it's set on the
+  // Standort tab and the Leuchte tab's own field is hidden (see below). We
+  // mirror the Mast slice unconditionally so the hidden field still carries a
+  // value into the save payload. No per-tab override semantics: the field is
+  // not editable here, so there is nothing to override.
+  const mastLfdNummer = mastDraftValues?.lfd_nummer;
+  useEffect(() => {
+    if (!isCreation) return;
+    if (mastLfdNummer == null) return;
+    const current = form.getFieldValue("lfd_nummer");
+    if (current === mastLfdNummer) return;
+    form.setFieldsValue({ lfd_nummer: mastLfdNummer });
+    onValuesChangeRef.current?.(
+      { lfd_nummer: mastLfdNummer },
+      form.getFieldsValue()
+    );
+  }, [mastLfdNummer, isCreation, form]);
 
   return (
     <Form
       form={form}
       layout="vertical"
       requiredMark={false}
-      className={getFormClassName(readOnly, "pr-2")}
+      className={getFormClassName(
+        readOnly,
+        locked ? `pr-2 ${LOCKED_FIELD_CLASSES}` : "pr-2"
+      )}
       onValuesChange={onValuesChange}
     >
-      {(!leuchte || isCreation) && !readOnly ? (
-        <StrassenschluesselFieldsModal namePrefix={namePrefix} isCreation={isCreation} />
+      {hideStrassenschluessel ? null : !readOnly ? (
+        <StrassenschluesselFieldsModal
+          namePrefix={namePrefix}
+          onSyncDerivedValues={onValuesChange}
+        />
       ) : (
         <StrassenschluesselFields namePrefix={namePrefix} />
       )}
 
-      {/* Kennziffer */}
+      {/* Kennziffer — in the creation flow this is set on the Standort tab.
+          The field stays mounted (hidden) so the mirrored value is still
+          submitted to the server. */}
       <FormItem
         name={fieldName("fk_kennziffer")}
         label={<FormLabel>Kennziffer</FormLabel>}
         className="mb-4"
+        hidden={isCreation}
       >
         <Select
           placeholder={getPlaceholder(readOnly, "Kennziffer auswählen")}
@@ -336,27 +496,48 @@ const LeuchteFormFields = ({
         </Select>
       </FormItem>
 
-      {/* Laufende Nr. and Leuchtennummer */}
-      <Row gutter={16}>
-        <Col span={12}>
-          <FormItem
-            name={fieldName("lfd_nummer")}
-            label={<FormLabel>Laufende Nr.</FormLabel>}
-            className="mb-4"
-          >
-            <InputNumber className="w-full" size="large" placeholder={getPlaceholder(readOnly, "Nummer eingeben")} />
+      {/* Laufende Nr. and Leuchtennummer. In the creation flow Laufende Nr.
+          is set on the Standort tab — its field here is hidden (but still
+          submitted), and Leuchtennummer takes the full width. */}
+      {isCreation ? (
+        <>
+          <FormItem name={fieldName("lfd_nummer")} className="mb-4" hidden>
+            <InputNumber className="w-full" size="large" />
           </FormItem>
-        </Col>
-        <Col span={12}>
           <FormItem
             name={fieldName("leuchtennummer")}
             label={<FormLabel>Leuchtennummer</FormLabel>}
             className="mb-4"
           >
-            <InputNumber className="w-full" size="large" placeholder={getPlaceholder(readOnly, "Nummer eingeben")} />
+            <InputNumber
+              className="w-full"
+              size="large"
+              placeholder={getPlaceholder(readOnly, "Nummer eingeben")}
+            />
           </FormItem>
-        </Col>
-      </Row>
+        </>
+      ) : (
+        <Row gutter={16}>
+          <Col span={12}>
+            <FormItem
+              name={fieldName("lfd_nummer")}
+              label={<FormLabel>Laufende Nr.</FormLabel>}
+              className="mb-4"
+            >
+              <InputNumber className="w-full" size="large" placeholder={getPlaceholder(readOnly, "Nummer eingeben")} />
+            </FormItem>
+          </Col>
+          <Col span={12}>
+            <FormItem
+              name={fieldName("leuchtennummer")}
+              label={<FormLabel>Leuchtennummer</FormLabel>}
+              className="mb-4"
+            >
+              <InputNumber className="w-full" size="large" placeholder={getPlaceholder(readOnly, "Nummer eingeben")} />
+            </FormItem>
+          </Col>
+        </Row>
+      )}
 
       {/* Leuchtentyp */}
       <FormItem
