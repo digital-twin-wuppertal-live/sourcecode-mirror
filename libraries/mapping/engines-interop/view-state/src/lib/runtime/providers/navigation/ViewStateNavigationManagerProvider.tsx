@@ -15,6 +15,10 @@ import {
 } from "@carma-providers/hash-state";
 
 import { ViewStateContext } from "../view-state/ViewStateContext";
+import {
+  createShareableViewStateHashCodec,
+  type ShareableViewStateHashCodecOptions,
+} from "../../../adapters/shareable";
 import { VIEW_STATE_NAVIGATION_EVENT } from "../../../core/types";
 import type {
   ViewState,
@@ -24,7 +28,7 @@ import type {
   ViewStateNavigationManagerContextValue,
 } from "../../../core/types";
 import { ViewStateNavigationManagerContext } from "./ViewStateNavigationManagerContext";
-const DEFAULT_HASH_LABEL = "ViewStateNavigationManager";
+const DEFAULT_HASH_LABEL = "ViewStateNavigationManagerProvider";
 const DEFAULT_MIN_COMMIT_INTERVAL_MS = 100;
 const DEFAULT_CLEAR_STATE_KEY_SET_IDS: readonly HashClearStateKeySetId[] = [
   HASH_CLEAR_STATE_KEY_SET.SCENE_VIEW_STATE,
@@ -55,7 +59,7 @@ const tryEncodeHashParams = ({
   try {
     return codec.encode(state);
   } catch (error) {
-    console.warn("[ViewStateNavigationManager] Failed to encode hash", {
+    console.warn("[ViewStateNavigationManagerProvider] Failed to encode hash", {
       label,
       reason,
       error,
@@ -83,8 +87,8 @@ const readRestoreCommitSignature = (
 
 type ViewStateNavigationManagerProviderProps = {
   children: ReactNode;
-  codec: ViewStateHashCodec;
-  label?: string;
+  shareableHashOptions?: ShareableViewStateHashCodecOptions;
+  debugLabel?: string;
   replace?: boolean;
   clearStateKeys?: readonly string[];
   clearStateKeySetIds?: readonly HashClearStateKeySetId[];
@@ -94,8 +98,8 @@ type ViewStateNavigationManagerProviderProps = {
 
 export const ViewStateNavigationManagerProvider = ({
   children,
-  codec,
-  label = DEFAULT_HASH_LABEL,
+  shareableHashOptions,
+  debugLabel,
   replace = true,
   clearStateKeys,
   clearStateKeySetIds,
@@ -109,6 +113,12 @@ export const ViewStateNavigationManagerProvider = ({
     );
   }
 
+  const codec = useMemo(
+    () => createShareableViewStateHashCodec(shareableHashOptions ?? {}),
+    [shareableHashOptions]
+  );
+  const resolvedLabel = debugLabel ?? DEFAULT_HASH_LABEL;
+
   const { getHashStateValues, registerOnPopState, updateHashState } =
     useHashState();
 
@@ -118,13 +128,12 @@ export const ViewStateNavigationManagerProvider = ({
   const lastCommitSignatureRef = useRef<string | null>(null);
   const lastCommitReplaceRef = useRef<boolean>(replace);
   const lastCommitTimestampRef = useRef(0);
-  const hashWriteSuspensionCountRef = useRef(0);
   const navigationListenersRef = useRef<
     Set<(event: ViewStateNavigationEvent) => void>
   >(new Set());
   const pendingRestoreCommitSignatureRef = useRef<string | null>(
     readRestoreCommitSignature(codec, restoreState, {
-      label,
+      label: resolvedLabel,
       reason: "initial-restore-signature",
     })
   );
@@ -161,7 +170,7 @@ export const ViewStateNavigationManagerProvider = ({
         codec,
         nextRestoreState,
         {
-          label,
+          label: resolvedLabel,
           reason: "browser-popstate-restore-signature",
         }
       );
@@ -175,16 +184,12 @@ export const ViewStateNavigationManagerProvider = ({
         state: nextRestoreState,
       });
     });
-  }, [codec, emitNavigationEvent, label, registerOnPopState]);
+  }, [codec, emitNavigationEvent, registerOnPopState, resolvedLabel]);
 
   const commitCurrentState = useCallback<
     ViewStateNavigationManagerContextValue["commitCurrentState"]
   >(
     (reason, options) => {
-      if (hashWriteSuspensionCountRef.current > 0) {
-        return false;
-      }
-
       if (isHashWriteEnabled && !isHashWriteEnabled()) {
         return false;
       }
@@ -197,7 +202,7 @@ export const ViewStateNavigationManagerProvider = ({
       const hashParams = tryEncodeHashParams({
         codec,
         state: currentState,
-        label,
+        label: resolvedLabel,
         reason,
       });
       if (!hashParams) {
@@ -237,7 +242,7 @@ export const ViewStateNavigationManagerProvider = ({
       updateHashState(hashParams, {
         clearStateKeySetIds: resolvedClearStateKeySetIds as string[],
         clearStateKeys: resolvedClearStateKeys,
-        label,
+        label: resolvedLabel,
         replace: replaceHash,
       });
 
@@ -251,25 +256,15 @@ export const ViewStateNavigationManagerProvider = ({
     [
       codec,
       isHashWriteEnabled,
-      label,
       minCommitIntervalMs,
       replace,
       resolvedClearStateKeySetIds,
       resolvedClearStateKeys,
+      resolvedLabel,
       updateHashState,
       viewStateContext,
     ]
   );
-
-  const suspendHashWrites = useCallback((_reason?: string) => {
-    hashWriteSuspensionCountRef.current += 1;
-    return () => {
-      hashWriteSuspensionCountRef.current = Math.max(
-        0,
-        hashWriteSuspensionCountRef.current - 1
-      );
-    };
-  }, []);
 
   const value = useMemo<ViewStateNavigationManagerContextValue>(
     () => ({
@@ -277,14 +272,12 @@ export const ViewStateNavigationManagerProvider = ({
       isRestoreResolved,
       registerOnNavigationEvent,
       commitCurrentState,
-      suspendHashWrites,
     }),
     [
       commitCurrentState,
       isRestoreResolved,
       registerOnNavigationEvent,
       restoreState,
-      suspendHashWrites,
     ]
   );
 

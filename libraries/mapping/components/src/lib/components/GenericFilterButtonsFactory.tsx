@@ -363,7 +363,9 @@ export const createFilterButtons = (config: FilterConfig) => {
 
     return (
       <div
+        className="generic-filter-buttons"
         style={{
+          pointerEvents: "auto",
           fontSize: config.styles?.fontSize || "13px",
           marginTop: "1px",
           display: "flex",

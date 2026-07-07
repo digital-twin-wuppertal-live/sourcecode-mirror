@@ -1,0 +1,136 @@
+/* Vendor CSS required only by the HelpModal (react-cismap
+   GenericModalApplicationMenu -> react-bootstrap Modal + colored accordion
+   panels). It is pulled into a dedicated, low-priority cascade layer so that
+   Bootstrap's global `reboot` (heading/paragraph margins, `a` color, base
+   typography) and topicMaps' `html { font-size: 14px }` can NOT leak into the
+   BelIS desktop layout: unlayered app + Tailwind styles always out-rank any
+   layered rule, regardless of import order. Loading these stylesheets
+   unlayered is what previously inflated the spacing across the whole app. */
+@import "bootstrap/dist/css/bootstrap.min.css" layer(vendor);
+@import "react-cismap/topicMaps.css" layer(vendor);
+
+/* Match the react-cismap Storybook reference rendering of this dialog.
+   Storybook loads the sheets above globally and UNLAYERED, so topicMaps'
+   `html { font-size: 14px }` wins and the whole modal renders on a 14px base.
+   In BelIS those sheets are layered (so they can't inflate the app), and the
+   root stays at 16px -> the same markup renders ~14% larger / looser than the
+   reference. Re-pin the compact 14px base, but unlayered (outranks the vendor
+   layer) and scoped to the bootstrap modal subtree only, so it reproduces the
+   Storybook look without touching the rest of the BelIS layout. The modal is a
+   portal at <body>, so `.modal` cannot collide with the app's own content. */
+.modal {
+  font-size: 14px;
+}
+
+/* Tailwind's preflight (`@tailwind base` in styles.css) is UNLAYERED and resets
+   `border-width: 0` on every element and strips `<button>` background/color.
+   Bootstrap (in `layer(vendor)` above) restores those for `.btn-primary` and
+   the panel/well borders, but a layered rule always loses to the unlayered
+   preflight -> inside the modal the Ok button lost its blue fill and every
+   border disappeared. Revert just the affected properties to the vendor layer,
+   scoped to the modal subtree: Bootstrap's values reappear exactly where it set
+   them (buttons, panels), and nowhere else, so the app reset stays untouched.
+   `revert-layer` needs the same browser support as `@layer` (Safari 15.4+). */
+.modal *,
+.modal *::before,
+.modal *::after {
+  border-width: revert-layer;
+  border-style: revert-layer;
+  border-color: revert-layer;
+}
+
+.modal button,
+.modal [type="button"],
+.modal [type="submit"],
+.modal [type="reset"] {
+  padding: revert-layer;
+  color: revert-layer;
+  background-color: revert-layer;
+  background-image: revert-layer;
+}
+
+/* The Modal.Body carries an inline `max-height: (windowHeight - 180px)` with its
+   own `overflow-y: auto`. Those 180px do NOT cover the dialog's top/bottom margin
+   (~3.5rem) plus the header and footer, so when a tall help section is expanded
+   the whole dialog grows past the viewport and react-bootstrap's `.modal` element
+   shows a SECOND, outer scrollbar next to the body's own one (the "scroll from
+   outside"). Pin the dialog to the viewport and make the content a flex column so
+   only the body scrolls — Bootstrap's `modal-dialog-scrollable` behavior, applied
+   here without touching the react-cismap component. Scoped to the modal subtree,
+   which is a portal at <body> and never collides with the app's own content. */
+.modal-dialog {
+  max-height: calc(100vh - 3.5rem);
+}
+.modal-content {
+  display: flex;
+  flex-direction: column;
+  max-height: 100%;
+  overflow: hidden;
+}
+.modal-body {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+/* Contain Bootstrap 4's reboot OUTSIDE the modal (the inverse of the border/
+   button block above). Reboot — in `layer(vendor)` — also styles bare elements
+   that Tailwind's preflight does NOT reset (`label`, `legend`, `address`,
+   `caption`, `table`). Unlike the heading/paragraph margins preflight covers,
+   these are uncontested, so the layered rule is not out-ranked and LEAKS into
+   the whole app once the help stylesheet is injected — and it stays injected for
+   the app's lifetime. The clearest victim: antd's `Segmented` renders each tab as
+   a native <label>, so reboot's `label{margin-bottom:.5rem}` pushes the
+   "Erweiterte Suche" tabs down. Reboot also adds `table{margin-bottom:1rem}`,
+   which inserts a gap below every nested <table> in the map info box. Re-zero the
+   leaked margin app-wide, UNLAYERED so it out-ranks the vendor layer, then
+   `revert-layer` it back to Bootstrap's value inside the `.modal` subtree where
+   the help dialog still needs it. Tailwind utility classes (specificity 0,1,0)
+   still win over these bare-element rules (0,0,1), so deliberate app spacing is
+   untouched.
+
+   Only `margin-bottom` is reset here — NOT `width`/`color`. Reboot's
+   `table{width:100%}` is harmless (the info box tables already opt in via the
+   `width="100%"` HTML attribute or inline styles), and a CSS `table{width:auto}`
+   reset would OVERRIDE that presentational attribute (specificity 0,0,1 > 0,0,0)
+   and collapse the info box layout. Leave width/color alone. */
+label,
+legend,
+address,
+caption,
+table {
+  margin-bottom: 0;
+}
+
+.modal label,
+.modal legend,
+.modal address,
+.modal caption,
+.modal table {
+  margin-bottom: revert-layer;
+}
+
+/* Same leak class, different property: reboot sets `h1..h6{line-height:1.2}` and
+   preflight only resets heading font-size/font-weight/margin — not line-height —
+   so it is uncontested and leaks app-wide. In the map info box the additionalInfo
+   <h6> (e.g. "M1 / Stahlmast") ends with a trailing <br/>, and that empty line's
+   height IS the h6 line-height, so the leak visibly tightens the gap to the
+   subtitle below once the help stylesheet is injected. Restore the inherited
+   line-height (the app's 1.5 base) app-wide, revert inside the modal. Tailwind
+   leading-* utilities (0,1,0) still win over this bare-element rule (0,0,1). */
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
+  line-height: inherit;
+}
+
+.modal h1,
+.modal h2,
+.modal h3,
+.modal h4,
+.modal h5,
+.modal h6 {
+  line-height: revert-layer;
+}

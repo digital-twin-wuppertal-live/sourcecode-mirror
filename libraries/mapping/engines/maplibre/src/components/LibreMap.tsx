@@ -59,8 +59,24 @@ import { FeatureInfobox } from "@carma-appframeworks/portals";
 import { SelectionItem, useSelection } from "@carma-appframeworks/portals";
 import { defaultLayerConf } from "@carma-appframeworks/portals";
 import { useMapHashRouting } from "@carma-appframeworks/portals";
-import { displayRouteOnMap } from "@carma-mapping/routing";
 import { ThreeLayerManager, get3dLayers } from "./ThreeLayerManager";
+
+const buildGazetteerRouteInfobox = (pos: number[], label: string) => ({
+  properties: {
+    header: "Informationen",
+    title: label,
+    genericLinks: [
+      {
+        iconname: "car",
+        tooltip: "Route berechnen",
+        routeAction: true,
+        getRouteParams: () => ({
+          to: { lat: pos[1], lng: pos[0] },
+        }),
+      },
+    ],
+  },
+});
 
 export interface GeoJsonData {
   sourceId: string;
@@ -349,49 +365,45 @@ export const LibreMap = ({
   const openDatasheetRef = useRef(datasheetEnabled ? openDatasheet : undefined);
   openDatasheetRef.current = datasheetEnabled ? openDatasheet : undefined;
 
-
   // Helper: clear all visual selection state on the map
-  const clearVisualSelection = useCallback(
-    (mapInstance: maplibregl.Map) => {
-      selectedFeaturesRef.current.forEach((feature) => {
-        try {
-          if (
-            feature.selectionLayerId &&
-            mapInstance.getLayer(feature.selectionLayerId)
-          ) {
-            mapInstance.setFilter(feature.selectionLayerId, [
-              "==",
-              "__selected__",
-              "true",
-            ]);
-          } else if (feature.id != null) {
-            mapInstance.setFeatureState(
-              buildFeatureStateTarget(mapInstance, feature),
-              { selected: false }
-            );
-          }
+  const clearVisualSelection = useCallback((mapInstance: maplibregl.Map) => {
+    selectedFeaturesRef.current.forEach((feature) => {
+      try {
+        if (
+          feature.selectionLayerId &&
+          mapInstance.getLayer(feature.selectionLayerId)
+        ) {
+          mapInstance.setFilter(feature.selectionLayerId, [
+            "==",
+            "__selected__",
+            "true",
+          ]);
+        } else if (feature.id != null) {
+          mapInstance.setFeatureState(
+            buildFeatureStateTarget(mapInstance, feature),
+            { selected: false }
+          );
+        }
 
-          // Also clear forwarded selections
-          if (feature.forwardedTo) {
-            for (const forwarded of feature.forwardedTo) {
-              try {
-                mapInstance.setFeatureState(
-                  buildFeatureStateTarget(mapInstance, forwarded),
-                  { selected: false }
-                );
-              } catch {
-                // Forwarded feature may not exist
-              }
+        // Also clear forwarded selections
+        if (feature.forwardedTo) {
+          for (const forwarded of feature.forwardedTo) {
+            try {
+              mapInstance.setFeatureState(
+                buildFeatureStateTarget(mapInstance, forwarded),
+                { selected: false }
+              );
+            } catch {
+              // Forwarded feature may not exist
             }
           }
-        } catch (error) {
-          console.error("Error clearing feature selection:", error);
         }
-      });
-      selectedFeaturesRef.current.clear();
-    },
-    []
-  );
+      } catch (error) {
+        console.error("Error clearing feature selection:", error);
+      }
+    });
+    selectedFeaturesRef.current.clear();
+  }, []);
 
   // Helper: apply visual selection highlighting for a feature
   const applyVisualSelection = useCallback(
@@ -725,37 +737,45 @@ export const LibreMap = ({
             }
           }
 
-          if (bestHitLayer && bestResult && bestResult.resolvedSourceIndex != null) {
-              // Before accepting the 3D hit, check if there's a 2D symbol
-              // feature at the click point. Symbol layers (POI icons/text)
-              // render visually above 3D layers, so they should win clicks.
-              const hits2d = mapInstance.queryRenderedFeatures(e.point);
-              // queryRenderedFeatures returns hits in visual order (top first).
-              // If the topmost hit has a layerMapping, it's a selectable feature
-              // rendered above the 3D layer, so let the 2D path handle the click.
-              // If the topmost 2D hit is from a LIBRE_LAYERS sub-style (has
-              // layer-id metadata) but NOT from a source that has a 3D layer,
-              // it renders above the 3D objects, so let 2D selection win.
-              // Check if any 2D hit comes from a layer positioned after all
-              // 3D source layers in the style stack. Such layers render visually
-              // above the 3D objects and should win the click.
-              const styleLayers = mapInstance.getStyle()?.layers ?? [];
-              const threeSources = new Set(threeLayers.map((l) => l._config.sourceId));
-              let lastThreeSourceIdx = -1;
-              for (let i = 0; i < styleLayers.length; i++) {
-                const src = (styleLayers[i] as { source?: string }).source;
-                if (src && threeSources.has(src)) lastThreeSourceIdx = i;
-              }
-              const hitAbove3d = lastThreeSourceIdx >= 0 && hits2d.some((f) => {
+          if (
+            bestHitLayer &&
+            bestResult &&
+            bestResult.resolvedSourceIndex != null
+          ) {
+            // Before accepting the 3D hit, check if there's a 2D symbol
+            // feature at the click point. Symbol layers (POI icons/text)
+            // render visually above 3D layers, so they should win clicks.
+            const hits2d = mapInstance.queryRenderedFeatures(e.point);
+            // queryRenderedFeatures returns hits in visual order (top first).
+            // If the topmost hit has a layerMapping, it's a selectable feature
+            // rendered above the 3D layer, so let the 2D path handle the click.
+            // If the topmost 2D hit is from a LIBRE_LAYERS sub-style (has
+            // layer-id metadata) but NOT from a source that has a 3D layer,
+            // it renders above the 3D objects, so let 2D selection win.
+            // Check if any 2D hit comes from a layer positioned after all
+            // 3D source layers in the style stack. Such layers render visually
+            // above the 3D objects and should win the click.
+            const styleLayers = mapInstance.getStyle()?.layers ?? [];
+            const threeSources = new Set(
+              threeLayers.map((l) => l._config.sourceId)
+            );
+            let lastThreeSourceIdx = -1;
+            for (let i = 0; i < styleLayers.length; i++) {
+              const src = (styleLayers[i] as { source?: string }).source;
+              if (src && threeSources.has(src)) lastThreeSourceIdx = i;
+            }
+            const hitAbove3d =
+              lastThreeSourceIdx >= 0 &&
+              hits2d.some((f) => {
                 const idx = styleLayers.findIndex((sl) => sl.id === f.layer.id);
                 return idx > lastThreeSourceIdx;
               });
-              if (hitAbove3d) {
-                // Let the 2D selection path handle this click
-                threeLayers.forEach((l) => l.unhighlight());
-              }
+            if (hitAbove3d) {
+              // Let the 2D selection path handle this click
+              threeLayers.forEach((l) => l.unhighlight());
+            }
 
-              if (!hitAbove3d) {
+            if (!hitAbove3d) {
               const threeLayer = bestHitLayer;
               const result = bestResult;
               // [3D-SELECT] closest hit log suppressed
@@ -866,7 +886,7 @@ export const LibreMap = ({
                 );
               }
               return; // skip 2D selection
-              } // end if (!hitAbove3d)
+            } // end if (!hitAbove3d)
           }
         }
         // ── end 3D raycast ────────────────────────────────────
@@ -1060,32 +1080,18 @@ export const LibreMap = ({
             onFeatureSelect?.(null, featureId);
           }
         } else {
-          if (gazetteerInfoOnClickRef.current && selectionRef.current) {
+          if (
+            gazetteerInfoOnClickRef.current &&
+            useRoutingRef.current &&
+            selectionRef.current
+          ) {
             const pos = proj4(proj4crs3857def, proj4crs4326def, [
               selectionRef.current.x,
               selectionRef.current.y,
             ]);
-            setSelectedFeature({
-              properties: {
-                header: "Informationen",
-                title: selectionRef.current.string,
-                genericLinks: [
-                  {
-                    iconname: "car",
-                    action: async () => {
-                      if (!mapInstance) return;
-                      const startLat = 51.2725699;
-                      const startLng = 7.199918;
-                      await displayRouteOnMap({
-                        mapInstance,
-                        from: { lat: startLat, lng: startLng },
-                        to: { lat: pos[1], lng: pos[0] },
-                      });
-                    },
-                  },
-                ],
-              },
-            });
+            setSelectedFeature(
+              buildGazetteerRouteInfobox(pos, selectionRef.current.string)
+            );
           }
         }
       });
@@ -1473,7 +1479,6 @@ export const LibreMap = ({
 
   const hashRoutingLabels = useMemo(
     () => ({
-      clearCesium: "LGM:2D:clearCesium",
       writeLeafletLike: "LGM:2D:writeLocation",
       topicMapLocation: "LGM:2D:location",
     }),
@@ -1601,77 +1606,94 @@ export const LibreMap = ({
   };
 
   const onComplete = async (selection: SelectionItem) => {
-    if (!isAreaType(selection.type as ENDPOINT)) {
-      const selectedPos = proj4(proj4crs3857def, proj4crs4326def, [
-        selection.x,
-        selection.y,
-      ]);
+    if (isAreaType(selection.type as ENDPOINT)) return;
 
-      const ready = await waitForVectorSources();
-      if (ready && map.current) {
-        const mapInstance = map.current;
-        // Query rendered features at the gazetteer position (no synthetic click needed)
-        const point = mapInstance.project([selectedPos[0], selectedPos[1]]);
-        const hits = mapInstance.queryRenderedFeatures(point);
-        const filteredHits = hits.filter(
-          (hit) =>
-            !hit.layer.id.includes("selection") &&
-            !hit.layer.id.includes("cluster")
-        );
+    const mapInstance = map.current;
+    if (!mapInstance) return;
 
-        // Stamp effective sourceLayer on geojson hits (same convention as
-        // the click handler above).
-        for (const hit of filteredHits) stampSourceLayerFromProperty(hit);
+    const selectedPos = proj4(proj4crs3857def, proj4crs4326def, [
+      selection.x,
+      selection.y,
+    ]);
 
-        // Clear previous visual selection
-        clearVisualSelection(mapInstance);
-        setSelectedFeature(null);
-        mapSelectionCtxRef.current.clearSelection();
+    const ready = await waitForVectorSources();
 
-        if (filteredHits.length > 0) {
-          const selectedVectorFeature = selectFromHitsRef.current
-            ? selectFromHitsRef.current(filteredHits) ?? filteredHits[0]
-            : filteredHits[0];
-          const featureId = {
-            source: selectedVectorFeature.source,
-            sourceLayer: selectedVectorFeature.sourceLayer,
-            id: selectedVectorFeature.id,
-          };
+    clearVisualSelection(mapInstance);
+    setSelectedFeature(null);
+    mapSelectionCtxRef.current.clearSelection();
 
-          const layerId = selectedVectorFeature.layer?.metadata?.["layer-id"];
-          const layerMapping =
-            mappingRef.current[layerId] ||
-            mappingRef.current[selectedVectorFeature.source];
+    let featureInfoboxShown = false;
 
-          let feature = null;
+    if (ready) {
+      // Query rendered features at the gazetteer position (no synthetic click needed)
+      const point = mapInstance.project([selectedPos[0], selectedPos[1]]);
+      const hits = mapInstance.queryRenderedFeatures(point);
+      const filteredHits = hits.filter(
+        (hit) =>
+          !hit.layer.id.includes("selection") &&
+          !hit.layer.id.includes("cluster")
+      );
+
+      // Stamp effective sourceLayer on geojson hits (same convention as
+      // the click handler above).
+      for (const hit of filteredHits) stampSourceLayerFromProperty(hit);
+
+      if (filteredHits.length > 0) {
+        const selectedVectorFeature = selectFromHitsRef.current
+          ? selectFromHitsRef.current(filteredHits) ?? filteredHits[0]
+          : filteredHits[0];
+        const featureId = {
+          source: selectedVectorFeature.source,
+          sourceLayer: selectedVectorFeature.sourceLayer,
+          id: selectedVectorFeature.id,
+        };
+
+        const layerId = selectedVectorFeature.layer?.metadata?.["layer-id"];
+        const layerMapping =
+          mappingRef.current[layerId] ||
+          mappingRef.current[selectedVectorFeature.source];
+
+        let feature = null;
+        if (layerMapping) {
+          feature = await createFeature(
+            selectedVectorFeature,
+            layerMapping,
+            mapInstance,
+            useRouting,
+            openDatasheetRef.current
+          );
+        }
+
+        if (feature) {
           if (layerMapping) {
-            feature = await createFeature(
-              selectedVectorFeature,
-              layerMapping,
-              mapInstance,
-              useRouting,
-              openDatasheetRef.current
-            );
+            applyVisualSelection(mapInstance, featureId);
           }
+          setSelectedFeature(feature);
+          featureInfoboxShown = true;
 
-          if (feature) {
-            if (layerMapping) {
-              applyVisualSelection(mapInstance, featureId);
-            }
-            setSelectedFeature(feature);
+          mapSelectionCtxRef.current.selectFeature(
+            featureId,
+            selectedVectorFeature
+          );
+          mapSelectionCtxRef.current.setSelectedFeature(feature);
+          lastHandledVersionRef.current =
+            mapSelectionCtxRef.current.selectionVersion + 1;
 
-            mapSelectionCtxRef.current.selectFeature(
-              featureId,
-              selectedVectorFeature
-            );
-            mapSelectionCtxRef.current.setSelectedFeature(feature);
-            lastHandledVersionRef.current =
-              mapSelectionCtxRef.current.selectionVersion + 1;
-
-            onFeatureSelect?.(feature, featureId);
-          }
+          onFeatureSelect?.(feature, featureId);
         }
       }
+    }
+
+    if (
+      !featureInfoboxShown &&
+      gazetteerInfoOnClickRef.current &&
+      useRoutingRef.current
+    ) {
+      setSelectedFeature(
+        buildGazetteerRouteInfobox(selectedPos, selection.string)
+      );
+      lastHandledVersionRef.current =
+        mapSelectionCtxRef.current.selectionVersion + 1;
     }
   };
 

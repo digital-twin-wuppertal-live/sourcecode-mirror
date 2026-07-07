@@ -1,3 +1,39 @@
+/* No-op at rest (16px is the browser default, so this keeps the app identical to
+   `dev`), but it pins the base size while the HelpModal is open: that modal lazily
+   loads topicMaps.css, whose `html { font-size: 14px }` would otherwise shrink the
+   whole page behind the dialog. */
+html {
+  font-size: 16px;
+}
+
+/* The HelpModal renders through react-cismap -> react-bootstrap, whose
+   ModalManager "compensates" for the body scrollbar by writing inline
+   `overflow:hidden` and `padding-right:<scrollbarWidth>px` onto <body> while the
+   modal is open, then restoring them on close (see react-overlays ModalManager).
+   In this fixed, full-screen app that just shifts the whole shell sideways and
+   leaves a gap on the right — exactly the flicker seen on open/close. The shell
+   owns its own scrolling (h-screen + overflow-hidden), so the body should never
+   scroll: pin it so the manager measures no scrollbar (adds no padding) and its
+   inline mutations become no-ops. `!important` outranks the inline styles. */
+body {
+  overflow: hidden !important;
+  padding-right: 0 !important;
+}
+
+/* Bootstrap's reboot sets typography directly on `body` (font-family, color,
+   text-align). Tailwind's preflight only sets font-family on `html`, so it never
+   competes on `body` — and a layered Bootstrap `body` rule then wins by default
+   and cascades into the app via inheritance (the BelISDesktop title etc. flipped
+   to Bootstrap's font/color the moment the modal CSS loaded). Re-assert these on
+   `body` UNLAYERED so they inherit from `html` (Tailwind's stack / browser
+   defaults) and out-rank Bootstrap's layered reboot. No-op when Bootstrap isn't
+   loaded, so the app is unchanged at rest. */
+body {
+  font-family: inherit;
+  color: inherit;
+  text-align: inherit;
+}
+
 /* react-image-lightbox (used via PhotoLightbox from the react-cismap library)
    has a hardcoded English error message "This image failed to load" with no
    i18n prop exposed through the wrapper. We hide the English text via

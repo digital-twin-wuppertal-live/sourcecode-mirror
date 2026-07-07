@@ -49,6 +49,7 @@ export { CarmaMapProviderWrapper } from "./lib/components/CarmaMapProviderWrappe
 export { InfoBox } from "./lib/components/InfoBox.tsx";
 export { ResponsiveInfoBox } from "./lib/components/ResponsiveInfoBox.tsx";
 export {
+  CISMAP_ANNOTATION_INFO_BOX_GENERIC_VISUAL_OPTIONS,
   CISMAP_ANNOTATION_INFO_BOX_VISUAL_OPTIONS,
   CismapAnnotationInfoBox,
   CismapAnnotationInstructionInfoBox,
@@ -106,11 +107,11 @@ export {
 } from "./lib/components/AdhocFeatureDisplayProvider";
 export {
   ADHOC_LAYER_SOURCES,
-  ADHOC_LAYER_VISIBILITIES,
+  ADHOC_LAYER_MAP_MODES,
   DEFAULT_ADHOC_FEATURE_COLLECTION_ID,
   DEFAULT_ADHOC_FEATURE_LAYER_ID,
   type AdhocLayerSource,
-  type AdhocLayerVisibility,
+  type AdhocLayerMapMode,
 } from "./lib/constants/adhoc";
 export {
   resolveAdhocFeatureLayerId,
@@ -158,6 +159,12 @@ export {
 } from "./lib/hooks/useAdhocCesiumFeatureDisplay";
 export { useUrlFeatureSelection } from "./lib/hooks/useUrlFeatureSelection";
 export { useHashLaunchMode } from "./lib/hooks/useHashLaunchMode";
+export {
+  useCesiumMapFrameworkHost,
+  type CesiumMapFrameworkHost,
+  type CesiumMapFrameworkTerrainProviders,
+  type UseCesiumMapFrameworkHostOptions,
+} from "./lib/hooks/useCesiumMapFrameworkHost";
 export {
   useAppSearchParams,
   type AppSearchParamsCustomStateSnapshot,

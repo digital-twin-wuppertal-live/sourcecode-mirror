@@ -23,7 +23,7 @@ import {
   useAnnotationsRuntime,
 } from "@carma-mapping/annotations/runtime";
 import { useMapFrameworkSwitcherContext } from "@carma-mapping/components";
-import { useCesiumContext } from "@carma-mapping/engines/cesium/legacy";
+import { useCesiumContext } from "@carma-mapping/engines/cesium/react/runtime";
 
 import { APP_KEY } from "../../config";
 import { CESIUM_ANNOTATION_CONFIG } from "../../config/app.config";
@@ -149,7 +149,11 @@ function SavedAnnotationCollectionSync() {
 
       for (const feature of collection.features) {
         if (
-          (feature.data as { source?: unknown }).source !==
+          (
+            feature.data as {
+              metadata?: { carmaConf?: { layerInfo?: { source?: unknown } } };
+            }
+          ).metadata?.carmaConf?.layerInfo?.source !==
           ADHOC_LAYER_SOURCES.ANNOTATIONS
         ) {
           continue;
