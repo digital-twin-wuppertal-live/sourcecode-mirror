@@ -8,9 +8,9 @@ import type {
 } from "@carma-geo/data-structures";
 
 import {
-  ManagedProjection,
   ManagedProjections,
   ManagedDefs,
+  type ManagedProjection,
 } from "./managed-projections";
 import { registerManagedProjections } from "./utils";
 export type CoordinateFor<P extends ManagedProjection> = P extends "EPSG:4326"
@@ -20,6 +20,8 @@ export type CoordinateFor<P extends ManagedProjection> = P extends "EPSG:4326"
   : P extends "EPSG:3857"
   ? number[]
   : P extends "EPSG:25832"
+  ? number[]
+  : P extends "EPSG:4978"
   ? number[]
   : number[];
 
@@ -50,8 +52,41 @@ registerManagedProjections(ManagedProjections, ManagedDefs);
 // Nested Map for maximum performance (benchmarked 74% faster than string keys)
 const proj4ConverterCache = new Map<
   ManagedProjection,
-  Map<ManagedProjection, TypedConverter<any, any>>
+  Map<ManagedProjection, TypedConverter>
 >();
+
+type NumericCoordinateConverter = {
+  forward: (coordinate: [number, number]) => [number, number];
+};
+
+const utmToGeographicConverterCache = new Map<
+  string,
+  NumericCoordinateConverter
+>();
+
+export const getUtmToGeographicConverter = ({
+  zone,
+  hemisphere,
+  semiMajorAxis,
+  semiMinorAxis,
+}: {
+  zone: number;
+  hemisphere: "north" | "south";
+  semiMajorAxis: number;
+  semiMinorAxis: number;
+}) => {
+  const key = [zone, hemisphere, semiMajorAxis, semiMinorAxis].join(":");
+  const cached = utmToGeographicConverterCache.get(key);
+  if (cached) return cached;
+  const axes = `+a=${semiMajorAxis} +b=${semiMinorAxis}`;
+  const utm = `+proj=utm +zone=${zone} ${
+    hemisphere === "south" ? "+south " : ""
+  }${axes} +units=m +no_defs`;
+  const geographic = `+proj=longlat ${axes} +no_defs`;
+  const converter = proj4(utm, geographic) as NumericCoordinateConverter;
+  utmToGeographicConverterCache.set(key, converter);
+  return converter;
+};
 
 export function getProj4Converter<
   TSource extends ManagedProjection,
@@ -99,6 +134,11 @@ export const getToUTM32Converter = <TSource extends ManagedProjection>(
 ): TypedConverter<TSource, typeof ManagedProjections.EPSG25832> =>
   getProj4Converter(sourceCrs, ManagedProjections.EPSG25832);
 
+export const getToEcefConverter = <TSource extends ManagedProjection>(
+  sourceCrs: TSource
+): TypedConverter<TSource, typeof ManagedProjections.EPSG4978> =>
+  getProj4Converter(sourceCrs, ManagedProjections.EPSG4978);
+
 // from
 export const getFromWGS84Converter = <TTarget extends ManagedProjection>(
   targetCrs: TTarget
@@ -138,3 +178,27 @@ export const getFromWGS84ToUTM32 = (
     ManagedProjections.EPSG25832,
     ManagedProjections.EPSG4326
   ).inverse(coords);
+
+export const getFromWGS84ToEcef = (
+  coords: LngLatArrayTyped<
+    Longitude.deg,
+    Latitude.deg,
+    [Altitude.GenericMeters]
+  >
+): [x: number, y: number, z: number] =>
+  getProj4Converter(
+    ManagedProjections.EPSG4326,
+    ManagedProjections.EPSG4978
+  ).forward(coords) as [x: number, y: number, z: number];
+
+export const getFromEcefToWGS84 = (
+  coords: CoordinateFor<typeof ManagedProjections.EPSG4978>
+): LngLatArrayTyped<Longitude.deg, Latitude.deg, [Altitude.GenericMeters]> =>
+  getProj4Converter(
+    ManagedProjections.EPSG4326,
+    ManagedProjections.EPSG4978
+  ).inverse(coords) as LngLatArrayTyped<
+    Longitude.deg,
+    Latitude.deg,
+    [Altitude.GenericMeters]
+  >;

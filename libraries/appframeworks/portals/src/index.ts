@@ -18,6 +18,7 @@ export type {
   Settings,
   LayerState,
   MappingState,
+  BackgroundLayerCatalogEntry,
   FeatureInfoState,
   SelectedObject,
 } from "./lib/types";
@@ -28,6 +29,7 @@ export type {
 export type {
   CarmaConf3DClippingPolygon,
   CarmaConf3DModel,
+  CarmaConf3DPointCloud,
   CarmaConf3D,
   CarmaMapLibreStyleMetadata,
   CarmaMapLibreStyleData,
@@ -71,6 +73,7 @@ export { InfoBoxHeader } from "./lib/components/InfoBoxHeader.tsx";
 // LibreContext moved to @carma-mapping/engines/maplibre
 
 export { GazDataProvider, useGazData } from "./lib/components/GazDataProvider";
+export type { GazDataContribution } from "./lib/components/GazDataContext";
 
 export {
   MapStyleProvider,
