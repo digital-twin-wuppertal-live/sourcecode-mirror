@@ -10,7 +10,16 @@ import type {
 import { useMapFrameworkSwitcherContext } from "@carma-mapping/components";
 import { wmsCapabilitiesToCustomItems } from "../helper/buildCatalog";
 import type { CatalogDrop } from "../helper/buildCatalog";
+import {
+  buildVectorStyleItem,
+  loadVectorStyle,
+  parseVectorStyle,
+  styleUrlTitle,
+} from "../helper/vectorStyleItem";
+import type { CarmaVectorStyle } from "../helper/vectorStyleItem";
 import { parseToMapLayer } from "@carma-mapping/utils";
+import { useLiveDeployment } from "@carma-commons/utils";
+import { isJsonUrl, resolveDroppedUrl } from "../helper/resolve-dropped-url";
 
 // @ts-expect-error tbd
 const parser = new WMSCapabilities();
@@ -45,6 +54,7 @@ export const useHandleDrop = ({
   vectorTileServerUrl,
 }: UseHandleDropProps) => {
   const { isCesium } = useMapFrameworkSwitcherContext();
+  const isLiveDeployment = useLiveDeployment();
   const openModal = (index?: number) => {
     if (!isCesium) {
       setOpen(true);
@@ -52,12 +62,16 @@ export const useHandleDrop = ({
     }
   };
 
-  const preTransformJson = (input: string) => {
-    return input
-      .replaceAll("__SERVER_URL__", vectorTileServerUrl)
-      .replaceAll("__server_url__", vectorTileServerUrl);
+  const fetchStyleMetadata = async (
+    url: string
+  ): Promise<CarmaVectorStyle | null> => {
+    try {
+      return await loadVectorStyle(url, vectorTileServerUrl);
+    } catch (error) {
+      console.error("Error fetching JSON to check metadata:", error);
+      return null;
+    }
   };
-
   const handleAddToMap = async (newItem: Item, instant = false) => {
     const existingLayer = activeLayers.find((layer) => layer.id === newItem.id);
 
@@ -75,16 +89,21 @@ export const useHandleDrop = ({
       return;
     }
 
+    // every dropped item joins the catalog; instant ones additionally go
+    // straight onto the map instead of opening the catalog
+    onDrop({ kind: "layers", items: [newItem] });
     if (instant) {
       setAdditionalLayers(newItem, false, false, false, true);
     } else {
       openModal();
-      onDrop({ kind: "layers", items: [newItem] });
     }
   };
 
+  // outside the live deployment a dropped vector style always goes onto the map
+  // directly (and into the catalog) without opening the modal; on live only an
+  // explicit carmaConf.instant does that
   const handleJsonStyle = async (file: File | null, url: string | null) => {
-    let instant = false;
+    const openInstantly = !isLiveDeployment;
     if (file) {
       const reader = new FileReader();
       reader.onload = async (e) => {
@@ -92,36 +111,15 @@ export const useHandleDrop = ({
           // Attempt to parse the file content as JSON
           const fileContent = e.target?.result;
           if (typeof fileContent === "string") {
-            const processedContent = preTransformJson(fileContent);
+            const style = parseVectorStyle(fileContent, vectorTileServerUrl);
+            const { item, instant } = buildVectorStyleItem({
+              styleRef: JSON.stringify(style),
+              style,
+              id: `custom:${file.name}`,
+              fallbackTitle: file.name,
+            });
 
-            const jsonData = JSON.parse(processedContent);
-
-            const importedId = `custom:${file.name}`;
-            let newItem = {
-              description: "",
-              id: importedId,
-              layerType: "vector",
-              title: file.name,
-              serviceName: "custom",
-              type: "layer",
-              keywords: [`carmaConf://vectorStyle:${JSON.stringify(jsonData)}`],
-              path: "Externe Dienste",
-            } as unknown as Item;
-
-            if (jsonData.metadata && jsonData.metadata.carmaConf) {
-              const carmaConf = jsonData.metadata.carmaConf;
-              newItem = {
-                ...newItem,
-                ...carmaConf.layerInfo,
-                keywords: [
-                  ...(newItem?.keywords ?? []),
-                  ...(carmaConf?.layerInfo?.keywords || []),
-                ],
-              };
-              instant = carmaConf?.instant ?? false;
-            }
-
-            await handleAddToMap(newItem, instant);
+            await handleAddToMap(item, openInstantly || instant);
           }
         } catch (error) {
           console.error("Failed to parse the file as JSON:", error);
@@ -132,53 +130,21 @@ export const useHandleDrop = ({
     }
 
     if (url) {
-      const importedId = `custom:${url}`;
+      const style = await fetchStyleMetadata(url);
+      const { item, instant } = buildVectorStyleItem({
+        styleRef: url,
+        style,
+        id: `custom:${url}`,
+        fallbackTitle: styleUrlTitle(url),
+      });
 
-      let newItem = {
-        description: "",
-        id: importedId,
-        layerType: "vector",
-        title: url.slice(0, -5),
-        serviceName: "custom",
-        type: "layer",
-        keywords: [`carmaConf://vectorStyle:${url}`],
-        path: "Externe Dienste",
-      } as unknown as Item;
-      await fetch(url)
-        .then((response) => response.json())
-        .then((data) => {
-          if (data.metadata && data.metadata.carmaConf.layerInfo) {
-            const layerInfo = data.metadata.carmaConf.layerInfo;
-            instant = data.metaData?.carmaConf?.instant ?? false;
-            newItem = {
-              ...newItem,
-              id: importedId,
-              ...layerInfo,
-              keywords: [
-                ...(newItem?.keywords ?? []),
-                ...(layerInfo?.keywords || []),
-              ],
-            };
-          }
-        })
-        .catch((error) => {
-          console.error("Error fetching JSON to check metadata:", error);
-        });
-
-      await handleAddToMap(newItem, instant);
+      await handleAddToMap(item, openInstantly || instant);
     }
   };
 
+  // a twin file is the same vector style, filed as a 3d object; unlike a plain
+  // style it never goes onto the map by deployment, only by its own `instant`
   const handleTwinFile = async (file: File | null, url: string | null) => {
-    const baseItem = {
-      description: "",
-      layerType: "vector",
-      serviceName: "custom",
-      type: "object",
-      path: "Externe Dienste",
-    };
-
-    let instant = false;
     if (file) {
       const reader = new FileReader();
       reader.onload = (e) => {
@@ -186,30 +152,16 @@ export const useHandleDrop = ({
           // Attempt to parse the file content as JSON
           const fileContent = e.target?.result;
           if (typeof fileContent === "string") {
-            const processedContent = preTransformJson(fileContent);
-
-            const jsonData = JSON.parse(processedContent);
-            let newItem = {
-              ...baseItem,
+            const style = parseVectorStyle(fileContent, vectorTileServerUrl);
+            const { item, instant } = buildVectorStyleItem({
+              styleRef: JSON.stringify(style),
+              style,
               id: file.name,
-              keywords: [`carmaConf://vectorStyle:${JSON.stringify(jsonData)}`],
-              title: file.name,
-            } as unknown as Item;
+              fallbackTitle: file.name,
+              type: "object",
+            });
 
-            if (jsonData.metadata && jsonData.metadata.carmaConf) {
-              const carmaConf = jsonData.metadata.carmaConf;
-              newItem = {
-                ...newItem,
-                ...carmaConf.layerInfo,
-                keywords: [
-                  ...(newItem?.keywords ?? []),
-                  ...(carmaConf?.layerInfo?.keywords || []),
-                ],
-              };
-              instant = carmaConf?.instant ?? false;
-            }
-
-            handleAddToMap(newItem, instant);
+            handleAddToMap(item, instant);
           }
         } catch (error) {
           console.error("Failed to parse the file as JSON:", error);
@@ -220,39 +172,25 @@ export const useHandleDrop = ({
     }
 
     if (url) {
-      let newItem = {
-        ...baseItem,
+      const style = await fetchStyleMetadata(url);
+      const { item, instant } = buildVectorStyleItem({
+        styleRef: url,
+        style,
         id: url,
-        keywords: [`carmaConf://vectorStyle:${url}`],
-        title: url.slice(0, -5),
-      } as unknown as Item;
+        fallbackTitle: styleUrlTitle(url),
+        type: "object",
+      });
 
-      await fetch(url)
-        .then((response) => response.json())
-        .then((data) => {
-          if (data.metadata && data.metadata.carmaConf.layerInfo) {
-            const layerInfo = data.metadata.carmaConf.layerInfo;
-            instant = data.metaData?.carmaConf?.instant ?? false;
-            newItem = {
-              ...newItem,
-              ...layerInfo,
-              keywords: [
-                ...(newItem?.keywords ?? []),
-                ...(layerInfo?.keywords || []),
-              ],
-            };
-          }
-        })
-        .catch((error) => {
-          console.error("Error fetching JSON to check metadata:", error);
-        });
-
-      await handleAddToMap(newItem, instant);
+      await handleAddToMap(item, instant);
     }
   };
 
   const handleWmsCapabilitiesText = (text: string) => {
     const result = parser.toJSON(text);
+    if (!result?.Capability) {
+      message.warning("Nur WMS-Capabilities-Dokumente werden unterstützt");
+      return;
+    }
     const items = wmsCapabilitiesToCustomItems(result);
     if (items.length > 0) {
       onDrop({ kind: "layers", items });
@@ -263,7 +201,7 @@ export const useHandleDrop = ({
   useEffect(() => {
     const handleDrop = async (event: DragEvent) => {
       event.preventDefault();
-      const url = event.dataTransfer?.getData("URL");
+      const url = resolveDroppedUrl(event.dataTransfer);
 
       const file = event?.dataTransfer?.files[0];
 
@@ -273,7 +211,7 @@ export const useHandleDrop = ({
       ) {
         handleTwinFile(file ?? null, url ?? null);
       } else {
-        if (url && url.endsWith(".json")) {
+        if (url && isJsonUrl(url)) {
           handleJsonStyle(null, url);
         } else if (url) {
           fetch(url)
@@ -342,12 +280,12 @@ export const useHandleDrop = ({
       event.preventDefault();
     };
 
-    window.addEventListener("drop", handleDrop);
-    window.addEventListener("dragover", handleDragOver);
+    window.addEventListener("drop", handleDrop, true);
+    window.addEventListener("dragover", handleDragOver, true);
 
     return () => {
-      window.removeEventListener("drop", handleDrop);
-      window.removeEventListener("dragover", handleDragOver);
+      window.removeEventListener("drop", handleDrop, true);
+      window.removeEventListener("dragover", handleDragOver, true);
     };
   }, [
     setOpen,
@@ -357,6 +295,7 @@ export const useHandleDrop = ({
     updateActiveLayer,
     setAdditionalLayers,
     isCesium,
+    isLiveDeployment,
   ]);
 };
 

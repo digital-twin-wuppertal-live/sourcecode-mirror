@@ -3,6 +3,7 @@ import type {
   Config,
   ExtendedItem,
   Item,
+  ToolEntry,
   XMLLayer,
 } from "../lib/contracts/carma-layers.d";
 import type {
@@ -15,8 +16,10 @@ import {
   wmsLayerToGenericItem,
 } from "./layerHelper";
 import { isCurrentlyFeatured } from "./dateHelper";
+import { filterCategoriesByDeployment } from "./deploymentRestriction";
 import { discoverConfig } from "./discover";
 import type { DiscoverItem } from "./discover";
+import type { DeploymentTarget } from "@carma-commons/utils";
 import type { CategoryDefinition } from "../config/categoryDefinitions";
 import { defaultCategoryDefinitions } from "../config/categoryDefinitions";
 
@@ -28,9 +31,20 @@ export type CatalogConfigEntry = Omit<Config, "Title"> & { Title?: string };
 // One entry of the derived service structure (redux `allLayers`).
 export type ServiceCategory = { Title: string; id: string; layers: Item[] };
 
+/**
+ * A subcategory whose layers are still catalog items, i.e. before they are
+ * widened to the `SavedLayerConfig` view the UI consumes. Keeping the item type
+ * lets item-only fields (`keywords`, `path`) stay readable, which the featured
+ * derivation below needs.
+ */
+export type ItemSubCategory = { id?: string; Title: string; layers: Item[] };
+
 export type FeatureFlags = Record<string, boolean>;
 
-const CUSTOM_CATEGORY = { id: "custom", Title: "Externe Dienste" } as const;
+export const CUSTOM_CATEGORY = {
+  id: "custom",
+  Title: "Externe Dienste",
+} as const;
 const DEFAULT_MAIN_CATEGORY_ID = "favorites";
 const FEATURED_FROM = "carmaconf://featuredFrom";
 const FEATURED_UNTIL = "carmaconf://featuredUntil";
@@ -83,7 +97,9 @@ export type CatalogDrop =
       configs: CatalogConfigEntry[];
     };
 
-// Pure reducer for drop events: newest drop wins and moves to the front.
+// Pure reducer for drop events: the newest drop always wins, either by moving
+// to the front (items, category configs) or to the end (layer configs, whose
+// consumer lets later overlays overwrite).
 export const applyCatalogDrop = (
   state: DroppedCatalogState,
   drop: CatalogDrop
@@ -102,7 +118,7 @@ export const applyCatalogDrop = (
     case "layerConfig":
       return {
         ...state,
-        layerConfigs: [...drop.configs, ...state.layerConfigs],
+        layerConfigs: [...state.layerConfigs, ...drop.configs],
       };
     case "categoryConfig": {
       const existing = state.categoryConfigs[drop.categoryId] ?? [];
@@ -115,6 +131,35 @@ export const applyCatalogDrop = (
       };
     }
   }
+};
+
+// Ids of everything the user dropped, from all three drop kinds. Catalog
+// filters (fachzwillinge configs) are curated for the fetched sources and
+// cannot know these ids, so they are exempted from filtering.
+export const getDroppedItemIds = (
+  dropped: DroppedCatalogState
+): Set<string> => {
+  const ids = new Set<string>();
+  const addConfigLayers = (configs: CatalogConfigEntry[]) =>
+    configs.forEach((config) =>
+      (config.layers ?? []).forEach((layer) => {
+        if (layer.id) {
+          ids.add(layer.id);
+        }
+      })
+    );
+
+  dropped.customLayers.forEach((layer) => {
+    if (layer.id) {
+      ids.add(layer.id);
+    }
+  });
+  addConfigLayers(dropped.layerConfigs);
+  Object.values(dropped.categoryConfigs).forEach((configs) =>
+    addConfigLayers(configs ?? [])
+  );
+
+  return ids;
 };
 
 // Turns parsed WMS capabilities (dropped file or URL) into catalog items for
@@ -211,8 +256,8 @@ export const extractReplaceLayers = (
 export const deriveAdditionalConfigFragments = (
   configs: CatalogConfigEntry[],
   featureFlags: FeatureFlags
-): CatalogSubCategory[] => {
-  const fragments: CatalogSubCategory[] = [];
+): ItemSubCategory[] => {
+  const fragments: ItemSubCategory[] = [];
   const upsert = (id: string | undefined, Title: string, layers: Item[]) => {
     const existing = fragments.find((fragment) => fragment.id === id);
     if (existing) {
@@ -295,10 +340,10 @@ export const deriveDiscoverCategories = (
 };
 
 export const deriveFeaturedSubcategory = (
-  serviceCategories: ServiceCategory[]
+  categories: { layers: Item[] }[]
 ): CatalogSubCategory | null => {
-  const featuredLayers = serviceCategories
-    .flatMap((category) =>
+  const featuredLayers = dedupeById(
+    categories.flatMap((category) =>
       category.layers.filter((layer) =>
         layer.keywords?.some(
           (keyword) =>
@@ -306,6 +351,7 @@ export const deriveFeaturedSubcategory = (
         )
       )
     )
+  )
     .filter((layer) => {
       const featuredFrom = layer.keywords
         ?.find((keyword) => keyword.includes(FEATURED_FROM))
@@ -327,12 +373,168 @@ export const deriveFeaturedSubcategory = (
     : null;
 };
 
-// The "mapLayers" main category: dropped items first, then the featured
-// window, then the service structure enriched by the additional config.
+// --- additional layers of the catalog config ---------------------------------
+
+/** a catalog item moved into another category by its id */
+export type ItemReference = {
+  refId: string;
+  path?: string;
+  /** addons the config declares for it, added to what the item already has */
+  tools?: ToolEntry[];
+};
+
+/** a layer of an additional category: an own definition, or a reference */
+export type AdditionalCategoryLayer = Item | ItemReference;
+
+/**
+ * A category the catalog config adds, already resolved as far as the config
+ * can: styles are items by now, ids are still references, since only the
+ * assembled catalog can say what they point at.
+ */
+export type AdditionalLayerCategory = {
+  Title?: string;
+  serviceName?: string;
+  layers: AdditionalCategoryLayer[];
+};
+
+const isItemReference = (
+  layer: AdditionalCategoryLayer
+): layer is ItemReference => "refId" in layer;
+
+const indexItemsById = (
+  subCategories: CatalogSubCategory[],
+  ...loose: Item[][]
+): Map<string, Item> => {
+  const index = new Map<string, Item>();
+  const add = (layers: Item[]) =>
+    layers.forEach((layer) => {
+      if (layer?.id && !index.has(layer.id)) {
+        index.set(layer.id, layer);
+      }
+    });
+  subCategories.forEach((subCategory) => add(subCategory.layers as Item[]));
+  loose.forEach(add);
+  return index;
+};
+
+/**
+ * Files the configured additional categories into the subcategories, resolving
+ * their references against everything the catalog holds by then. A reference to
+ * an id the catalog does not know (yet, while its service loads) is left out.
+ *
+ * A reference *moves* its item: the config states where that layer belongs
+ * here, so it is taken out of the category it came from and shows up once.
+ *
+ * Returns the layers destined for the custom category, which the caller
+ * assembles together with the dropped ones, the ids that were moved, which the
+ * caller drops from those, and the categories that are new here, which the
+ * caller puts in front: what a host configures explicitly is what it wants
+ * seen first, so the configured groups lead the service structure.
+ */
+const placeAdditionalLayers = (
+  subCategories: CatalogSubCategory[],
+  additionalLayers: AdditionalLayerCategory[],
+  droppedLayers: Item[],
+  customFragmentLayers: Item[],
+  featureFlags: FeatureFlags
+): {
+  customLayers: Item[];
+  movedIds: Set<string>;
+  addedCategories: CatalogSubCategory[];
+} => {
+  const movedIds = new Set<string>();
+  const addedCategories: CatalogSubCategory[] = [];
+  if (additionalLayers.length === 0) {
+    return { customLayers: [], movedIds, addedCategories };
+  }
+  const itemsById = indexItemsById(
+    subCategories,
+    droppedLayers,
+    customFragmentLayers
+  );
+  const customLayers: Item[] = [];
+
+  const upsert = (id: string | undefined, Title: string, layers: Item[]) => {
+    const existing = subCategories.find(
+      (subCategory) =>
+        (id !== undefined && subCategory.id === id) ||
+        subCategory.Title === Title
+    );
+    if (existing) {
+      // the configured layers lead the category they extend, for the same
+      // reason the configured categories lead the catalog
+      existing.layers = reorderLayersByInsertRules(
+        dedupeById([...layers, ...existing.layers])
+      );
+    } else {
+      addedCategories.push({
+        id,
+        Title,
+        layers: reorderLayersByInsertRules(layers),
+      });
+    }
+  };
+
+  const resolved = additionalLayers.map((category) => ({
+    category,
+    layers: category.layers
+      .map((layer) => {
+        if (!isItemReference(layer)) {
+          return layer;
+        }
+        const item = itemsById.get(layer.refId);
+        if (!item) {
+          return item;
+        }
+        movedIds.add(layer.refId);
+        return layer.tools?.length
+          ? { ...item, tools: [...(item.tools ?? []), ...layer.tools] }
+          : item;
+      })
+      .filter(
+        (layer): layer is Item =>
+          !!layer && passesFeatureFlags(layer, featureFlags)
+      ),
+  }));
+
+  // out of the category it came from before it is filed into the configured
+  // one, so a moved layer is not shown twice
+  subCategories.forEach((subCategory) => {
+    subCategory.layers = subCategory.layers.filter(
+      (layer) => !movedIds.has(layer.id)
+    );
+  });
+
+  resolved.forEach(({ category, layers }) => {
+    if (layers.length === 0) {
+      return;
+    }
+    if (category.Title) {
+      upsert(category.serviceName, category.Title, layers);
+      return;
+    }
+    // without a category of its own every layer follows its own path, which is
+    // the custom category for a style url written on its own
+    layers.forEach((layer) => {
+      if (!layer.path || layer.path === CUSTOM_CATEGORY.Title) {
+        customLayers.push(layer);
+      } else {
+        upsert(layer.serviceName, layer.path, [layer]);
+      }
+    });
+  });
+
+  return { customLayers, movedIds, addedCategories };
+};
+
+// The "mapLayers" main category: dropped items first, then the configured
+// groups, then the featured window, then the service structure enriched by the
+// additional config.
 export const buildMapLayerSubcategories = (
   serviceCategories: ServiceCategory[],
   additionalConfig: CatalogConfigEntry[],
   droppedLayers: Item[],
+  additionalLayers: AdditionalLayerCategory[],
   featureFlags: FeatureFlags
 ): CatalogSubCategory[] => {
   const subCategories: CatalogSubCategory[] = serviceCategories.map(
@@ -343,28 +545,71 @@ export const buildMapLayerSubcategories = (
     })
   );
 
-  deriveAdditionalConfigFragments(additionalConfig, featureFlags).forEach(
-    (fragment) => {
-      const existing = subCategories.find(
-        (subCategory) => subCategory.id === fragment.id
-      );
-      if (existing) {
-        existing.layers = reorderLayersByInsertRules(
-          dedupeById([...existing.layers, ...fragment.layers])
-        );
-      } else {
-        subCategories.push(fragment);
-      }
-    }
+  const fragments = deriveAdditionalConfigFragments(
+    additionalConfig,
+    featureFlags
   );
+  // Fragments carrying the custom service (configured style layers, and
+  // dropped layer configs naming it) belong in the one custom subcategory
+  // assembled below, not in a second subcategory with the same id.
+  const customFragmentLayers: Item[] = [];
+  fragments.forEach((fragment) => {
+    if (fragment.id === CUSTOM_CATEGORY.id) {
+      customFragmentLayers.push(...fragment.layers);
+      return;
+    }
+    const existing = subCategories.find(
+      (subCategory) => subCategory.id === fragment.id
+    );
+    if (existing) {
+      existing.layers = reorderLayersByInsertRules(
+        dedupeById([...existing.layers, ...fragment.layers])
+      );
+    } else {
+      subCategories.push(fragment);
+    }
+  });
 
-  const featured = deriveFeaturedSubcategory(serviceCategories);
+  // The fragments belong in the featured window too: a layer the additional
+  // config contributes on its own (no replaceId/mergeId, so nothing folds it
+  // into the service structure) is absent from serviceCategories and would
+  // otherwise never reach "Neu", even though its other fields do show up.
+  const featured = deriveFeaturedSubcategory([
+    ...serviceCategories,
+    ...fragments,
+  ]);
   if (featured) {
     subCategories.unshift(featured);
   }
 
-  if (droppedLayers.length > 0) {
-    subCategories.unshift({ ...CUSTOM_CATEGORY, layers: droppedLayers });
+  const {
+    customLayers: customAdditionalLayers,
+    movedIds,
+    addedCategories,
+  } = placeAdditionalLayers(
+      subCategories,
+      additionalLayers,
+      droppedLayers,
+      customFragmentLayers,
+      featureFlags
+    );
+
+  // dropped first: a drop of an id the config also contributes is the more
+  // recent statement about that layer
+  const customLayers = dedupeById([
+    ...droppedLayers,
+    ...customFragmentLayers,
+    ...customAdditionalLayers,
+  ]).filter(
+    (layer) => !movedIds.has(layer.id) || customAdditionalLayers.includes(layer)
+  );
+  // ahead of the featured window and the services: what a host configures
+  // explicitly is what it wants seen first
+  subCategories.unshift(...addedCategories);
+
+  // still above those: a drop is the most recent statement about the catalog
+  if (customLayers.length > 0) {
+    subCategories.unshift({ ...CUSTOM_CATEGORY, layers: customLayers });
   }
 
   return subCategories;
@@ -430,6 +675,8 @@ export interface CatalogSources {
   categoryConfigs?: Record<string, CatalogConfigEntry[]>;
   discoverItems?: DiscoverItem[];
   dropped?: DroppedCatalogState;
+  /** categories the catalog config adds on top of the fetched sources */
+  additionalLayers?: AdditionalLayerCategory[];
 }
 
 export interface CatalogBuildOptions {
@@ -437,6 +684,7 @@ export interface CatalogBuildOptions {
   customCategories?: CatalogSubCategory[];
   /** main category registry; order defines the sidebar/tree order */
   categoryDefinitions?: CategoryDefinition[];
+  deployment?: DeploymentTarget | null;
 }
 
 // Pure derivation of the complete category tree. Main categories follow the
@@ -452,11 +700,13 @@ export const buildCatalog = (
     categoryConfigs = {},
     discoverItems,
     dropped = EMPTY_DROPPED_CATALOG,
+    additionalLayers = [],
   } = sources;
   const {
     featureFlags,
     customCategories = [],
     categoryDefinitions = defaultCategoryDefinitions,
+    deployment,
   } = options;
 
   const catalog: CatalogMainCategory[] = [];
@@ -486,6 +736,7 @@ export const buildCatalog = (
             serviceCategories,
             additionalConfig,
             dropped.customLayers,
+            additionalLayers,
             featureFlags
           ),
         });
@@ -507,5 +758,8 @@ export const buildCatalog = (
     }
   });
 
-  return mergeCustomCategories(catalog, customCategories);
+  return filterCategoriesByDeployment(
+    mergeCustomCategories(catalog, customCategories),
+    deployment
+  );
 };

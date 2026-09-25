@@ -11,11 +11,31 @@ import type {
   GeoJSONSourceSpecification,
   SourceSpecification,
 } from "maplibre-gl";
-import slugify from "slugify";
+import {
+  setForcedCachePrefixes,
+  sourceUrlPrefixes,
+  styleForcesCache,
+} from "./forcedCache";
+import { validateStyleMin } from "@maplibre/maplibre-gl-style-spec";
 import WMSCapabilities from "wms-capabilities";
 import { extractCarmaConfig, md5FetchJSON } from "@carma-commons/utils";
 import { WUPPERTAL_DEFAULT_STYLE } from "../constants/wuppertalDefaultStyle";
-import { LibreLayer } from "../components/LibreMap";
+import { LibreLayer, type OpacityTransition } from "../components/LibreMap";
+import {
+  createNonTiledImageSource,
+  createNonTiledMetadata,
+} from "./nonTiledWms";
+import {
+  styleProvidesTerrain,
+  withTerrainProviderMetadata,
+} from "./terrainProviderMetadata";
+import {
+  prefixSpriteImages,
+  resolveSpriteNamespace,
+  SPRITE_IMAGE_LAYOUT_PROPERTIES,
+  SPRITE_IMAGE_PAINT_PROPERTIES,
+  type SpriteRegistration,
+} from "./spriteNamespace";
 
 // Inlined from @carma-mapping/layers to avoid circular dependency through portals
 interface WMSLayerLike {
@@ -48,9 +68,18 @@ const getAllLeafLayers = (capabilities: unknown): WMSLayerLike[] => {
 
 export interface VectorStyle {
   name: string;
-  style?: string;
+  /** URL string (fetched) or inline maplibre style spec (used directly). */
+  style: string | StyleSpecification;
   layer?: string;
   infoboxMapping?: string[];
+  /** Optional filter expression to AND into every style layer in this vector style
+   *  during construction. Original filter is preserved at metadata.originalFilter. */
+  userFilter?: unknown[] | null;
+  /** Optional pure transform applied to the freshly fetched/cloned stylesheet
+   *  before it is merged. See LibreMap.VectorStyle.userStyleTransform. */
+  userStyleTransform?: (style: any) => any;
+  /** Serializable fingerprint of `userStyleTransform`. See LibreMap. */
+  userStyleTransformKey?: string;
 }
 
 export interface GeoJsonStyleMetadata {
@@ -93,13 +122,43 @@ export const getPaintProperty = (
 };
 
 /**
+ * Normalise a layer's requested opacity animation into MapLibre's transition
+ * shape, or null when it wants none and MapLibre's default should stand.
+ */
+export const toOpacityTransitionSpec = (
+  transition: OpacityTransition | undefined
+): { duration: number; delay?: number } | null => {
+  if (transition === undefined) return null;
+  return typeof transition === "number" ? { duration: transition } : transition;
+};
+
+/** Legacy MapLibre/Mapbox "stops function" object, e.g. { stops: [[9, 0.32], [24, 1]] }. */
+type StopsObject = { stops: [number, unknown][]; [k: string]: unknown };
+
+export const isStopsObject = (value: unknown): value is StopsObject =>
+  typeof value === "object" &&
+  value !== null &&
+  !Array.isArray(value) &&
+  Array.isArray((value as { stops?: unknown }).stops);
+
+export const scaleStopsObject = (
+  stopsObj: StopsObject,
+  scaleValue: (value: unknown) => unknown
+): StopsObject => ({
+  ...stopsObj,
+  stops: stopsObj.stops.map(
+    ([zoom, value]) => [zoom, scaleValue(value)] as [number, unknown]
+  ),
+});
+
+/**
  * Apply marker symbol size scaling to a style
  */
 export const styleManipulation = (
   markerSymbolSize: number,
   style: StyleSpecification
 ): StyleSpecification => {
-  const scale = (markerSymbolSize / 35) * 1.35;
+  const scale = markerSymbolSize / 35;
   const newStyle = JSON.parse(JSON.stringify(style)) as StyleSpecification;
 
   if (newStyle.layers) {
@@ -132,6 +191,14 @@ export const styleManipulation = (
           updatedLayer.layout = {
             ...layout,
             "icon-size": newIconSize as typeof iconSize,
+          };
+        } else if (isStopsObject(iconSize)) {
+          updatedLayer.layout = {
+            ...layout,
+            "icon-size": scaleStopsObject(
+              iconSize,
+              (value) => (value as number) * scale
+            ) as typeof iconSize,
           };
         }
       }
@@ -174,6 +241,14 @@ export const styleManipulation = (
             ...(updatedLayer.layout || layout),
             "text-offset": [x, y * scale] as typeof textOffset,
           };
+        } else if (isStopsObject(textOffset)) {
+          updatedLayer.layout = {
+            ...(updatedLayer.layout || layout),
+            "text-offset": scaleStopsObject(textOffset, (value) => {
+              const offset = value;
+              return [offset[0], offset[1] * scale];
+            }) as typeof textOffset,
+          };
         }
       }
 
@@ -199,11 +274,15 @@ export const getVectorMapping = async (
       vectorStyle.infoboxMapping || [];
     let fetchedStyleJson: Record<string, unknown> | undefined;
 
-    // First, try to get mapping from the vector style's metadata
+    // First, try to get mapping from the vector style's metadata. When the
+    // style is an inline spec, read it directly; when it is a URL string,
+    // fetch and parse it.
     if (!vectorStyle.infoboxMapping && vectorStyle.style) {
       try {
-        const styleResponse = await fetch(vectorStyle.style);
-        const styleJson = await styleResponse.json();
+        const styleJson: any =
+          typeof vectorStyle.style === "string"
+            ? await fetchJson(vectorStyle.style)
+            : vectorStyle.style;
         fetchedStyleJson = styleJson;
 
         const styleKeywords =
@@ -257,28 +336,38 @@ export const getVectorMapping = async (
         capabilitiesLayer = vectorStyle.layer.substring(0, atIdx);
         capabilitiesUrl = vectorStyle.layer.substring(atIdx + 1);
         if (capabilitiesUrl && !vectorStyle.infoboxMapping) {
-          const capabilitiesText = await fetch(capabilitiesUrl).then(
-            (response) => response.text()
-          );
-          const fetchedCapabilities = parser.toJSON(capabilitiesText);
-          if (!fetchedCapabilities) {
-            return;
-          }
-
-          const allLayers = getAllLeafLayers(fetchedCapabilities);
-          const targetLayer = allLayers.find(
-            (l) => l.Name === capabilitiesLayer
-          );
-
-          if (targetLayer) {
-            const extractedCarmaConf = extractCarmaConfig(
-              targetLayer.KeywordList
+          // An unreachable capabilities service must not reject this promise:
+          // it would abort the mapping for every other layer as well.
+          try {
+            const capabilitiesText = await fetch(capabilitiesUrl).then(
+              (response) => response.text()
             );
-            const rawMapping = extractedCarmaConf?.infoboxMapping;
-            infoboxMapping =
-              Array.isArray(rawMapping) || typeof rawMapping === "string"
-                ? rawMapping
-                : [];
+            const fetchedCapabilities = parser.toJSON(capabilitiesText);
+            if (!fetchedCapabilities) {
+              return;
+            }
+
+            const allLayers = getAllLeafLayers(fetchedCapabilities);
+            const targetLayer = allLayers.find(
+              (l) => l.Name === capabilitiesLayer
+            );
+
+            if (targetLayer) {
+              const extractedCarmaConf = extractCarmaConfig(
+                targetLayer.KeywordList
+              );
+              const rawMapping = extractedCarmaConf?.infoboxMapping;
+              infoboxMapping =
+                Array.isArray(rawMapping) || typeof rawMapping === "string"
+                  ? rawMapping
+                  : [];
+            }
+          } catch (error) {
+            console.warn(
+              "[styleBuilder] WMS capabilities unreachable — no infobox mapping",
+              { url: capabilitiesUrl, error }
+            );
+            return;
           }
         }
       }
@@ -346,14 +435,26 @@ function convertTo4326(x: number, y: number): [number, number] {
 }
 
 /**
- * Transform POI features from Web Mercator to WGS84
+ * Transform POI features from Web Mercator to WGS84.
+ * Features without Point coordinates (e.g. `geometry: null`) are dropped:
+ * a single broken feature must not take the whole layer down.
  */
 export const transformedPois = (
   pois: GeoJSON.FeatureCollection
 ): GeoJSON.FeatureCollection => {
+  const features = pois.features.filter((feature) => {
+    const coordinates = (feature.geometry as GeoJSON.Point | null)
+      ?.coordinates;
+    return Array.isArray(coordinates) && coordinates.length >= 2;
+  });
+  if (features.length < pois.features.length) {
+    console.warn("[styleBuilder] skipping POI features without coordinates", {
+      skipped: pois.features.length - features.length,
+    });
+  }
   return {
     ...pois,
-    features: pois.features.map((feature) => ({
+    features: features.map((feature) => ({
       ...feature,
       geometry: {
         ...feature.geometry,
@@ -368,55 +469,6 @@ export const transformedPois = (
   } as GeoJSON.FeatureCollection;
 };
 
-/**
- * Prefix image names inside a fill-pattern expression with the sprite namespace.
- *
- * Two strategies depending on expression type:
- * - step/interpolate (zoom-dependent): MapLibre requires these as the top-level
- *   expression, so we walk the structure in JS and prefix each string image name.
- * - Everything else (case, match, feature-property-driven, plain string): we use
- *   ["concat", "spriteId:", expr] and let MapLibre resolve it at runtime, because
- *   feature properties (["get", ...]) can't be resolved at build time.
- */
-export const prefixPatternExpression = (
-  spriteId: string,
-  expr: unknown
-): unknown => {
-  if (typeof expr === "string") {
-    return `${spriteId}:${expr}`;
-  }
-  if (!Array.isArray(expr)) return expr;
-
-  const [op, ...rest] = expr;
-  if (op === "step") {
-    // ["step", input, defaultValue, stop1, value1, stop2, value2, ...]
-    return [
-      "step",
-      rest[0],
-      ...rest
-        .slice(1)
-        .map((v, i) =>
-          i % 2 === 0 ? prefixPatternExpression(spriteId, v) : v
-        ),
-    ];
-  }
-  if (op === "interpolate") {
-    // ["interpolate", interpolation, input, stop1, value1, stop2, value2, ...]
-    return [
-      "interpolate",
-      rest[0],
-      rest[1],
-      ...rest
-        .slice(2)
-        .map((v, i) =>
-          i % 2 === 1 ? prefixPatternExpression(spriteId, v) : v
-        ),
-    ];
-  }
-  // For all other expressions (case, match, etc.): let MapLibre resolve at runtime
-  return ["concat", `${spriteId}:`, expr];
-};
-
 export interface VectorStylesToMapLibreStyleOptions {
   layers?: LibreLayer[];
   backgroundStyle?: StyleSpecification;
@@ -425,10 +477,99 @@ export interface VectorStylesToMapLibreStyleOptions {
   overrideGlyphs?: string;
 }
 
+/** Which MapLibre sources a host app layer (`carmaLayerId`) ended up owning. */
+export interface LayerSourceRegistration {
+  carmaLayerId: string;
+  sourceIds: string[];
+}
+
 export interface VectorStylesToMapLibreStyleResult {
   style: StyleSpecification;
   geoJsonMetadata: GeoJsonStyleMetadata[];
+  layerSources: LayerSourceRegistration[];
+  failedLayerIds: string[];
 }
+
+/**
+ * A layer with several invalid properties can report them one at a time, so the
+ * style is re-validated after a drop. Bounded because a validator that keeps
+ * reporting an error we cannot attribute to a layer must not spin forever.
+ */
+const MAX_VALIDATION_PASSES = 3;
+
+/** `layers[2].paint.line-opacity: …` -> 2 */
+const layerIndexFromMessage = (message: string): number | null => {
+  const match = /^layers\[(\d+)\]/.exec(message);
+  return match ? Number(match[1]) : null;
+};
+
+const dropInvalidLayers = (
+  style: StyleSpecification,
+  layerSources: LayerSourceRegistration[]
+): string[] => {
+  const ownerBySource = new Map<string, string>();
+  for (const { carmaLayerId, sourceIds } of layerSources) {
+    for (const sourceId of sourceIds) {
+      ownerBySource.set(sourceId, carmaLayerId);
+    }
+  }
+
+  const failed = new Set<string>();
+
+  for (let pass = 0; pass < MAX_VALIDATION_PASSES; pass++) {
+    const errors = validateStyleMin(style);
+    if (errors.length === 0) {
+      break;
+    }
+
+    const messagesByIndex = new Map<number, string[]>();
+    for (const error of errors) {
+      const index = layerIndexFromMessage(error.message);
+      if (index === null) {
+        // Not a layer problem (a source, the sprite, the glyphs): there is
+        // nothing to drop, and MapLibre will refuse the style. Say so loudly.
+        console.error(
+          "[styleBuilder] invalid style outside of a layer, MapLibre will reject it:",
+          error.message
+        );
+        continue;
+      }
+      const messages = messagesByIndex.get(index) ?? [];
+      messages.push(error.message);
+      messagesByIndex.set(index, messages);
+    }
+    if (messagesByIndex.size === 0) {
+      break;
+    }
+
+    style.layers = style.layers.filter((styleLayer, index) => {
+      const messages = messagesByIndex.get(index);
+      if (!messages) {
+        return true;
+      }
+      const source = (styleLayer as { source?: string }).source;
+      const carmaLayerId = source ? ownerBySource.get(source) : undefined;
+      if (carmaLayerId) {
+        failed.add(carmaLayerId);
+      }
+      console.warn(
+        "[styleBuilder] dropping layer MapLibre would reject — the rest of the style is kept",
+        { layer: styleLayer.id, carmaLayerId, errors: messages }
+      );
+      return false;
+    });
+  }
+
+  return [...failed];
+};
+
+const fetchJson = async (url: string): Promise<any> => {
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`${response.status} ${response.statusText} for ${url}`);
+  }
+  return response.json();
+};
 
 /**
  * Convert vector styles and GeoJSON layers to a MapLibre style specification
@@ -442,6 +583,29 @@ export const vectorStylesToMapLibreStyle = async ({
   const defaultSprite = "https://tiles.cismet.de/poi/sprites";
   const customSprites: SpriteSpecification = [];
   const geoJsonMetadata: GeoJsonStyleMetadata[] = [];
+  const layerSources: LayerSourceRegistration[] = [];
+  const failedLayerIds: string[] = [];
+  // url prefixes of the sources of styles marked `carmaConf.cache: "forced"`
+  const forcedCachePrefixes: string[] = [];
+
+  // Build stable, position-independent source/layer ids. Deriving ids from the
+  // layer's content (WMS layers / name) instead of its array index means a
+  // reorder produces ids identical to the previous render, so MapLibre's
+  // setStyle diff keeps the existing sources (and their cached tiles) and only
+  // reorders layers — no GetMap refetch. A numeric suffix is appended only when
+  // two layers would otherwise collide on the same base id (rare: duplicate WMS
+  // layers / names).
+  const usedIds = new Set<string>();
+  const makeUniqueId = (base: string): string => {
+    let candidate = base;
+    let suffix = 2;
+    while (usedIds.has(candidate)) {
+      candidate = `${base}-${suffix}`;
+      suffix += 1;
+    }
+    usedIds.add(candidate);
+    return candidate;
+  };
 
   // Use provided backgroundStyle or Wuppertal default
   const baseStyle: StyleSpecification =
@@ -459,19 +623,62 @@ export const vectorStylesToMapLibreStyle = async ({
 
   // Process layers array if provided
   if (layers && layers.length > 0) {
-    // Fetch all remote data in parallel, then merge sequentially
+    // Fetch all remote data in parallel, then merge sequentially.
+    // A layer whose remote data is unreachable resolves to null and is skipped:
+    // rejecting here would abort the whole style build, leaving the map blank
+    // and every layer stuck in "preparing" because setStyle never runs.
     const prefetched = await Promise.all(
       layers.map(async (layer) => {
-        if (layer.type === "vector") {
-          const response = await fetch(layer.style!);
-          return { type: "vector" as const, data: await response.json() };
-        } else if (layer.type === "geojson") {
-          const result = await extractGeoJson(layer.data!);
-          return { type: "geojson" as const, data: transformedPois(result) };
-        } else if (layer.type === "wms" || layer.type === "wmts") {
-          return { type: "wms" as const, data: layer };
+        try {
+          if (layer.type === "vector") {
+            if (!layer.style) {
+              console.warn(
+                "[styleBuilder] vector layer has no style — skipping",
+                { name: layer.name }
+              );
+              return null;
+            }
+            if (typeof layer.style === "string") {
+              const fetched = await fetchJson(layer.style);
+              const transformed = layer.userStyleTransform
+                ? layer.userStyleTransform(fetched) ?? fetched
+                : fetched;
+              return { type: "vector" as const, data: transformed };
+            }
+            // Deep-clone the inline spec so the per-render prefixing below
+            // doesn't mutate the caller's object (which would compound IDs
+            // on every rerender).
+            const cloned = JSON.parse(JSON.stringify(layer.style));
+            const transformed = layer.userStyleTransform
+              ? layer.userStyleTransform(cloned) ?? cloned
+              : cloned;
+            return {
+              type: "vector" as const,
+              data: transformed,
+            };
+          } else if (layer.type === "geojson") {
+            const result = await extractGeoJson(layer.data!);
+            return { type: "geojson" as const, data: transformedPois(result) };
+          } else if (layer.type === "wms" || layer.type === "wmts") {
+            return { type: "wms" as const, data: layer };
+          } else if (layer.type === "tiles") {
+            return { type: "tiles" as const, data: layer };
+          }
+          return null;
+        } catch (error) {
+          console.warn(
+            "[styleBuilder] layer data unreachable — skipping layer",
+            {
+              name: (layer as { name?: string }).name,
+              type: layer.type,
+              error,
+            }
+          );
+          if (layer.carmaLayerId) {
+            failedLayerIds.push(layer.carmaLayerId);
+          }
+          return null;
         }
-        return null;
       })
     );
 
@@ -480,8 +687,15 @@ export const vectorStylesToMapLibreStyle = async ({
       const fetched = prefetched[index];
       if (!fetched) continue;
 
+      const recordSources = (sourceIds: string[]) => {
+        if (layer.carmaLayerId && sourceIds.length > 0) {
+          layerSources.push({ carmaLayerId: layer.carmaLayerId, sourceIds });
+        }
+      };
+
       if (layer.type === "vector") {
         const additionalStyle = fetched.data;
+        const providesTerrain = styleProvidesTerrain(additionalStyle);
         let capabilitiesLayer = "";
 
         if (layer.layer) {
@@ -490,105 +704,149 @@ export const vectorStylesToMapLibreStyle = async ({
         }
 
         const layerId = capabilitiesLayer || layer.name;
-        let spriteId = layerId.replace(":", "_");
-        if (additionalStyle.sprite) {
-          spriteId = slugify(additionalStyle.sprite, {
-            remove: /[^a-zA-Z0-9]/g,
-            lower: true,
-          });
 
-          const spriteExists = (
-            customSprites as Array<{ id: string; url: string }>
-          ).some((sprite) => sprite.id === spriteId);
-          if (!spriteExists) {
-            (customSprites as Array<{ id: string; url: string }>).push({
-              id: spriteId,
-              url: additionalStyle.sprite,
-            });
+        // Namespace source IDs to avoid collisions between vector layers that
+        // happen to use the same internal source name (e.g. multiple saved
+        // measurements both naming their source "adhoc"). Build a rename map,
+        // emit a namespaced sources object, and rewrite each layer's `source`
+        // reference below.
+        const sourceRename: Record<string, string> = {};
+        const namespacedSources: Record<string, SourceSpecification> = {};
+        for (const [srcId, srcDef] of Object.entries(
+          (additionalStyle.sources as Record<string, SourceSpecification>) || {}
+        )) {
+          const namespacedId = `${layerId}::${srcId}`;
+          sourceRename[srcId] = namespacedId;
+          namespacedSources[namespacedId] = srcDef;
+          if (styleForcesCache(additionalStyle)) {
+            forcedCachePrefixes.push(...sourceUrlPrefixes(srcDef));
           }
         }
+
+        // Register the style's sprite(s) once per URL; a sprite array
+        // (MapLibre >= 3) contributes one registration per entry.
+        const spriteNamespace = resolveSpriteNamespace(
+          additionalStyle.sprite,
+          layerId.replace(":", "_")
+        );
+        const registeredSprites = customSprites as SpriteRegistration[];
+        for (const sprite of spriteNamespace.sprites) {
+          if (!registeredSprites.some((s) => s.id === sprite.id)) {
+            registeredSprites.push(sprite);
+          }
+        }
+        const userFilter = (layer as { userFilter?: unknown[] | null })
+          .userFilter;
         additionalStyle.layers = additionalStyle.layers.map(
-          (styleLayer: LayerSpecification) => ({
-            ...styleLayer,
-            id: `${layerId}-${styleLayer.id}`,
-            metadata: {
-              ...(
-                styleLayer as LayerSpecification & {
-                  metadata?: Record<string, unknown>;
-                }
-              ).metadata,
-              "z-index": index,
-              "layer-id": layerId,
-            },
-            paint: {
-              ...styleLayer.paint,
-              ...(() => {
-                if (styleLayer.id.toLowerCase().includes("selection"))
-                  return {};
-                // Symbol layers need both text-opacity and icon-opacity
-                const props =
-                  styleLayer.type === "symbol"
-                    ? ["text-opacity", "icon-opacity"]
-                    : ([getPaintProperty(styleLayer)].filter(
-                        Boolean
-                      ) as string[]);
-                if (props.length === 0) return {};
-                const layerOpacity = layer.opacity ?? 1;
-                const result: Record<string, unknown> = {};
-                for (const prop of props) {
-                  const baseOpacity =
-                    (styleLayer.paint as Record<string, unknown>)?.[prop] || 1;
-                  result[prop] =
-                    typeof baseOpacity === "number"
-                      ? baseOpacity * layerOpacity
-                      : layerOpacity < 1
-                      ? layerOpacity
-                      : baseOpacity;
-                }
-                return result;
-              })(),
-              ...((styleLayer.paint as Record<string, unknown>)?.[
-                "fill-pattern"
-              ] !== undefined
-                ? {
-                    "fill-pattern": prefixPatternExpression(
-                      spriteId,
-                      (styleLayer.paint as Record<string, unknown>)[
-                        "fill-pattern"
-                      ]
-                    ),
-                  }
+          (styleLayer: LayerSpecification) => {
+            const styleLayerMetadata = (
+              styleLayer as LayerSpecification & {
+                metadata?: Record<string, unknown>;
+              }
+            ).metadata;
+            const src = (styleLayer as { source?: string }).source;
+            const origFilter =
+              (styleLayer as { filter?: unknown[] }).filter ?? null;
+            let bakedFilter: unknown[] | null = origFilter;
+            if (userFilter) {
+              bakedFilter = origFilter
+                ? (["all", origFilter, userFilter] as unknown[])
+                : (userFilter as unknown[]);
+            }
+            return {
+              ...styleLayer,
+              id: `${layerId}-${styleLayer.id}`,
+              ...(src && sourceRename[src]
+                ? { source: sourceRename[src] }
                 : {}),
-            },
-            layout: {
-              ...(
-                styleLayer as LayerSpecification & {
-                  layout?: Record<string, unknown>;
-                }
-              ).layout,
-              ...((
-                styleLayer as LayerSpecification & {
-                  layout?: Record<string, unknown>;
-                }
-              ).layout?.["icon-image"] !== undefined
-                ? {
-                    "icon-image": [
-                      "concat",
-                      `${spriteId}:`,
-                      (
-                        styleLayer as LayerSpecification & {
-                          layout?: Record<string, unknown>;
-                        }
-                      ).layout?.["icon-image"],
-                    ],
+              ...(userFilter ? { filter: bakedFilter as never } : {}),
+              metadata: {
+                ...withTerrainProviderMetadata(
+                  styleLayerMetadata,
+                  providesTerrain
+                ),
+                "z-index": index,
+                "layer-id": layerId,
+                // What the layer bar's slider asks of this layer. A 2D layer
+                // gets it baked into its paint properties just below, but a
+                // layer that only carries a 3D configuration has no paint to
+                // bake it into, so it travels here as well.
+                "layer-opacity": layer.opacity ?? 1,
+                // the catalog id, which is what the layer apis speak;
+                // "layer-id" above is the style's own name for the layer
+                ...(layer.carmaLayerId
+                  ? { "carma-layer-id": layer.carmaLayerId }
+                  : {}),
+                ...(userFilter ? { originalFilter: origFilter } : {}),
+              },
+              paint: {
+                ...styleLayer.paint,
+                ...(() => {
+                  if (styleLayer.id.toLowerCase().includes("selection"))
+                    return {};
+                  // Symbol layers need both text-opacity and icon-opacity
+                  const props =
+                    styleLayer.type === "symbol"
+                      ? ["text-opacity", "icon-opacity"]
+                      : ([getPaintProperty(styleLayer)].filter(
+                          Boolean
+                        ) as string[]);
+                  if (props.length === 0) return {};
+                  const layerOpacity = layer.opacity ?? 1;
+                  // A layer may ask for its opacity changes to be animated. The
+                  // whole style is rebuilt and diffed on every change here, so
+                  // the duration has to travel with the layer as a paint
+                  // property; MapLibre picks it up when the diff moves the
+                  // opacity. Absent, its own default applies.
+                  const transitionSpec = toOpacityTransitionSpec(
+                    layer.opacityTransition
+                  );
+                  const result: Record<string, unknown> = {};
+                  for (const prop of props) {
+                    const baseOpacity =
+                      (styleLayer.paint as Record<string, unknown>)?.[prop] ||
+                      1;
+                    result[prop] =
+                      typeof baseOpacity === "number"
+                        ? baseOpacity * layerOpacity
+                        : layerOpacity < 1
+                        ? layerOpacity
+                        : baseOpacity;
+                    if (transitionSpec) {
+                      result[`${prop}-transition`] = transitionSpec;
+                    }
                   }
-                : {}),
-            },
-          })
+                  return result;
+                })(),
+                ...prefixSpriteImages(
+                  spriteNamespace,
+                  styleLayer.paint as Record<string, unknown> | undefined,
+                  SPRITE_IMAGE_PAINT_PROPERTIES
+                ),
+              },
+              layout: {
+                ...(
+                  styleLayer as LayerSpecification & {
+                    layout?: Record<string, unknown>;
+                  }
+                ).layout,
+                ...prefixSpriteImages(
+                  spriteNamespace,
+                  (
+                    styleLayer as LayerSpecification & {
+                      layout?: Record<string, unknown>;
+                    }
+                  ).layout,
+                  SPRITE_IMAGE_LAYOUT_PROPERTIES
+                ),
+              },
+            };
+          }
         );
 
-        style.sources = { ...style.sources, ...additionalStyle.sources };
+        style.sources = { ...style.sources, ...namespacedSources };
         style.layers = [...style.layers!, ...additionalStyle.layers];
+        recordSources(Object.keys(namespacedSources));
 
         // Adopt glyphs from the first vector style that provides them
         // (unless explicitly set via the glyphs option)
@@ -597,7 +855,9 @@ export const vectorStylesToMapLibreStyle = async ({
         }
       } else if (layer.type === "geojson") {
         const transformedData = fetched.data;
-        const sourceId = `geojson-source-${index}`;
+        const sourceId = makeUniqueId(
+          `geojson-source-${layer.name.replace(/[^a-zA-Z0-9]/g, "-")}`
+        );
         const colorProperty = layer.colorProperty ?? "schrift";
 
         // Get unique colors from the geojson features
@@ -747,22 +1007,69 @@ export const vectorStylesToMapLibreStyle = async ({
         });
 
         style.layers = [...style.layers!, ...geoJsonLayers];
+        recordSources([sourceId]);
       } else if (layer.type === "wms" || layer.type === "wmts") {
         const sanitized = layer.layers.replace(/[^a-zA-Z0-9]/g, "-");
-        const sourceId = `source-${sanitized}-${index}`;
-        const id = `${sanitized}-${index}`;
+        const id = makeUniqueId(sanitized);
+        const sourceId = `source-${id}`;
         const version = layer.version || "1.1.1";
         const crsParam = version >= "1.3.0" ? "crs" : "srs";
         const isWmts = layer.type === "wmts";
 
+        if (layer.nonTiled) {
+          style.sources[sourceId] = createNonTiledImageSource();
+          style.layers.push({
+            id: id,
+            type: "raster",
+            source: sourceId,
+            paint: {
+              "raster-opacity": layer.opacity ?? 1,
+              ...(toOpacityTransitionSpec(
+                "opacityTransition" in layer
+                  ? layer.opacityTransition
+                  : undefined
+              )
+                ? {
+                    "raster-opacity-transition": toOpacityTransitionSpec(
+                      "opacityTransition" in layer
+                        ? layer.opacityTransition
+                        : undefined
+                    ),
+                  }
+                : {}),
+              ...("rasterPaint" in layer ? layer.rasterPaint : undefined),
+            },
+            metadata: {
+              "z-index": index,
+              "layer-id": id,
+              ...createNonTiledMetadata({
+                url: layer.url,
+                layers: layer.layers,
+                styles: layer.styles,
+                version: layer.version,
+                format: layer.format,
+                transparent: layer.transparent,
+                isWmts,
+              }),
+            },
+          });
+          recordSources([sourceId]);
+          continue;
+        }
+
+        const querySep = layer.url.endsWith("?")
+          ? ""
+          : layer.url.includes("?")
+          ? "&"
+          : "?";
         style.sources[sourceId] = {
           type: "raster",
           tiles: [
-            `${layer.url}${
-              layer.url.endsWith("?") ? "" : "?"
-            }service=WMS&version=${version}&request=GetMap&layers=${
+            `${
+              layer.url
+            }${querySep}service=WMS&version=${version}&request=GetMap&layers=${
               layer.layers
-            }&styles=${layer.styles || (isWmts ? "default" : "")}&format=${
+            }&styles=${layer.styles || ""}&format=${
               layer.format || "image/png"
             }&transparent=${layer.transparent ? "true" : "false"}${
               isWmts ? "&type=wmts" : ""
@@ -779,6 +1086,17 @@ export const vectorStylesToMapLibreStyle = async ({
           source: sourceId,
           paint: {
             "raster-opacity": layer.opacity ?? 1,
+            ...(toOpacityTransitionSpec(
+              "opacityTransition" in layer ? layer.opacityTransition : undefined
+            )
+              ? {
+                  "raster-opacity-transition": toOpacityTransitionSpec(
+                    "opacityTransition" in layer
+                      ? layer.opacityTransition
+                      : undefined
+                  ),
+                }
+              : {}),
             ...("rasterPaint" in layer ? layer.rasterPaint : undefined),
           },
           metadata: {
@@ -786,6 +1104,44 @@ export const vectorStylesToMapLibreStyle = async ({
             "layer-id": id,
           },
         });
+        recordSources([sourceId]);
+      } else if (layer.type === "tiles") {
+        const sanitized = layer.name.replace(/[^a-zA-Z0-9]/g, "-");
+        const id = makeUniqueId(sanitized);
+        const sourceId = `source-${id}`;
+
+        style.sources[sourceId] = {
+          type: "raster",
+          tiles: [layer.url],
+          tileSize: layer.tileSize ?? 256,
+          ...(layer.maxZoom !== undefined ? { maxzoom: layer.maxZoom } : {}),
+        };
+
+        style.layers.push({
+          id: id,
+          type: "raster",
+          source: sourceId,
+          paint: {
+            "raster-opacity": layer.opacity ?? 1,
+            ...(toOpacityTransitionSpec(
+              "opacityTransition" in layer ? layer.opacityTransition : undefined
+            )
+              ? {
+                  "raster-opacity-transition": toOpacityTransitionSpec(
+                    "opacityTransition" in layer
+                      ? layer.opacityTransition
+                      : undefined
+                  ),
+                }
+              : {}),
+            ...("rasterPaint" in layer ? layer.rasterPaint : undefined),
+          },
+          metadata: {
+            "z-index": index,
+            "layer-id": id,
+          },
+        });
+        recordSources([sourceId]);
       }
       // COG layers are handled separately via map.addSource/addLayer after setStyle
     }
@@ -795,5 +1151,8 @@ export const vectorStylesToMapLibreStyle = async ({
     style.sprite = customSprites;
   }
 
-  return { style, geoJsonMetadata };
+  failedLayerIds.push(...dropInvalidLayers(style, layerSources));
+
+  setForcedCachePrefixes(forcedCachePrefixes);
+  return { style, geoJsonMetadata, layerSources, failedLayerIds };
 };

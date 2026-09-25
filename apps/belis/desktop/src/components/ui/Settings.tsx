@@ -1,5 +1,13 @@
 import { useDispatch, useSelector } from "react-redux";
-import { Button, Checkbox, Popconfirm, Radio, Slider, Switch, message } from "antd";
+import {
+  Button,
+  Checkbox,
+  Popconfirm,
+  Radio,
+  Slider,
+  Switch,
+  message,
+} from "antd";
 import { clearAllDefaults } from "../../store/slices/creationDefaults";
 import {
   getActiveBackgroundLayer,
@@ -209,9 +217,7 @@ const Settings = () => {
           </div>
           <Switch
             checked={dangerousDeleteMode}
-            onChange={(checked) =>
-              dispatch(setDangerousDeleteMode(checked))
-            }
+            onChange={(checked) => dispatch(setDangerousDeleteMode(checked))}
             style={{ transform: "scale(1.2)", transformOrigin: "right center" }}
           />
         </div>

@@ -14,15 +14,21 @@ import { useDispatch, useSelector } from "react-redux";
 import { useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 
-import { faFilter } from "@fortawesome/free-solid-svg-icons";
+import {
+  faEye,
+  faEyeSlash,
+  faFilter,
+  faThumbtack,
+} from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import L from "leaflet";
 
 import { TopicMapContext } from "react-cismap/contexts/TopicMapContextProvider";
 
 import type { BackgroundLayer, Layer } from "@carma-mapping/layers";
-import { getInteractionButtons } from "@carma-mapping/layers";
-import { cn, getHashParams } from "@carma-commons/utils";
+import { getInteractionButtons, isLayerGroup } from "@carma-mapping/layers";
+import { isAlwaysOnTop } from "@carma-mapping/addons";
+import { cn } from "@carma-commons/utils";
 import type { IconDefinition } from "@fortawesome/fontawesome-svg-core";
 
 import {
@@ -30,6 +36,7 @@ import {
   setSelectedFeature as setSelectedFeatureAction,
 } from "../../store/slices/features";
 import {
+  changeBackgroundVisibility,
   getClickFromInfoView,
   getLayerStack,
   getSelectedLayerIndex,
@@ -54,6 +61,10 @@ import {
   getUIShowLayerHideButtons,
   triggerFeatureInfoUpdateAction,
 } from "../../store/slices/ui";
+import {
+  MEASUREMENT_DRAW_TOOLS_INTERACTION_ID,
+  MEASUREMENT_LAYER_ID,
+} from "../../hooks/useMeasurementLayerButton";
 import "./pulsing.css";
 import "./tabs.css";
 
@@ -66,8 +77,11 @@ import {
 import DynamicStylingLayerIcon from "./DynamicStylingLayerIcon";
 import { Badge, Spin, Tooltip } from "antd";
 import { LoadingOutlined } from "@ant-design/icons";
-import { useLayerLoading } from "@carma-mapping/utils";
+import { useLayerLoading, useLibreLayerLoading } from "@carma-mapping/utils";
+import { useLibreContext } from "@carma-mapping/contexts";
+import { useLibreMapEnabled } from "../../hooks/useLibreMapEnabled";
 import { useGeoportalLayerButtonActions } from "../../hooks/use-geoportal-layer-button-actions";
+import { useCurrentMapZoom } from "../../hooks/useCurrentMapZoom";
 import {
   getGeoportalLayerButtonBackgroundClassName,
   getGeoportalLayerToolActionButtonClassName,
@@ -118,12 +132,17 @@ const GeoportalLayerButton = ({
     },
   });
   const dispatch = useDispatch();
+  const isLibreMap = useLibreMapEnabled();
   const { routedMapRef } = useContext<typeof TopicMapContext>(TopicMapContext);
 
-  const { loading, error } = useLayerLoading({
+  const { map: libreMap } = useLibreContext();
+  const leafletLoading = useLayerLoading({
     map: routedMapRef?.leafletMap?.leafletElement as L.Map,
     layer,
   });
+  const libreLoading = useLibreLayerLoading({ map: libreMap, layerId: id });
+  const loading = leafletLoading.loading || libreLoading.loading;
+  const error = leafletLoading.error || libreLoading.error;
 
   const selectedLayerIndex = useSelector(getSelectedLayerIndex);
   const showLayerHideButtons = useSelector(getUIShowLayerHideButtons);
@@ -136,6 +155,16 @@ const GeoportalLayerButton = ({
   const showSettings = index === selectedLayerIndex;
   const layerStack = useSelector(getLayerStack);
   const layersLength = layerStack.length;
+  /**
+   * What the narrow layout counts: the layers the visitor put on the map. A
+   * permanent row is the app's own and gets no button of its own either (see
+   * `LayerWrapper`), so counting it would announce a layer that cannot be
+   * reached from here. `layersLength` stays the whole stack, since the scroll
+   * edges index into it.
+   */
+  const visitorLayerCount = layerStack.filter(
+    (entry) => isLayerGroup(entry) || !entry.permanent
+  ).length;
   const showsNoSelection = useSelector(getSelectionShowsNoInfoView);
 
   const isPinned = !!(layer as Layer).pinned;
@@ -163,9 +192,7 @@ const GeoportalLayerButton = ({
     },
     [ref]
   );
-  const hashParams = getHashParams();
-  const zoom =
-    routedMapRef?.leafletMap?.leafletElement.getZoom() || hashParams.zoom;
+  const zoom = useCurrentMapZoom();
   const queryable =
     (layer?.queryable ||
       layer?.layerInfo?.accentColor ||
@@ -183,9 +210,9 @@ const GeoportalLayerButton = ({
 
   useEffect(() => {
     if (!inView && selectedLayerIndex === index) {
-      document.getElementById(`layer-${id}`).scrollIntoView();
+      document.getElementById(`layer-${id}`)?.scrollIntoView();
     }
-  }, [inView, selectedLayerIndex]);
+  }, [id, inView, index, selectedLayerIndex]);
 
   useEffect(() => {
     if (index === layersLength - 1 && inView) {
@@ -236,7 +263,38 @@ const GeoportalLayerButton = ({
           if (activeInteractionLayerID && activeInteractionLayerID !== id) {
             dispatch(setActiveInteractionLayerID(null));
           }
-          if (interactionButtons.length > 0) {
+          // The measurement layer has no dedicated interaction icon for its
+          // draw-tools panel — clicking the row itself toggles the panel.
+          // Only meaningful in the libreMap path; the leaflet path has its
+          // own drawing UI driven by leaflet-draw.
+          if (id === MEASUREMENT_LAYER_ID && isLibreMap) {
+            const isPanelOpen =
+              activeInteractionLayerID === id &&
+              activeInteractionButtonID ===
+                MEASUREMENT_DRAW_TOOLS_INTERACTION_ID;
+            dispatch(setActiveInteractionLayerID(isPanelOpen ? null : id));
+            dispatch(
+              setActiveInteractionButtonID(
+                isPanelOpen ? null : MEASUREMENT_DRAW_TOOLS_INTERACTION_ID
+              )
+            );
+            return;
+          }
+          if (layer.rowClickInteractionId) {
+            const panelId = layer.rowClickInteractionId;
+            const isPanelOpen =
+              activeInteractionLayerID === id &&
+              activeInteractionButtonID === panelId;
+            dispatch(setActiveInteractionLayerID(isPanelOpen ? null : id));
+            dispatch(
+              setActiveInteractionButtonID(isPanelOpen ? null : panelId)
+            );
+            return;
+          }
+          // A row that offers the info view falls through to the selection
+          // below: its own panel is opened from one of its buttons, so the row
+          // click is free to do what every other layer row does.
+          if (interactionButtons.length > 0 && !layer.hasInfoView) {
             if (interactionActivationMode === "button") {
               const primaryInteractionButton = interactionButtons[0];
               const isActive =
@@ -251,7 +309,7 @@ const GeoportalLayerButton = ({
             }
             return;
           }
-          if (layer.skipSelection) {
+          if (layer.skipSelection && !layer.hasInfoView) {
             return;
           }
           if (!clickFromInfoView) {
@@ -269,8 +327,8 @@ const GeoportalLayerButton = ({
           userSelect: "none",
           touchAction: "none",
         }}
-        {...listeners}
-        {...attributes}
+        {...(isPinned ? {} : listeners)}
+        {...(isPinned ? {} : attributes)}
         classNames={[
           getGeoportalLayerButtonBackgroundClassName({
             showsNoSelection,
@@ -282,16 +340,39 @@ const GeoportalLayerButton = ({
           "pl-3",
         ]}
       >
-        <DynamicStylingLayerIcon
-          layer={layer}
-          id={id}
-          fallbackIcon={layer.icon}
-          isBackgroundLayer={background}
-          iconClassName={loading && isCurrentlyVisible() ? "icon" : ""}
-        />
+        {background && showLayerHideButtons ? (
+          <button
+            type="button"
+            id={`backgroundLayerVisibilityButton-${id}`}
+            className="hover:text-gray-500 text-gray-600 flex items-center justify-center w-6"
+            onClick={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              dispatch(changeBackgroundVisibility(!layer.visible));
+            }}
+            aria-label={
+              layer.visible
+                ? "Hintergrundkarte ausblenden"
+                : "Hintergrundkarte einblenden"
+            }
+          >
+            <FontAwesomeIcon
+              icon={layer.visible ? faEye : faEyeSlash}
+              className="text-base leading-none"
+            />
+          </button>
+        ) : (
+          <DynamicStylingLayerIcon
+            layer={layer}
+            id={id}
+            fallbackIcon={layer.icon}
+            isBackgroundLayer={background}
+            iconClassName={loading && isCurrentlyVisible() ? "icon" : ""}
+          />
+        )}
 
-        {layersLength > 0 && (
-          <span className="text-base sm:hidden">{layersLength} Layer</span>
+        {visitorLayerCount > 0 && (
+          <span className="text-base sm:hidden">{visitorLayerCount} Layer</span>
         )}
         {error && (
           <div
@@ -305,6 +386,14 @@ const GeoportalLayerButton = ({
         {!background && (
           <>
             <span className="text-base ml-1">{title}</span>
+            {isAlwaysOnTop(layer) && (
+              <Tooltip title="Dieser Layer bleibt über den anderen">
+                <FontAwesomeIcon
+                  icon={faThumbtack}
+                  className="text-xs !text-gray-600 px-1.5"
+                />
+              </Tooltip>
+            )}
             {interactionActivationMode === "action" && layer.filterConfig && (
               <button
                 id={`layerInteractionButton-${id}`}

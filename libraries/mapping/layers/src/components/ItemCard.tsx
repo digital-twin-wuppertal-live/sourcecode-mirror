@@ -56,6 +56,7 @@ const ItemCard = memo(({ layer, isSelected }: ItemCardProps) => {
   const {
     setAdditionalLayers,
     activeLayers,
+    isWorkflowActive,
     favorites,
     addFavorite,
     removeFavorite,
@@ -72,6 +73,11 @@ const ItemCard = memo(({ layer, isSelected }: ItemCardProps) => {
   const [openDeleteModal, setOpenDeleteModal] = useState(false);
   const isWorkflow = layer.type === "workflow";
   const isLayerGroupWorkflow = isWorkflow && !!layer.workflowLayers?.length;
+  // a workflow is addable when clicking it does something on the map: it
+  // brings a layer group, or its tools carry an addon the host launches
+  // (e.g. the timeSlider's series); without either it is an inert card
+  const isActionableWorkflow =
+    isLayerGroupWorkflow || (isWorkflow && !!layer.tools?.length);
   // link/workflow items without thumbnail render a static placeholder, nothing loads
   const [isLoading, setIsLoading] = useState(
     layer.type !== "collection" &&
@@ -99,7 +105,10 @@ const ItemCard = memo(({ layer, isSelected }: ItemCardProps) => {
   const isActiveLayer =
     matchingActiveLayers.length > 0 ||
     (isLayerGroupWorkflow &&
-      activeLayers.some((activeLayer) => activeLayer.group?.id === layer.id));
+      activeLayers.some((activeLayer) => activeLayer.group?.id === layer.id)) ||
+    // a card that launches an addon instead of adding layers: the host owns
+    // that state, the layer stack knows nothing about it
+    (isWorkflow && !isLayerGroupWorkflow && !!isWorkflowActive?.(layer));
   const canShowInfo =
     layer.type === "layer" ||
     layer.type === "object" ||
@@ -145,6 +154,9 @@ const ItemCard = memo(({ layer, isSelected }: ItemCardProps) => {
             ? "Beschreibung im Open-Data-Portal"
             : "Datenquelle im Open-Data-Portal Wuppertal",
       });
+    }
+    if (layer.links?.length) {
+      result.push(...layer.links);
     }
     return result;
   }, [layer, carmaConf]);
@@ -315,7 +327,7 @@ const ItemCard = memo(({ layer, isSelected }: ItemCardProps) => {
               />
             )
           ) : null}
-          {isWorkflow && !isLayerGroupWorkflow ? null : layer.type ===
+          {isWorkflow && !isActionableWorkflow ? null : layer.type ===
             "link" ? (
             <a
               className="absolute left-1 top-1 text-3xl cursor-pointer z-50 text-white drop-shadow-[0_1.2px_1.2px_rgba(0,0,0,1)]"
@@ -358,7 +370,7 @@ const ItemCard = memo(({ layer, isSelected }: ItemCardProps) => {
               />
             </button>
           )}
-          {hovered && (!isWorkflow || isLayerGroupWorkflow) && (
+          {hovered && (!isWorkflow || isActionableWorkflow) && (
             <div className="flex flex-col items-center gap-2 absolute top-0 w-full h-full justify-center p-8 px-10">
               {layer.type === "link" ? (
                 <a

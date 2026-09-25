@@ -7,17 +7,16 @@ import {
 } from "@dnd-kit/sortable";
 import { Tabs } from "antd";
 import { useDispatch, useSelector } from "react-redux";
+import { layerMap } from "../../config";
 import {
-  cesiumBackgroundlayerNames,
-  cesiumDescriptions,
-  layerMap,
-} from "../../config";
+  findBackgroundCategory,
+  getBackgroundCategoryTitle,
+} from "../../config/backgroundConfig";
 import {
   changeVisibility,
   getBackgroundLayer,
   getLayerStack,
-  getSelectedLuftbildLayer,
-  getSelectedMapLayer,
+  getSelectedBackgroundEntry,
   setLayers,
 } from "../../store/slices/mapping";
 import LayerRow from "./LayerRow";
@@ -40,11 +39,11 @@ const BaseLayerInfo = () => {
   const [activeTab, setActiveTab] = useState("1");
   const dispatch: AppDispatch = useDispatch();
 
-  const selectedMapLayer = useSelector(getSelectedMapLayer);
-  const selectedLuftbildLayer = useSelector(getSelectedLuftbildLayer);
+  const selectedEntry = useSelector(getSelectedBackgroundEntry);
   const backgroundLayer = useSelector(getBackgroundLayer);
   const layers = useSelector(getLayerStack);
   const { isCesium } = useMapFrameworkSwitcherContext();
+  const category = findBackgroundCategory(backgroundLayer.id);
 
   const isListed = (entry: LayerStackEntry): boolean =>
     isLayerGroup(entry)
@@ -102,15 +101,10 @@ const BaseLayerInfo = () => {
   );
 
   const getBackgroundDescription = () => {
-    if (backgroundLayer.id === "karte") {
-      return isCesium
-        ? "LoD2-Gebäudemodell"
-        : layerMap[selectedMapLayer.id].description;
-    } else {
-      return isCesium
-        ? "3D-Mesh"
-        : layerMap[selectedLuftbildLayer.id].description;
+    if (isCesium) {
+      return category ? getBackgroundCategoryTitle(category, false) : "";
     }
+    return selectedEntry ? layerMap[selectedEntry.id]?.description : "";
   };
 
   return (
@@ -187,8 +181,8 @@ const BaseLayerInfo = () => {
                             layer={backgroundLayer}
                             id={backgroundLayer.id}
                             displayTitle={
-                              isCesium
-                                ? cesiumBackgroundlayerNames[backgroundLayer.id]
+                              isCesium && category
+                                ? getBackgroundCategoryTitle(category, false)
                                 : backgroundLayer.title
                             }
                             index={-1}
@@ -215,7 +209,7 @@ const BaseLayerInfo = () => {
                           className="text-base"
                           dangerouslySetInnerHTML={{
                             __html: isCesium
-                              ? cesiumDescriptions[backgroundLayer.id]?.eignung
+                              ? category?.description3d?.eignung
                               : backgroundLayer.eignung,
                           }}
                         />
@@ -227,7 +221,7 @@ const BaseLayerInfo = () => {
                           className="text-base"
                           dangerouslySetInnerHTML={{
                             __html: isCesium
-                              ? cesiumDescriptions[backgroundLayer.id]?.inhalt
+                              ? category?.description3d?.inhalt
                               : backgroundLayer.inhalt,
                           }}
                         />

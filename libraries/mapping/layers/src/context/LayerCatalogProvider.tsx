@@ -18,6 +18,7 @@ import {
   loadFavorites,
   persistFavorites,
 } from "./favoritesStorage";
+import { buildSelectedCategoryStorageKey } from "../helper/selectedCategoryStorage";
 import type { CategoryDefinition } from "../config/categoryDefinitions";
 import { defaultCategoryDefinitions } from "../config/categoryDefinitions";
 
@@ -35,6 +36,11 @@ interface CatalogState {
   /** ids of services whose capabilities are still on their initial fetch */
   loadingServiceIds: string[];
   replaceLayers: ExtendedItem[];
+  /**
+   * every item of the assembled catalog by id, including what only the built
+   * tree carries (additional config fragments, configured and dropped layers)
+   */
+  catalogItems: ReadonlyMap<string, Item>;
   selectedItem: Item | null;
   discoverRefetchRequested: boolean;
   /** stored with a `fav_` id prefix, matching the persisted shape */
@@ -48,6 +54,7 @@ const initialState: CatalogState = {
   loadingCapabilities: true,
   loadingServiceIds: [],
   replaceLayers: [],
+  catalogItems: new Map(),
   selectedItem: null,
   discoverRefetchRequested: false,
   favorites: [],
@@ -65,6 +72,7 @@ type CatalogAction =
       loadingCapabilities: boolean;
     }
   | { type: "replaceLayerUpserted"; layer: ExtendedItem }
+  | { type: "catalogItemsDerived"; items: ReadonlyMap<string, Item> }
   | { type: "itemSelected"; item: Item | null }
   | { type: "discoverRefetchRequested" }
   | { type: "discoverRefetchHandled" }
@@ -153,6 +161,11 @@ const catalogReducer = (
       replaceLayers[existingIndex] = action.layer;
       return { ...state, replaceLayers };
     }
+    case "catalogItemsDerived":
+      // the index is a memoized derivation, so its identity tracks its content
+      return state.catalogItems === action.items
+        ? state
+        : { ...state, catalogItems: action.items };
     case "itemSelected":
       return state.selectedItem === action.item
         ? state
@@ -225,6 +238,7 @@ interface CatalogDataActions {
     loadingCapabilities: boolean
   ) => void;
   upsertReplaceLayer: (layer: ExtendedItem) => void;
+  setCatalogItems: (items: ReadonlyMap<string, Item>) => void;
 }
 
 export interface CatalogDataContextValue extends CatalogDataActions {
@@ -232,6 +246,12 @@ export interface CatalogDataContextValue extends CatalogDataActions {
   loadingCapabilities: boolean;
   loadingServiceIds: string[];
   replaceLayers: ExtendedItem[];
+  /**
+   * every item of the assembled catalog by id. Resolve ids here rather than in
+   * serviceCategories, which lacks the layers the additional config adds on
+   * its own. Empty until a LayerCatalog has derived the catalog.
+   */
+  catalogItems: ReadonlyMap<string, Item>;
 }
 
 export interface CatalogSelectionActions {
@@ -271,6 +291,9 @@ const CatalogFavoritesContext = createContext<LayerCatalogContextValue | null>(
 );
 const CatalogCategoriesContext = createContext<CategoryDefinition[]>(
   defaultCategoryDefinitions
+);
+const CatalogSelectedCategoryKeyContext = createContext<string>(
+  buildSelectedCategoryStorageKey()
 );
 
 export const useCatalogData = (): CatalogDataContextValue => {
@@ -329,6 +352,10 @@ export const useIsInsideLayerCatalogProvider = () =>
 export const useCategoryDefinitions = () =>
   useContext(CatalogCategoriesContext);
 
+/** localStorage key the catalog remembers its selected main category under */
+export const useSelectedCategoryStorageKey = () =>
+  useContext(CatalogSelectedCategoryKeyContext);
+
 interface CatalogStateProviderProps {
   favoritesStorageKey: string;
   legacyFavoritesKey?: string;
@@ -377,6 +404,8 @@ const CatalogStateProvider = ({
         }),
       upsertReplaceLayer: (layer) =>
         dispatch({ type: "replaceLayerUpserted", layer }),
+      setCatalogItems: (items) =>
+        dispatch({ type: "catalogItemsDerived", items }),
     }),
     []
   );
@@ -441,6 +470,7 @@ const CatalogStateProvider = ({
       loadingCapabilities: state.loadingCapabilities,
       loadingServiceIds: state.loadingServiceIds,
       replaceLayers: state.replaceLayers,
+      catalogItems: state.catalogItems,
       ...dataActions,
     }),
     [
@@ -448,6 +478,7 @@ const CatalogStateProvider = ({
       state.loadingCapabilities,
       state.loadingServiceIds,
       state.replaceLayers,
+      state.catalogItems,
       dataActions,
     ]
   );
@@ -484,6 +515,12 @@ export interface LayerCatalogProviderProps {
   appKey?: string;
   storagePrefix?: string;
   /**
+   * storage namespace of the route, for state that must not travel between
+   * routes (the selected category, whose registry is route-specific);
+   * defaults to `appKey`, which every route of an app shares
+   */
+  storageScope?: string;
+  /**
    * localforage key of a redux-persist record to import favorites from ONCE:
    * only consulted while the lib's own favorites key was never written
    */
@@ -496,19 +533,27 @@ export const LayerCatalogProvider = ({
   categories = defaultCategoryDefinitions,
   appKey = "carma",
   storagePrefix = "defaultStorage",
+  storageScope,
   legacyFavoritesKey,
   children,
 }: LayerCatalogProviderProps) => (
   <LayerCatalogConfigProvider value={config ?? wuppLayerCatalogConfig}>
     <CatalogCategoriesContext.Provider value={categories}>
-      <CatalogQueryProvider>
-        <CatalogStateProvider
-          favoritesStorageKey={buildFavoritesStorageKey(appKey, storagePrefix)}
-          legacyFavoritesKey={legacyFavoritesKey}
-        >
-          {children}
-        </CatalogStateProvider>
-      </CatalogQueryProvider>
+      <CatalogSelectedCategoryKeyContext.Provider
+        value={buildSelectedCategoryStorageKey(
+          storageScope ?? appKey,
+          storagePrefix
+        )}
+      >
+        <CatalogQueryProvider>
+          <CatalogStateProvider
+            favoritesStorageKey={buildFavoritesStorageKey(appKey, storagePrefix)}
+            legacyFavoritesKey={legacyFavoritesKey}
+          >
+            {children}
+          </CatalogStateProvider>
+        </CatalogQueryProvider>
+      </CatalogSelectedCategoryKeyContext.Provider>
     </CatalogCategoriesContext.Provider>
   </LayerCatalogConfigProvider>
 );

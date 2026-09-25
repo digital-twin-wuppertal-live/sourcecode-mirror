@@ -11,6 +11,7 @@ import {
 import { LayerCatalog } from "@carma-mapping/layers";
 import type { CustomCategoryDefinition, Item } from "@carma-mapping/layers";
 import { useMapFrameworkSwitcherContext } from "@carma-mapping/components";
+import { useLibreContext } from "@carma-mapping/contexts";
 import { addCustomFeatureFlags } from "../../store/slices/layers";
 import {
   appendSavedLayerConfig,
@@ -32,6 +33,7 @@ import store from "../../store";
 import { withSavedMeasurementCarrierImport } from "../layers/measurement-import-utils";
 import { createResourceLayerUpdater } from "./resource-layer-updater";
 import { useCarmaMapAPIActions } from "@carma-mapping/carma-map-api";
+import { useWorkflowAddonLaunchers } from "./workflow-addon-launchers";
 
 const ResourceModal = () => {
   const { setCurrentStyle } = useMapStyle();
@@ -49,6 +51,7 @@ const ResourceModal = () => {
 
   const { routedMapRef: routedMap } =
     useContext<typeof TopicMapContext>(TopicMapContext);
+  const { map: libreMap } = useLibreContext();
 
   const {
     addFeature,
@@ -84,6 +87,15 @@ const ResourceModal = () => {
     [getIsCesium, getIsLeaflet]
   );
 
+  // the workflow cards whose tools launch an addon instead of adding layers
+  const {
+    startTimeSeries,
+    startFlowField,
+    startVehicleAnimation,
+    startFlood,
+    isWorkflowActive,
+  } = useWorkflowAddonLaunchers(messageApi);
+
   const updateLayers = withSavedMeasurementCarrierImport(
     createResourceLayerUpdater({
       dispatch,
@@ -96,9 +108,14 @@ const ResourceModal = () => {
       toggleFramework: toggle,
       getFrameworkMode,
       routedMap,
+      libreMap,
       setCurrentStyle,
       messageApi,
       addLayerById,
+      startTimeSeries,
+      startFlowField,
+      startVehicleAnimation,
+      startFlood,
     }),
     { measurements }
   );
@@ -118,6 +135,7 @@ const ResourceModal = () => {
           dispatch(deleteSavedLayerConfig(layer.id));
         }}
         activeLayers={[backgroundLayer, ...activeLayers]}
+        isWorkflowActive={isWorkflowActive}
         customCategories={customCategories}
         updateActiveLayer={(layer) => {
           dispatch(updateLayer(layer));

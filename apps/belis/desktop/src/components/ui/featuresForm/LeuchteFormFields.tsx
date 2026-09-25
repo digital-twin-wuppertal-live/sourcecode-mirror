@@ -19,8 +19,7 @@ import {
   getPlaceholder,
 } from "./readOnlyFormUtils";
 import { FormItem } from "./DraftFieldHighlight";
-import toTitleCase from "../../../helper/toTitleCase";
-import dayjs from "dayjs";
+import { buildLeuchteFormValues } from "./leuchteFormValues";
 
 // Helper to sort options based on display text (same sorting as KeyTablesPage)
 type SortMode = "none" | "alphabetical" | "numeric";
@@ -118,12 +117,16 @@ interface LeuchtmittelItem {
   hersteller?: string;
 }
 
-// Helper type for nested objects with common properties
-interface NestedObject {
-  id?: number;
-  pk?: string;
-  strasse?: string;
+interface SensorbetreiberItem {
+  id: number;
+  key?: string;
+  name?: string;
+  beschreibung?: string;
 }
+
+/** Option label for the Sensorbetreiber select: the Beschreibung of the row. */
+const formatSensorbetreiber = (item: SensorbetreiberItem) =>
+  item.beschreibung ?? item.name ?? String(item.id);
 
 const FormLabel = ({ children }: { children: React.ReactNode }) => (
   <span className="text-sm font-medium text-gray-700">{children}</span>
@@ -220,6 +223,31 @@ const LeuchteFormFields = ({
   // Helper to create field name with optional prefix
   const fieldName = (name: string) => (namePrefix ? [namePrefix, name] : name);
 
+  const sensorbetreiberOptions = useMemo(
+    () =>
+      sortOptions(
+        (keyTablesData.sensorbetreiber || []) as SensorbetreiberItem[],
+        formatSensorbetreiber,
+        "alphabetical"
+      ),
+    [keyTablesData.sensorbetreiber]
+  );
+
+  // esave is currently the only Sensorbetreiber. Resolved by key/name rather
+  // than a hardcoded id so the lookup survives differing ids per environment;
+  // a single-row table is taken as-is.
+  const esaveId = useMemo(() => {
+    const match = sensorbetreiberOptions.find((item) =>
+      [item.key, item.name].some(
+        (value) => typeof value === "string" && value.trim().toLowerCase() === "esave"
+      )
+    );
+    if (match) return match.id;
+    return sensorbetreiberOptions.length === 1
+      ? sensorbetreiberOptions[0].id
+      : undefined;
+  }, [sensorbetreiberOptions]);
+
   useEffect(() => {
     if (externalForm) return;
     if (!leuchte) return;
@@ -241,90 +269,9 @@ const LeuchteFormFields = ({
     }
 
     {
-      const strassenschluessel = leuchte.tkey_strassenschluessel as
-        | NestedObject
-        | undefined;
-      const kennziffer = leuchte.tkey_kennziffer as NestedObject | undefined;
-      const leuchtentyp = leuchte.tkey_leuchtentyp as NestedObject | undefined;
-      const energielieferant = leuchte.tkey_energielieferant as
-        | NestedObject
-        | undefined;
-      const rundsteuerempfaenger = leuchte.rundsteuerempfaengerObject as
-        | NestedObject
-        | undefined;
-      const dk1Object = leuchte.fk_dk1Object as NestedObject | undefined;
-      const dk2Object = leuchte.fk_dk2Object as NestedObject | undefined;
-      const unterhLeuchte = leuchte.tkey_unterh_leuchte as
-        | NestedObject
-        | undefined;
-      const leuchtmittelObj = leuchte.leuchtmittelObject as
-        | NestedObject
-        | undefined;
-
-      const serverValues = {
-        // Straßenschlüssel
-        strassenschluessel_pk: strassenschluessel?.pk,
-        strassenschluessel_strasse: strassenschluessel?.strasse
-          ? toTitleCase(strassenschluessel.strasse)
-          : undefined,
-        // Kennziffer - use id for Select value
-        fk_kennziffer: kennziffer?.id ?? null,
-        // Laufende Nr. / Leuchtennummer
-        lfd_nummer: leuchte.lfd_nummer,
-        leuchtennummer: leuchte.leuchtennummer,
-        // Leuchtentyp - use id for Select value
-        fk_leuchttyp: leuchtentyp?.id ?? null,
-        // Inbetriebnahme / Zähler
-        inbetriebnahme_leuchte: leuchte.inbetriebnahme_leuchte
-          ? dayjs(leuchte.inbetriebnahme_leuchte as string)
-          : null,
-        zaehler: leuchte.zaehler,
-        // Montagefirma
-        montagefirma_leuchte: leuchte.montagefirma_leuchte,
-        // Energielieferant - use id for Select value
-        fk_energielieferant: energielieferant?.id ?? null,
-        // Schaltstelle
-        schaltstelle: leuchte.schaltstelle,
-        // Rundsteuerempfänger - use id for Select value
-        rundsteuerempfaenger: rundsteuerempfaenger?.id ?? null,
-        // Einbaudatum
-        einbaudatum: leuchte.einbaudatum
-          ? dayjs(leuchte.einbaudatum as string)
-          : null,
-        // Doppelkommando 1 - use id for Select value
-        fk_dk1: dk1Object?.id ?? leuchte.fk_dk1,
-        anzahl_1dk: leuchte.anzahl_1dk,
-        anschlussleistung_1dk: leuchte.anschlussleistung_1dk,
-        // Doppelkommando 2 - use id for Select value
-        fk_dk2: dk2Object?.id ?? leuchte.fk_dk2,
-        anzahl_2dk: leuchte.anzahl_2dk,
-        anschlussleistung_2dk: leuchte.anschlussleistung_2dk,
-        // Unterhalt Leuchte - use id for Select value
-        fk_unterhaltspflicht_leuchte: unterhLeuchte?.id ?? null,
-        // Leuchtmittelwechsel
-        wechseldatum: leuchte.wechseldatum
-          ? dayjs(leuchte.wechseldatum as string)
-          : null,
-        naechster_wechsel: leuchte.naechster_wechsel
-          ? dayjs(leuchte.naechster_wechsel as string)
-          : null,
-        // Leuchtmittel - use id for Select value
-        leuchtmittel: leuchtmittelObj?.id ?? leuchte.leuchtmittel,
-        // Lebensdauer
-        lebensdauer: leuchte.lebensdauer,
-        // Sonderturnus
-        sonderturnus: leuchte.wartungszyklus
-          ? dayjs(leuchte.wartungszyklus as string)
-          : null,
-        // Vorschaltgerät
-        vorschaltgeraet: leuchte.vorschaltgeraet,
-        // Erneuerung VG
-        wechselvorschaltgeraet: leuchte.wechselvorschaltgeraet
-          ? dayjs(leuchte.wechselvorschaltgeraet as string)
-          : null,
-        // Bemerkung
-        bemerkungen: leuchte.bemerkungen,
-      };
+      // Shared with the batch "Wiederholfelder einfügen" action, which builds
+      // the same values for Leuchten whose Datenblatt was never opened.
+      const serverValues = buildLeuchteFormValues(leuchte);
       form.setFieldsValue(serverValues);
       onOriginalValues?.(form.getFieldsValue());
 
@@ -450,6 +397,30 @@ const LeuchteFormFields = ({
       form.getFieldsValue()
     );
   }, [mastLfdNummer, isCreation, form]);
+
+  // Sensor-ID → Sensorbetreiber. Entering a Sensor-ID picks esave for the user
+  // (the server sets it as a fallback, but this way the link is visible right
+  // away); clearing the Sensor-ID drops the Betreiber again so the pair stays
+  // consistent. Driven by the input's own onChange, not by a value watcher, so
+  // loading a record that has a Sensor-ID but no Betreiber does not silently
+  // dirty the form on open.
+  const handleSensorIdChange = (value: string) => {
+    const hasSensorId = value.trim() !== "";
+    const current = form.getFieldValue(fieldName("sensorbetreiber"));
+    if (hasSensorId && current == null && esaveId != null) {
+      form.setFieldValue(fieldName("sensorbetreiber"), esaveId);
+      onValuesChangeRef.current?.(
+        { sensorbetreiber: esaveId },
+        form.getFieldsValue()
+      );
+    } else if (!hasSensorId && current != null) {
+      form.setFieldValue(fieldName("sensorbetreiber"), null);
+      onValuesChangeRef.current?.(
+        { sensorbetreiber: null },
+        form.getFieldsValue()
+      );
+    }
+  };
 
   return (
     <Form
@@ -716,6 +687,45 @@ const LeuchteFormFields = ({
           placeholder={getPlaceholder(readOnly, "Leistung eingeben")}
         />
       </FormItem>
+
+      {/* Sensor (esave) */}
+      <Row gutter={16}>
+        <Col span={8}>
+          <FormItem
+            name={fieldName("sensorid")}
+            label={<FormLabel>Sensor-ID</FormLabel>}
+            className="mb-4"
+          >
+            <Input
+              size="large"
+              placeholder={getPlaceholder(readOnly, "Sensor-ID eingeben")}
+              onChange={(e) => handleSensorIdChange(e.target.value)}
+            />
+          </FormItem>
+        </Col>
+        <Col span={16}>
+          <FormItem
+            name={fieldName("sensorbetreiber")}
+            label={<FormLabel>Sensorbetreiber</FormLabel>}
+            className="mb-4"
+          >
+            <Select
+              placeholder={getPlaceholder(readOnly, "Sensorbetreiber auswählen")}
+              className="w-full"
+              size="large"
+              allowClear
+              showSearch
+              optionFilterProp="children"
+            >
+              {sensorbetreiberOptions.map((item) => (
+                <Select.Option key={item.id} value={item.id}>
+                  {formatSensorbetreiber(item)}
+                </Select.Option>
+              ))}
+            </Select>
+          </FormItem>
+        </Col>
+      </Row>
 
       {/* Doppelkommando 2 */}
       <Row gutter={16}>

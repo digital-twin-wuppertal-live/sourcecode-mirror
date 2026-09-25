@@ -1,6 +1,8 @@
 import {
   buildWorkflowsCategoryDefinition,
   defaultCategoryDefinitions,
+  filterPerspectivesByAvailability,
+  type AdditionalLayer,
   type CatalogFilters,
   type CatalogSubCategory,
   type CategoryDefinition,
@@ -8,8 +10,10 @@ import {
   type LayerCatalogConfig,
   type WorkflowPerspective,
 } from "@carma-mapping/layers";
-import { resolveFeatureFlags } from "@carma-providers/feature-flag";
-import type { Addon } from "@carma-mapping/addons";
+import { filterAddonsByAvailability, type AddonEntry } from "@carma-mapping/addons";
+import { isAvailable, type Availability } from "@carma-commons/utils";
+
+import type { BackgroundConfigOverride } from "../../config/geoportalBackground";
 
 import {
   defaultVisibleControls,
@@ -18,21 +22,26 @@ import {
 } from "../../store/slices/ui";
 
 import { layerCatalogConfig } from "../discover";
-import { gesundheitFachzwilling } from "./gesundheit";
-import { bodenFachzwilling } from "./boden";
-import { outletFachzwilling } from "./outlet";
-import { featureFlagConfig } from "../../config/featureFlags";
-
-const isFachzwillingeEnabled =
-  resolveFeatureFlags(featureFlagConfig).featureFlagFachzwillinge === true;
+import { allFachzwillingRoutes } from "./routes";
+import {
+  activeFeatureFlags,
+  availabilityContext,
+} from "../../config/availability";
 
 /**
  * A Fachzwilling is a thematic geoportal variant: an own route whose layer
  * catalog is narrowed to the theme via always-active filters. Registering a
  * route here generates the hash route (main.tsx), the link card in the
  * "Fachzwillinge" subcategory of the "Themenzwillinge" catalog category and the
- * navbar breadcrumb (TopNavbar). All of it only while featureFlagFachzwillinge
- * is active, see isFachzwillingeEnabled.
+ * navbar breadcrumb (TopNavbar).
+ *
+ * Two independent gates apply:
+ * - `availability` decides whether the route exists at all, i.e. whether it can
+ *   be opened by its url. Without it the route is reachable on every deployment
+ *   without any feature flag. The same option gates a route's perspectives,
+ *   workflows and addons individually, see resolveRouteContents.
+ * - featureFlagFachzwillinge ("fz") decides whether the routes are advertised
+ *   in the catalog, see isFachzwillingeEnabled.
  */
 export type FachzwillingUiOptions = Partial<UIVisibleControls> & {
   hideAll?: boolean;
@@ -50,15 +59,72 @@ export const resolveFachzwillingUi = (
 type FachzwillingRouteBase = {
   /** hash-route path segment, e.g. "gesundheit" -> #/gesundheit */
   path: string;
+  /**
+   * Where the route is reachable by its url. Perspectives, workflows and addons
+   * carry the same option; theirs only counts once the route has passed.
+   */
+  availability?: Availability;
   ui?: FachzwillingUiOptions;
   disableMapInteraction?: boolean;
+  /**
+   * Stop the map from writing lat/lng/zoom to the url hash on every view
+   * change. For routes whose view is driven externally, where those writes
+   * would push history entries and seed the next reload's initial view.
+   */
+  disableHashWrite?: boolean;
+  /**
+   * Stop the map from re-requesting tiles when the server marks them stale.
+   * Every such refresh repaints the tile through the raster fade, which is
+   * visible in a window that is being screen-captured or projected.
+   */
+  disableExpiredTileRefresh?: boolean;
+  /**
+   * Hash key this route reads its shared layer config from, instead of the
+   * app-wide `config`. That key is reserved geoportal-wide (it is stripped
+   * after loading and omitted from generated share links), so a route that
+   * needs its config to stay in the url must use a name of its own.
+   */
+  configHashKey?: string;
+  /**
+   * Keep every shared configuration this route loads by id on the device, and
+   * take it from there the next time instead of asking the config service.
+   * Needs no expiry: a stored configuration never changes, the service can
+   * only store and read under a random key. For a window that has to keep
+   * switching when the network at the venue does not.
+   */
+  cacheConfigsById?: boolean;
+  /**
+   * Storage namespace for the persisted mapping and ui state, overriding the
+   * route's path. Every Fachzwilling is already namespaced by its path, so this
+   * is only for a route that wants a name unhooked from its url: one that
+   * should keep its stored state across a path rename, or two routes that are
+   * meant to share one record. An explicit `?appKey=` still wins over both.
+   *
+   * Read at store construction time (store/index.ts), which is why the route
+   * list lives in its own module and not in this barrel.
+   */
+  appKey?: string;
   /**
    * workflow perspectives shown in the "Workflows" catalog category while the
    * route is open; the category is omitted on routes without perspectives
    * (including the default geoportal route)
    */
-  perspectives?: WorkflowPerspective[];
-  addons?: Addon[];
+  perspectives?: WorkflowPerspective<AddonEntry>[];
+  addons?: AddonEntry[];
+  /**
+   * The route's own background: categories of the map switch, base maps and
+   * their services, merged over the plain geoportal's (see
+   * BackgroundConfigOverride). Resolved once at boot, since every route has
+   * its own persisted store and a route switch reloads the page anyway.
+   */
+  background?: BackgroundConfigOverride;
+  /**
+   * Layers this route adds to the catalog, the counterpart of `filters`: either
+   * a full entry in the shape of `additionalLayerConfig.json`, or a vector style
+   * url whose item is derived from the style itself, exactly as when the style
+   * is dropped onto the map. They are never hidden by the route's filters.
+   */
+  additionalLayers?: AdditionalLayer[];
 };
 
 /** route reachable through the catalog, so it needs a card and its filters */
@@ -89,15 +155,41 @@ export type FachzwillingRoute =
   | CatalogFachzwillingRoute
   | HiddenFachzwillingRoute;
 
-export const fachzwillingRoutes: FachzwillingRoute[] = isFachzwillingeEnabled
-  ? [gesundheitFachzwilling, bodenFachzwilling, outletFachzwilling]
-  : [];
+const isFachzwillingeEnabled =
+  activeFeatureFlags.featureFlagFachzwillinge === true;
+
+/**
+ * The route with only the perspectives, workflows and addons that are
+ * available here, so everything downstream keeps reading `route.perspectives`
+ * and `route.addons` as declared.
+ */
+const resolveRouteContents = (route: FachzwillingRoute): FachzwillingRoute => ({
+  ...route,
+  ...(route.perspectives
+    ? {
+        perspectives: filterPerspectivesByAvailability(
+          route.perspectives,
+          availabilityContext
+        ),
+      }
+    : {}),
+  ...(route.addons
+    ? { addons: filterAddonsByAvailability(route.addons, availabilityContext) }
+    : {}),
+});
+
+export const fachzwillingRoutes: FachzwillingRoute[] = allFachzwillingRoutes
+  .filter((route) => isAvailable(route.availability, availabilityContext))
+  .map(resolveRouteContents);
 
 export const getFachzwillingCatalogConfig = (
   route: FachzwillingRoute
 ): LayerCatalogConfig => ({
   ...layerCatalogConfig,
   ...(route.filters ? { filters: route.filters } : {}),
+  ...(route.additionalLayers
+    ? { additionalLayers: route.additionalLayers }
+    : {}),
 });
 
 export const findFachzwillingByPathname = (
@@ -109,9 +201,7 @@ const FACHZWILLINGE_CATEGORY_ID = "fachzwillinge";
 const FACHZWILLINGE_CATEGORY_LABEL = "Fachzwillinge";
 
 const fachzwillingItems: Item[] = fachzwillingRoutes
-  .filter(
-    (route): route is CatalogFachzwillingRoute => !route.hideFromCatalog
-  )
+  .filter((route): route is CatalogFachzwillingRoute => !route.hideFromCatalog)
   .map((route) => ({
     id: `fachzwilling_${route.path}`,
     name: `fachzwilling_${route.path}`,
@@ -153,28 +243,33 @@ const withPreFachzwillingeCategoryLabels = (
  * into the "Themenzwillinge" section (before "TopicMaps Wuppertal"). When the
  * active route defines workflow perspectives, a "Workflows" section is
  * appended after the Themenzwillinge; the default route passes no perspectives
- * and therefore shows no workflows. While the feature flag is off, the
- * categories keep their previous labels instead.
+ * and therefore shows no workflows. The workflows do not depend on the
+ * Fachzwillinge feature flag: a route that defines perspectives is already
+ * gated by its own availability. While the flag is off, the categories keep
+ * their previous labels and the "Fachzwillinge" subcategory is left out.
  */
 export const getGeoportalCategoryDefinitions = (
-  perspectives?: WorkflowPerspective[]
+  perspectives?: WorkflowPerspective<AddonEntry>[]
 ): CategoryDefinition[] => {
-  if (!isFachzwillingeEnabled) {
-    return withPreFachzwillingeCategoryLabels(defaultCategoryDefinitions);
-  }
-  return defaultCategoryDefinitions.flatMap((definition) =>
+  const workflowsCategory = perspectives?.length
+    ? [buildWorkflowsCategoryDefinition(perspectives)]
+    : [];
+  const baseDefinitions = isFachzwillingeEnabled
+    ? defaultCategoryDefinitions
+    : withPreFachzwillingeCategoryLabels(defaultCategoryDefinitions);
+  return baseDefinitions.flatMap((definition) =>
     definition.id === "partialTwins"
       ? [
-          {
-            ...definition,
-            staticCategories: [
-              fachzwillingeSubCategory,
-              ...(definition.staticCategories ?? []),
-            ],
-          },
-          ...(perspectives?.length
-            ? [buildWorkflowsCategoryDefinition(perspectives)]
-            : []),
+          isFachzwillingeEnabled
+            ? {
+                ...definition,
+                staticCategories: [
+                  fachzwillingeSubCategory,
+                  ...(definition.staticCategories ?? []),
+                ],
+              }
+            : definition,
+          ...workflowsCategory,
         ]
       : [definition]
   );

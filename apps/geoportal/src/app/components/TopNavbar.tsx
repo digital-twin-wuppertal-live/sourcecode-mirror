@@ -36,14 +36,17 @@ import { useFeatureFlags } from "@carma-providers/feature-flag";
 
 import {
   getBackgroundLayer,
-  getSelectedLuftbildLayer,
-  getSelectedMapLayer,
+  getSelectedByCategory,
   setSelectedLayerIndex,
 } from "../store/slices/mapping";
 import { getUIVisibleControls, getZenMode } from "../store/slices/ui";
 
 import { findFachzwillingByPathname } from "../constants/fachzwillinge";
-import { MapStyleKeys } from "../constants/MapStyleKeys";
+import {
+  findBackgroundCategory,
+  backgroundConfig,
+  getBackgroundCategoryTitle,
+} from "../config/backgroundConfig";
 import { useMapStyle } from "../hooks/useGeoportalMapStyle";
 import { useOblique } from "../oblique/hooks/useOblique";
 
@@ -71,8 +74,7 @@ const TopNavbar = () => {
 
   const { isLeaflet, isCesium } = useMapFrameworkSwitcherContext();
   const backgroundLayer = useSelector(getBackgroundLayer);
-  const selectedMapLayer = useSelector(getSelectedMapLayer);
-  const selectedLuftbildLayer = useSelector(getSelectedLuftbildLayer);
+  const selectedByCategory = useSelector(getSelectedByCategory);
   const zenMode = useSelector(getZenMode);
   const visibleControls = useSelector(getUIVisibleControls);
   const navbarHidden = zenMode || !visibleControls.navbar;
@@ -123,10 +125,8 @@ const TopNavbar = () => {
       e.stopPropagation();
       if (e.target.value === "openBaseLayerView") {
         dispatch(setSelectedLayerIndex(-1));
-      } else if (e.target.value === MapStyleKeys.TOPO) {
-        setCurrentStyle(MapStyleKeys.TOPO);
-      } else if (e.target.value === MapStyleKeys.AERIAL) {
-        setCurrentStyle(MapStyleKeys.AERIAL);
+      } else if (findBackgroundCategory(e.target.value)) {
+        setCurrentStyle(e.target.value);
       }
     },
     [dispatch, setCurrentStyle]
@@ -139,13 +139,15 @@ const TopNavbar = () => {
   const [bannerVisible, setBannerVisible] = useState(false);
   const bannerRef = useRef<HTMLDivElement | null>(null);
 
+  const bannerHidden = navbarHidden || !bannerVisible;
+
   useEffect(() => {
     const root = document.documentElement;
     const setHeight = (px: number) => {
       root.style.setProperty("--system-message-banner-height", `${px}px`);
     };
 
-    if (!bannerVisible || !bannerRef.current) {
+    if (bannerHidden || !bannerRef.current) {
       setHeight(0);
       return;
     }
@@ -163,7 +165,7 @@ const TopNavbar = () => {
       observer.disconnect();
       setHeight(0);
     };
-  }, [bannerVisible]);
+  }, [bannerHidden]);
 
   const mainStyle = useMemo((): CSSProperties => {
     return {
@@ -176,11 +178,11 @@ const TopNavbar = () => {
 
   const bannerStyle = useMemo((): CSSProperties => {
     return {
-      visibility: zenMode || !bannerVisible ? "hidden" : undefined,
-      display: zenMode || !bannerVisible ? "none" : "block",
+      visibility: bannerHidden ? "hidden" : undefined,
+      display: bannerHidden ? "none" : "block",
       zIndex: 10000,
     };
-  }, [zenMode, bannerVisible]);
+  }, [bannerHidden]);
 
   console.debug("RENDER: TopNavbar");
 
@@ -198,6 +200,10 @@ const TopNavbar = () => {
         />
       </div>
       <div
+        // named so a map addon can measure how far the chrome reaches down over
+        // the map area; the bar is `display: none` while it is hidden, which
+        // measures as nothing covered
+        id="topNavbar"
         className={`bg-white h-16 fixed left-0 right-0 items-center justify-between gap-2 xs:gap-3 sm:gap-6 py-2 pt-safe-top pb-safe-bottom pl-safe-left xs:pl-safe-left-xs pr-safe-right xs:pr-safe-right-xs`}
         style={mainStyle}
       >
@@ -291,30 +297,20 @@ const TopNavbar = () => {
                   value={currentStyle}
                   onChange={handleBackgroundLayerChange}
                 >
-                  <Tooltip
-                    title={
-                      isLeaflet ? selectedMapLayer.title : "LoD2-Gebäude (NRW)"
-                    }
-                  >
-                    <Radio.Button
-                      className="select-none"
-                      value={MapStyleKeys.TOPO}
+                  {backgroundConfig.categories.map((category) => (
+                    <Tooltip
+                      key={category.id}
+                      title={
+                        isLeaflet
+                          ? selectedByCategory[category.id]?.title
+                          : getBackgroundCategoryTitle(category, isLeaflet)
+                      }
                     >
-                      Karte
-                    </Radio.Button>
-                  </Tooltip>
-                  <Tooltip
-                    title={
-                      isLeaflet ? selectedLuftbildLayer.title : "3D-Mesh 03/24"
-                    }
-                  >
-                    <Radio.Button
-                      className="select-none"
-                      value={MapStyleKeys.AERIAL}
-                    >
-                      Luftbild
-                    </Radio.Button>
-                  </Tooltip>
+                      <Radio.Button className="select-none" value={category.id}>
+                        {category.title}
+                      </Radio.Button>
+                    </Tooltip>
+                  ))}
                   <Tooltip title="Hintergrund auswählen">
                     <Radio.Button
                       className="select-none"

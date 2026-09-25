@@ -4,10 +4,12 @@ import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { useEffect, useState } from "react";
 import { faLayerGroup, faMap } from "@fortawesome/free-solid-svg-icons";
 import { iconColorMap, iconMap } from "./iconMapping";
-import { resolveLayerIconUrl, twemojiUrl } from "@carma-mapping/utils";
-
-const ICON_PREFIX =
-  "https://geo.wuppertal.de/geoportal/geoportal_icon_legends/";
+import {
+  DEFAULT_ICON_PREFIX,
+  mapIconPath,
+  resolveLayerIconUrl,
+  twemojiUrl,
+} from "@carma-mapping/utils";
 
 interface LayerIconProps {
   layer: Layer | BackgroundLayer;
@@ -16,18 +18,13 @@ interface LayerIconProps {
   isBaseLayer?: boolean;
   id?: string;
   className?: string;
+  /** Overrides the colour `iconColorMap` would give the icon. */
+  color?: string;
+  /** CSS length for the icon; FontAwesome scales with the font size. */
+  size?: string;
   displayUrl?: boolean;
   onError?: (title: string, url: string) => void;
 }
-
-const iconPathAliases: Record<string, string> = {
-  verkehr: "mobi",
-};
-
-const mapIconPath = (path: string): string => {
-  const lower = path.toLowerCase();
-  return iconPathAliases[lower] ?? lower;
-};
 
 function resolveIconKey(
   ...candidates: (string | undefined)[]
@@ -42,11 +39,13 @@ const EMOJI_PREFIX = "emoji:";
 
 export const LayerIcon = ({
   layer,
-  iconPrefix = ICON_PREFIX,
+  iconPrefix = DEFAULT_ICON_PREFIX,
   fallbackIcon,
   isBaseLayer,
   id,
   className,
+  color,
+  size,
   displayUrl = false,
   onError,
 }: LayerIconProps) => {
@@ -90,9 +89,13 @@ export const LayerIcon = ({
     : isBaseLayer
     ? faLayerGroup
     : faMap;
-  const faColor = mappedKey
-    ? iconColorMap[mappedKey as keyof typeof iconColorMap]
-    : undefined;
+  const faColor =
+    layer.iconColor ??
+    color ??
+    (mappedKey
+      ? iconColorMap[mappedKey as keyof typeof iconColorMap]
+      : undefined);
+  const fontSize = layer.iconSize ?? size;
 
   if (emoji) {
     return (
@@ -113,13 +116,14 @@ export const LayerIcon = ({
           src={iconSrc}
           alt="Layer Icon"
           className={className + " text-base"}
+          style={fontSize ? { fontSize } : undefined}
           id={id}
         />
       ) : (
         <FontAwesomeIcon
           icon={faIcon}
           className={className + " text-base"}
-          style={{ color: faColor || "" }}
+          style={{ color: faColor || "", ...(fontSize ? { fontSize } : {}) }}
           id={id}
         />
       )}

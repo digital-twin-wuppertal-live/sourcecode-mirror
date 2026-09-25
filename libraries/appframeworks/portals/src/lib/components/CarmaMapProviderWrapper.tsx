@@ -5,8 +5,10 @@ import {
   type CesiumState,
 } from "@carma-mapping/engines/cesium/react/runtime";
 import {
+  AddonProvider,
   LibreContextProvider,
   MapSelectionProvider,
+  MapHighlightProvider,
 } from "@carma-mapping/contexts";
 import { TopicMapContextProvider } from "react-cismap/contexts/TopicMapContextProvider";
 
@@ -65,6 +67,8 @@ type CarmaMapProviderWrapperProps = {
   /** @deprecated HashStateProvider should be placed higher in the tree. These props are ignored. */
   hashParamNameOrder?: string[];
   defaultRuntimeState?: Partial<CesiumState>;
+  addons?: readonly unknown[];
+  addonScope?: string;
   topicMapConfig?: {
     appKey?: string;
     featureItemsURL?: string;
@@ -107,7 +111,9 @@ const CarmaMapAPIWithRedux = ({
   children: React.ReactNode;
   store: Store<PortalRootState>;
 }) => {
-  const serviceCategories = useCatalogDataOptional()?.serviceCategories;
+  const catalogData = useCatalogDataOptional();
+  const catalogItems = catalogData?.catalogItems;
+  const serviceCategories = catalogData?.serviceCategories;
 
   // addLayerById resolves the id in the LayerCatalogProvider catalog and
   // appends the parsed layer to the redux active-layer state
@@ -118,7 +124,7 @@ const CarmaMapAPIWithRedux = ({
     ): Promise<Layer | undefined> => {
       const { forceWMS = false, visible = true } = options ?? {};
 
-      const item = findCatalogItemById(serviceCategories ?? [], id);
+      const item = findCatalogItemById(id, catalogItems, serviceCategories);
       if (!item) {
         console.warn(`Layer with id "${id}" not found`);
         return undefined;
@@ -138,7 +144,7 @@ const CarmaMapAPIWithRedux = ({
 
       return mapLayer;
     },
-    [store, serviceCategories]
+    [store, catalogItems, serviceCategories]
   );
 
   // Create stable useHasLayerById hook using the factory
@@ -165,6 +171,8 @@ export const CarmaMapProviderWrapper = ({
   topicMapConfig = {},
   store,
   defaultRuntimeState,
+  addons,
+  addonScope,
 }: CarmaMapProviderWrapperProps) => {
   const { background } = overlayOptions;
   const { transparency, color } = background;
@@ -203,7 +211,11 @@ export const CarmaMapProviderWrapper = ({
                     <LibreContextProvider>
                       <MapSelectionProvider>
                         <CarmaApiBridge store={store} />
-                        {wrappedChildren}
+                        <MapHighlightProvider>
+                          <AddonProvider addons={addons} scopeKey={addonScope}>
+                            {wrappedChildren}
+                          </AddonProvider>
+                        </MapHighlightProvider>
                       </MapSelectionProvider>
                     </LibreContextProvider>
                   </CesiumContextProvider>

@@ -1,9 +1,10 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { Modal, Button, Segmented } from "antd";
-import { SearchOutlined } from "@ant-design/icons";
+import { Modal, Button, Switch } from "antd";
+import { SearchOutlined, CloseOutlined } from "@ant-design/icons";
 import { FontAwesomeIcon as Icon } from "@fortawesome/react-fontawesome";
 import { faFilter } from "@fortawesome/free-solid-svg-icons";
-import { useSelector } from "react-redux";
+import { SHOW_EXPERT_SEARCH_TOGGLE } from "../../constants/uiVisibility";
+import { useSelector, useDispatch } from "react-redux";
 import {
   LeuchteSearch,
   MastSearch,
@@ -12,8 +13,30 @@ import {
   ArbeitsauftragSearch,
 } from "./featuresSearches";
 import { getJWT } from "../../store/slices/auth";
+import {
+  resetType,
+  getExpertTypeHasIncompleteRule,
+  getExpertTypeState,
+} from "../../store/slices/expertSearch";
+import { REGISTRY } from "./expert-search/fieldRegistry";
+import type { ObjectType } from "./expert-search/fieldRegistry";
+import {
+  buildExpertWhereClause,
+  buildExpertOrderBy,
+  buildExpertLimit,
+  buildExpertSortSpec,
+} from "./expert-search/expertSearchUtils";
+import type { ExpertSortSpec } from "./expert-search/expertSearchUtils";
 import { ENDPOINT } from "../../constants/belis";
+import {
+  LEUCHTEN_FIELDS,
+  MAST_FIELDS,
+  SCHALTSTELLE_FIELDS,
+  MAUERLASCHE_FIELDS,
+  LEITUNG_FIELDS,
+} from "../../constants/searchFields";
 import RawDisplay from "./RawDisplay";
+import ExpertSearch from "./expert-search/ExpertSearch";
 import {
   useLibreContext,
   useMapHighlight,
@@ -25,6 +48,7 @@ import {
   BELIS_ORIGINAL_SOURCE,
 } from "../../config/mapLayerConfigs";
 import { flattenGqlRecord } from "../../helper/flattenGqlRecord";
+import { convertGeoFieldToWgs84 } from "../../helper/buildApGeoJson";
 import {
   buildDateRangeCondition,
   buildArbeitsauftragWhereClause,
@@ -36,12 +60,19 @@ type SearchType =
   | "leuchte"
   | "mast"
   | "schaltstelle"
-  | "mauerlasche";
+  | "mauerlasche"
+  | "leitung";
 
 interface SearchModalProps {
   defaultOpen?: boolean;
   showFinalQuery?: boolean;
-  onSearchResults?: (features: SidebarFeature[] | null) => void;
+  // `meta.expertSort` is the sort list (field + direction) the user picked in
+  // Expert Search — empty for classic searches. The sidebar applies the same
+  // ordering to its rows via its `expertSort` prop.
+  onSearchResults?: (
+    features: SidebarFeature[] | null,
+    meta?: { expertSort?: ExpertSortSpec }
+  ) => void;
 }
 
 interface LeuchteSearchValues {
@@ -115,49 +146,12 @@ const searchTypeLabels: Partial<Record<SearchType, string>> = {
   mast: "Standorte",
   schaltstelle: "Schaltstellen",
   mauerlasche: "Mauerlaschen",
+  leitung: "Leitungen",
 };
 
-// When true, GraphQL queries include all display fields (for future search results sidebar).
-// When false, queries fetch only id + geom_84 (minimal, faster).
-// Extended: ~527 KB / 341ms vs minimal: ~127 KB / 203ms (benchmarked).
-const FETCH_EXTENDED_SEARCH_RESULTS = true;
-
-const LEUCHTEN_FIELDS = FETCH_EXTENDED_SEARCH_RESULTS
-  ? `id
-    leuchtennummer lfd_nummer fk_standort
-    tkey_leuchtentyp { leuchtentyp fabrikat }
-    tkey_strassenschluessel { pk strasse }
-    tdta_standort_mast { lfd_nummer tkey_mastart { mastart } tkey_masttyp { masttyp } geom_84 { x y } }`
-  : `id
-    tdta_standort_mast { geom_84 { x y } }`;
-
-const MAST_FIELDS = FETCH_EXTENDED_SEARCH_RESULTS
-  ? `id
-    lfd_nummer
-    tkey_mastart { mastart }
-    tkey_masttyp { masttyp }
-    tkey_strassenschluessel { pk strasse }
-    geom_84 { x y }`
-  : `id
-    geom_84 { x y }`;
-
-const SCHALTSTELLE_FIELDS = FETCH_EXTENDED_SEARCH_RESULTS
-  ? `id
-    schaltstellen_nummer
-    bauart { bezeichnung }
-    tkey_strassenschluessel { pk strasse }
-    geom_84 { x y }`
-  : `id
-    geom_84 { x y }`;
-
-const MAUERLASCHE_FIELDS = FETCH_EXTENDED_SEARCH_RESULTS
-  ? `id
-    laufende_nummer
-    material_mauerlasche { bezeichnung }
-    tkey_strassenschluessel { pk strasse }
-    geom_84 { x y }`
-  : `id
-    geom_84 { x y }`;
+// Object types that only exist in the expert search (no classic form / where
+// builder). Their tabs are hidden while the Expertensuche switch is off.
+const EXPERT_ONLY_TYPES: ReadonlySet<SearchType> = new Set(["leitung"]);
 
 const ARBEITSAUFTRAG_FIELDS = `id
     nummer
@@ -180,26 +174,83 @@ const ARBEITSAUFTRAG_FIELDS = `id
 const SearchModalHeader = ({
   searchType,
   onSearchTypeChange,
+  isExpertSearch,
+  onExpertSearchChange,
+  onClose,
+  isQueryView,
+  showQueryTab,
+  onSelectQueryTab,
 }: {
   searchType: SearchType;
   onSearchTypeChange: (type: SearchType) => void;
+  isExpertSearch: boolean;
+  onExpertSearchChange: (value: boolean) => void;
+  onClose: () => void;
+  isQueryView: boolean;
+  showQueryTab: boolean;
+  onSelectQueryTab: () => void;
 }) => (
-  <div className="flex items-center gap-3">
-    <div className="w-10 h-10 bg-blue-100 rounded-lg flex items-center justify-center flex-shrink-0">
-      <SearchOutlined className="text-xl text-blue-600" />
+  <div className="flex flex-col gap-5">
+    <div className="flex items-center gap-3">
+      <div className="w-10 h-10 bg-blue-100 rounded-lg flex items-center justify-center flex-shrink-0">
+        <SearchOutlined className="text-xl text-blue-600" />
+      </div>
+      <div className="flex-1 min-w-0">
+        <h2 className="text-lg font-semibold text-gray-900 mb-0">
+          Erweiterte Suche
+        </h2>
+      </div>
+      <div className="flex items-center gap-2 flex-shrink-0">
+        {SHOW_EXPERT_SEARCH_TOGGLE && (
+          <div className="flex items-center gap-2 border border-gray-200 rounded-lg px-3 py-1.5">
+            <span className="text-sm font-medium text-gray-700">
+              Expertensuche
+            </span>
+            <Switch checked={isExpertSearch} onChange={onExpertSearchChange} />
+          </div>
+        )}
+        <button
+          type="button"
+          onClick={onClose}
+          aria-label="Schließen"
+          className="w-9 h-9 flex items-center justify-center rounded-lg bg-gray-100 hover:bg-gray-200 text-gray-500 border-none cursor-pointer transition-colors"
+        >
+          <CloseOutlined />
+        </button>
+      </div>
     </div>
-    <div className="flex-1">
-      <h2 className="text-lg font-semibold text-gray-900">Erweiterte Suche</h2>
-      <Segmented
-        size="small"
-        value={searchType}
-        onChange={(value) => onSearchTypeChange(value as SearchType)}
-        options={Object.entries(searchTypeLabels).map(([value, label]) => ({
-          value,
-          label,
-        }))}
-        className="mt-1"
-      />
+    <div className="flex items-center gap-6 border-b border-gray-200 -mx-6 px-6">
+      {Object.entries(searchTypeLabels)
+        .filter(
+          ([value]) => isExpertSearch || !EXPERT_ONLY_TYPES.has(value as SearchType)
+        )
+        .map(([value, label]) => (
+        <button
+          key={value}
+          type="button"
+          onClick={() => onSearchTypeChange(value as SearchType)}
+          className={`text-sm pb-2 -mb-px border-b-2 bg-transparent cursor-pointer transition-colors ${
+            !isQueryView && searchType === value
+              ? "text-blue-600 border-blue-600 font-medium"
+              : "text-gray-500 border-transparent hover:text-gray-700"
+          }`}
+        >
+          {label}
+        </button>
+      ))}
+      {showQueryTab && (
+        <button
+          type="button"
+          onClick={onSelectQueryTab}
+          className={`text-sm pb-2 -mb-px border-b-2 bg-transparent cursor-pointer transition-colors ${
+            isQueryView
+              ? "text-blue-600 border-blue-600 font-medium"
+              : "text-gray-500 border-transparent hover:text-gray-700"
+          }`}
+        >
+          GraphQL
+        </button>
+      )}
     </div>
   </div>
 );
@@ -276,7 +327,6 @@ const buildMastWhereClause = (values: MastSearchValues): string => {
   conditions.push(
     `_or: [{is_deleted: {_eq: false}}, {is_deleted: {_is_null: true}}]`
   );
-
 
   // Date range conditions (combined into single objects)
   const inbetriebnahmeCondition = buildDateRangeCondition(
@@ -442,8 +492,20 @@ const buildMauerlascheWhereClause = (
 // Helper to generate query string for preview
 const generateQueryString = (
   searchType: SearchType,
-  values: SearchValues
+  values: SearchValues,
+  whereOverride?: string | null,
+  orderByOverride?: string,
+  limitOverride?: string
 ): string => {
+  // Assemble the parenthesised query args (where / order_by / limit), dropping
+  // empty parts. The overrides come from the expert search — when it is active
+  // (orderByOverride passed) an empty order means NO order_by at all; classic
+  // searches pass no overrides and keep their per-type default order.
+  const isExpert = orderByOverride !== undefined;
+  const args = (whereClause: string, defaultOrder: string) => {
+    const orderBy = isExpert ? orderByOverride : defaultOrder;
+    return [whereClause, orderBy, limitOverride].filter(Boolean).join(", ");
+  };
   if (searchType === "arbeitsauftrag") {
     const whereClause = buildArbeitsauftragWhereClause(
       values as ArbeitsauftragSearchValues
@@ -456,42 +518,45 @@ const generateQueryString = (
   }
 }`;
   } else if (searchType === "leuchte") {
-    const whereClause = buildLeuchteWhereClause(values as LeuchteSearchValues);
+    const whereClause =
+      whereOverride ?? buildLeuchteWhereClause(values as LeuchteSearchValues);
     return `query LeuchtenSearch {
-  tdta_leuchten(${
-    whereClause ? `${whereClause}, ` : ""
-  }order_by: {einbaudatum: desc}) {
+  tdta_leuchten(${args(whereClause, "order_by: {einbaudatum: desc}")}) {
     ${LEUCHTEN_FIELDS}
   }
 }`;
   } else if (searchType === "mast") {
-    const whereClause = buildMastWhereClause(values as MastSearchValues);
+    const whereClause =
+      whereOverride ?? buildMastWhereClause(values as MastSearchValues);
     return `query MastSearch {
-  tdta_standort_mast(${
-    whereClause ? `${whereClause}, ` : ""
-  }order_by: {inbetriebnahme_mast: desc}) {
+  tdta_standort_mast(${args(whereClause, "order_by: {inbetriebnahme_mast: desc}")}) {
     ${MAST_FIELDS}
   }
 }`;
   } else if (searchType === "schaltstelle") {
-    const whereClause = buildSchaltstelleWhereClause(
-      values as SchaltstelleSearchValues
-    );
+    const whereClause =
+      whereOverride ??
+      buildSchaltstelleWhereClause(values as SchaltstelleSearchValues);
     return `query SchaltstelleSearch {
-  schaltstelle(${
-    whereClause ? `${whereClause}, ` : ""
-  }order_by: {erstellungsjahr: desc}) {
+  schaltstelle(${args(whereClause, "order_by: {erstellungsjahr: desc}")}) {
     ${SCHALTSTELLE_FIELDS}
   }
 }`;
+  } else if (searchType === "leitung") {
+    // Leitungen exist only in the expert search, so there is no classic
+    // where builder — the where clause always comes from whereOverride.
+    const whereClause = whereOverride ?? "";
+    return `query LeitungSearch {
+  leitung(${args(whereClause, "order_by: {id: desc}")}) {
+    ${LEITUNG_FIELDS}
+  }
+}`;
   } else {
-    const whereClause = buildMauerlascheWhereClause(
-      values as MauerlascheSearchValues
-    );
+    const whereClause =
+      whereOverride ??
+      buildMauerlascheWhereClause(values as MauerlascheSearchValues);
     return `query MauerlascheSearch {
-  mauerlasche(${
-    whereClause ? `${whereClause}, ` : ""
-  }order_by: {erstellungsjahr: desc}) {
+  mauerlasche(${args(whereClause, "order_by: {erstellungsjahr: desc}")}) {
     ${MAUERLASCHE_FIELDS}
   }
 }`;
@@ -504,6 +569,7 @@ const SEARCH_TYPE_SIDEBAR_META: Record<string, { sourceLayer: string }> = {
   mast: { sourceLayer: "standorte" },
   schaltstelle: { sourceLayer: "schaltstelle" },
   mauerlasche: { sourceLayer: "mauerlaschen" },
+  leitung: { sourceLayer: "leitungen" },
 };
 
 // Entity type mapping for arbeitsauftrag protokoll items
@@ -512,6 +578,27 @@ const PROTOKOLL_ENTITY_META: Record<string, { sourceLayer: string }> = {
   tdta_standort_mast: { sourceLayer: "standorte" },
   schaltstelle: { sourceLayer: "schaltstelle" },
   mauerlasche: { sourceLayer: "mauerlaschen" },
+};
+
+// Leitungen are line features with no geom_84 point. Derive a representative
+// WGS84 point (line midpoint) from their EPSG:25832 `geom.geo_field` so the
+// map can fit-to-bounds and the sidebar "Auf Fachobjekt zoomen" has a real
+// target instead of falling back to [0, 0].
+const leitungPoint = (
+  item: Record<string, unknown>
+): [number, number] | undefined => {
+  const geoField = (item.geom as { geo_field?: unknown } | undefined)
+    ?.geo_field;
+  const wgs = convertGeoFieldToWgs84(geoField);
+  if (!wgs) return undefined;
+  const midOf = (ring: number[][]): [number, number] | undefined => {
+    if (!ring.length) return undefined;
+    return ring[Math.floor(ring.length / 2)] as [number, number];
+  };
+  if (wgs.type === "Point") return wgs.coordinates as [number, number];
+  if (wgs.type === "LineString") return midOf(wgs.coordinates);
+  if (wgs.type === "MultiLineString") return midOf(wgs.coordinates[0] ?? []);
+  return undefined;
 };
 
 /** Convert flat GraphQL results into SidebarFeature[] */
@@ -590,6 +677,8 @@ const convertResultsToSidebarFeatures = (
       if (mast?.geom_84?.x != null && mast?.geom_84?.y != null) {
         coords = [mast.geom_84.x, mast.geom_84.y];
       }
+    } else if (searchType === "leitung") {
+      coords = leitungPoint(item);
     } else {
       const geom = item.geom_84 as { x?: number; y?: number } | undefined;
       if (geom?.x != null && geom?.y != null) {
@@ -621,12 +710,28 @@ const SearchModal = ({
 }: SearchModalProps) => {
   const [isOpen, setIsOpen] = useState(defaultOpen);
   const [searchType, setSearchType] = useState<SearchType>("leuchte");
+  const [isExpertSearch, setIsExpertSearch] = useState(false);
+  const [isQueryView, setIsQueryView] = useState(false);
   const [isSearching, setIsSearching] = useState(false);
   const [queryPreview, setQueryPreview] = useState<string>("");
   const [noResults, setNoResults] = useState(false);
 
   const jwt = useSelector(getJWT);
+  const dispatch = useDispatch();
   const { map } = useLibreContext();
+
+  // arbeitsauftrag has no scalar filter surface in expert mode; fall back to leuchte.
+  const expertObjectType: ObjectType =
+    searchType === "arbeitsauftrag" ? "leuchte" : searchType;
+
+  // In expert mode, block the search while any rule is missing its value.
+  const expertHasIncompleteRule = useSelector(
+    getExpertTypeHasIncompleteRule(expertObjectType)
+  );
+  const searchDisabled = isExpertSearch && expertHasIncompleteRule;
+
+  // The current expert filter tree — fed to buildExpertWhereClause on Suchen.
+  const expertTypeState = useSelector(getExpertTypeState(expertObjectType));
   const { setHighlightingActive, highlightByIds, clearHighlights } =
     useMapHighlight();
 
@@ -681,6 +786,10 @@ const SearchModal = ({
       ) => Array<[number, number]>;
       getHighlightIds?: (item: Record<string, unknown>) => string[];
       logPrefix?: string;
+      // Sort spec the query used (empty for classic searches). Passed through
+      // in the `onSearchResults` meta so the sidebar can order its rows the
+      // same way.
+      expertSort?: ExpertSortSpec;
     }) => {
       const {
         query,
@@ -691,6 +800,7 @@ const SearchModal = ({
         getAllGeometries,
         getHighlightIds,
         logPrefix = "[SEARCH]",
+        expertSort = [],
       } = options;
 
       if (!jwt) {
@@ -700,8 +810,6 @@ const SearchModal = ({
 
       setIsSearching(true);
       setNoResults(false);
-      // console.log(`xxx ${logPrefix} Fetching data...`);
-      // console.log(`xxx ${logPrefix} Query:`, query);
 
       fetch(ENDPOINT, {
         method: "POST",
@@ -713,13 +821,7 @@ const SearchModal = ({
       })
         .then((res) => res.json())
         .then((json) => {
-          // console.log(`xxx ${logPrefix} Raw result:`, json);
           const results = json.data?.[dataKey] ?? [];
-          console.log(
-            `xxx ${logPrefix} Result count:`,
-            results.length,
-            ...(showFinalQuery ? [results] : [])
-          );
 
           if (results.length === 0) {
             setNoResults(true);
@@ -727,7 +829,6 @@ const SearchModal = ({
             return;
           }
 
-          const t0 = performance.now();
           const coords: [number, number][] = [];
           for (const item of results as Record<string, unknown>[]) {
             if (getAllGeometries) {
@@ -737,37 +838,11 @@ const SearchModal = ({
               if (geom) coords.push(geom);
             }
           }
-          const t1 = performance.now();
 
-          if (coords.length === 0) {
-            console.warn(`${logPrefix} No coordinates found`);
-            setIsSearching(false);
-            return;
-          }
-
-          const rawBbox = {
-            minLng: Math.min(...coords.map((c) => c[0])),
-            maxLng: Math.max(...coords.map((c) => c[0])),
-            minLat: Math.min(...coords.map((c) => c[1])),
-            maxLat: Math.max(...coords.map((c) => c[1])),
-          };
-          const t2 = performance.now();
-          console.log(
-            `[SEARCH] ${coords.length} coords: transform=${(t1 - t0).toFixed(
-              1
-            )}ms, bbox=${(t2 - t1).toFixed(1)}ms, total=${(t2 - t0).toFixed(
-              1
-            )}ms`
-          );
-          // Expand bbox by 10% on each side to ensure all features are visible
-          const lngPadding = (rawBbox.maxLng - rawBbox.minLng) * 0.1 || 0.001;
-          const latPadding = (rawBbox.maxLat - rawBbox.minLat) * 0.1 || 0.001;
-          const bbox = {
-            minLng: rawBbox.minLng - lngPadding,
-            maxLng: rawBbox.maxLng + lngPadding,
-            minLat: rawBbox.minLat - latPadding,
-            maxLat: rawBbox.maxLat + latPadding,
-          };
+          // Some result types (e.g. Leitungen, line features) carry no point
+          // geometry. They can still be highlighted by id against their tile
+          // layer — we just skip the fit-to-bounds step below.
+          const hasCoords = coords.length > 0;
 
           // Highlight the returned features on the map
           let highlightArray: string[];
@@ -788,11 +863,25 @@ const SearchModal = ({
           clearHighlights();
           setHighlightingActive(true);
           highlightByIds(highlightArray);
-          console.log(`${logPrefix} Highlighting:`, highlightArray);
           // console.log(`${logPrefix} Highlighted`, ids.length, "features");
           // console.log(`${logPrefix} Highlight Array`, highlightArray);
 
-          if (map) {
+          if (map && hasCoords) {
+            const rawBbox = {
+              minLng: Math.min(...coords.map((c) => c[0])),
+              maxLng: Math.max(...coords.map((c) => c[0])),
+              minLat: Math.min(...coords.map((c) => c[1])),
+              maxLat: Math.max(...coords.map((c) => c[1])),
+            };
+            // Expand bbox by 10% on each side to ensure all features are visible
+            const lngPadding = (rawBbox.maxLng - rawBbox.minLng) * 0.1 || 0.001;
+            const latPadding = (rawBbox.maxLat - rawBbox.minLat) * 0.1 || 0.001;
+            const bbox = {
+              minLng: rawBbox.minLng - lngPadding,
+              maxLng: rawBbox.maxLng + lngPadding,
+              minLat: rawBbox.minLat - latPadding,
+              maxLat: rawBbox.maxLat + latPadding,
+            };
             map.fitBounds(
               [
                 [bbox.minLng, bbox.minLat],
@@ -814,7 +903,7 @@ const SearchModal = ({
               forSearchType,
               namespacedSource
             );
-            onSearchResults(sidebarFeatures);
+            onSearchResults(sidebarFeatures, { expertSort });
           }
 
           setIsSearching(false);
@@ -840,7 +929,35 @@ const SearchModal = ({
   const executeSearch = useCallback(() => {
     const values = searchValuesRef.current;
 
-    if (searchType === "arbeitsauftrag") {
+    // In expert mode the where clause comes from the query builder (redux),
+    // and the query targets the object type behind the tab (arbeitsauftrag →
+    // leuchte, which has no scalar filter surface of its own).
+    const effectiveType: SearchType = isExpertSearch
+      ? expertObjectType
+      : searchType;
+    const expertWhere = isExpertSearch
+      ? buildExpertWhereClause(expertTypeState, REGISTRY[expertObjectType])
+      : null;
+    // In expert mode the user chooses the sort order and result limit. When they
+    // add no sort, expertOrderBy is "" and NO order_by is emitted (the default
+    // per-type order is only used by the classic searches).
+    const expertOrderBy = isExpertSearch
+      ? buildExpertOrderBy(expertTypeState, REGISTRY[expertObjectType])
+      : "";
+    const expertLimit = isExpertSearch ? buildExpertLimit(expertTypeState) : "";
+    // Structured mirror of `expertOrderBy` for the sidebar sort. Empty for
+    // classic searches or when the user set no sort rows.
+    const expertSort: ExpertSortSpec = isExpertSearch
+      ? buildExpertSortSpec(expertTypeState, REGISTRY[expertObjectType])
+      : [];
+    // Assemble the parenthesised query args, dropping any empty part so there is
+    // never a trailing comma or an empty order_by.
+    const args = (whereClause: string, defaultOrder: string) => {
+      const orderBy = isExpertSearch ? expertOrderBy : defaultOrder;
+      return [whereClause, orderBy, expertLimit].filter(Boolean).join(", ");
+    };
+
+    if (effectiveType === "arbeitsauftrag") {
       const whereClause = buildArbeitsauftragWhereClause(
         values as ArbeitsauftragSearchValues
       );
@@ -962,14 +1079,14 @@ const SearchModal = ({
           return ids;
         },
       });
-    } else if (searchType === "leuchte") {
-      const whereClause = buildLeuchteWhereClause(
-        values as LeuchteSearchValues
-      );
+    } else if (effectiveType === "leuchte") {
+      const whereClause =
+        expertWhere ?? buildLeuchteWhereClause(values as LeuchteSearchValues);
       const query = `query LeuchtenSearch {
-        tdta_leuchten(${
-          whereClause ? `${whereClause}, ` : ""
-        }order_by: {einbaudatum: desc}) {
+        tdta_leuchten(${args(
+          whereClause,
+          "order_by: {einbaudatum: desc}"
+        )}) {
           ${LEUCHTEN_FIELDS}
         }
       }`;
@@ -980,6 +1097,7 @@ const SearchModal = ({
         featurePrefix: "leuchten",
         forSearchType: "leuchte",
         logPrefix: "[LEUCHTE_SEARCH]",
+        expertSort,
         getGeometry: (item) => {
           const mast = item.tdta_standort_mast as
             | Record<string, unknown>
@@ -989,12 +1107,14 @@ const SearchModal = ({
           return [geom.x, geom.y];
         },
       });
-    } else if (searchType === "mast") {
-      const whereClause = buildMastWhereClause(values as MastSearchValues);
+    } else if (effectiveType === "mast") {
+      const whereClause =
+        expertWhere ?? buildMastWhereClause(values as MastSearchValues);
       const query = `query MastSearch {
-        tdta_standort_mast(${
-          whereClause ? `${whereClause}, ` : ""
-        }order_by: {inbetriebnahme_mast: desc}) {
+        tdta_standort_mast(${args(
+          whereClause,
+          "order_by: {inbetriebnahme_mast: desc}"
+        )}) {
           ${MAST_FIELDS}
         }
       }`;
@@ -1005,20 +1125,22 @@ const SearchModal = ({
         featurePrefix: "standorte",
         forSearchType: "mast",
         logPrefix: "[MAST_SEARCH]",
+        expertSort,
         getGeometry: (item) => {
           const geom = item.geom_84 as { x?: number; y?: number } | undefined;
           if (geom?.x == null || geom?.y == null) return undefined;
           return [geom.x, geom.y];
         },
       });
-    } else if (searchType === "schaltstelle") {
-      const whereClause = buildSchaltstelleWhereClause(
-        values as SchaltstelleSearchValues
-      );
+    } else if (effectiveType === "schaltstelle") {
+      const whereClause =
+        expertWhere ??
+        buildSchaltstelleWhereClause(values as SchaltstelleSearchValues);
       const query = `query SchaltstelleSearch {
-        schaltstelle(${
-          whereClause ? `${whereClause}, ` : ""
-        }order_by: {erstellungsjahr: desc}) {
+        schaltstelle(${args(
+          whereClause,
+          "order_by: {erstellungsjahr: desc}"
+        )}) {
           ${SCHALTSTELLE_FIELDS}
         }
       }`;
@@ -1029,20 +1151,22 @@ const SearchModal = ({
         featurePrefix: "schaltstelle",
         forSearchType: "schaltstelle",
         logPrefix: "[SCHALTSTELLE_SEARCH]",
+        expertSort,
         getGeometry: (item) => {
           const geom = item.geom_84 as { x?: number; y?: number } | undefined;
           if (geom?.x == null || geom?.y == null) return undefined;
           return [geom.x, geom.y];
         },
       });
-    } else if (searchType === "mauerlasche") {
-      const whereClause = buildMauerlascheWhereClause(
-        values as MauerlascheSearchValues
-      );
+    } else if (effectiveType === "mauerlasche") {
+      const whereClause =
+        expertWhere ??
+        buildMauerlascheWhereClause(values as MauerlascheSearchValues);
       const query = `query MauerlascheSearch {
-        mauerlasche(${
-          whereClause ? `${whereClause}, ` : ""
-        }order_by: {erstellungsjahr: desc}) {
+        mauerlasche(${args(
+          whereClause,
+          "order_by: {erstellungsjahr: desc}"
+        )}) {
           ${MAUERLASCHE_FIELDS}
         }
       }`;
@@ -1053,14 +1177,44 @@ const SearchModal = ({
         featurePrefix: "mauerlaschen",
         forSearchType: "mauerlasche",
         logPrefix: "[MAUERLASCHE_SEARCH]",
+        expertSort,
         getGeometry: (item) => {
           const geom = item.geom_84 as { x?: number; y?: number } | undefined;
           if (geom?.x == null || geom?.y == null) return undefined;
           return [geom.x, geom.y];
         },
       });
+    } else if (effectiveType === "leitung") {
+      // Leitungen have no classic where builder — expertWhere is always set
+      // here because the tab is only reachable in expert mode.
+      const whereClause = expertWhere ?? "";
+      const query = `query LeitungSearch {
+        leitung(${args(whereClause, "order_by: {id: desc}")}) {
+          ${LEITUNG_FIELDS}
+        }
+      }`;
+
+      handleGraphQLSearch({
+        query,
+        dataKey: "leitung",
+        featurePrefix: "leitungen",
+        forSearchType: "leitung",
+        logPrefix: "[LEITUNG_SEARCH]",
+        expertSort,
+        // Leitungen are line features with no point geom_84; derive a
+        // representative WGS84 point from geom.geo_field for fit-to-bounds.
+        // The map highlight itself matches by id against the "leitungen"
+        // tile layer regardless of this point.
+        getGeometry: (item) => leitungPoint(item),
+      });
     }
-  }, [searchType, handleGraphQLSearch]);
+  }, [
+    searchType,
+    isExpertSearch,
+    expertObjectType,
+    expertTypeState,
+    handleGraphQLSearch,
+  ]);
 
   const renderSearchComponent = () => {
     switch (searchType) {
@@ -1091,15 +1245,62 @@ const SearchModal = ({
         title={
           <SearchModalHeader
             searchType={searchType}
-            onSearchTypeChange={setSearchType}
+            onSearchTypeChange={(type) => {
+              setSearchType(type);
+              setIsQueryView(false);
+            }}
+            isExpertSearch={isExpertSearch}
+            onExpertSearchChange={(value) => {
+              setIsExpertSearch(value);
+              setIsQueryView(false);
+              // Expert-only tabs (e.g. Leitungen) vanish when leaving expert
+              // mode — fall back to a classic tab so no empty view is shown.
+              if (!value && EXPERT_ONLY_TYPES.has(searchType)) {
+                setSearchType("leuchte");
+              }
+            }}
+            onClose={() => setIsOpen(false)}
+            isQueryView={isQueryView}
+            showQueryTab={showFinalQuery}
+            onSelectQueryTab={() => {
+              if (isExpertSearch) {
+                // Snapshot the builder so the preview matches what Suchen runs.
+                setQueryPreview(
+                  generateQueryString(
+                    expertObjectType,
+                    searchValuesRef.current,
+                    buildExpertWhereClause(
+                      expertTypeState,
+                      REGISTRY[expertObjectType]
+                    ),
+                    buildExpertOrderBy(
+                      expertTypeState,
+                      REGISTRY[expertObjectType]
+                    ),
+                    buildExpertLimit(expertTypeState)
+                  )
+                );
+              }
+              setIsQueryView(true);
+            }}
           />
         }
         open={isOpen}
         onCancel={() => setIsOpen(false)}
+        closable={false}
         footer={
-          <div className="flex justify-between items-center pt-2 border-t border-gray-100">
-            <div className="text-sm text-gray-500">
-              {noResults && "Keine Ergebnisse gefunden"}
+          <div className="flex justify-between items-center pt-3 border-t border-gray-100 -mx-6 px-6">
+            <div className="flex items-center gap-3 text-sm text-gray-500">
+              {isExpertSearch && (
+                <button
+                  type="button"
+                  onClick={() => dispatch(resetType(expertObjectType))}
+                  className="text-[#6B7280] hover:text-[#4B5563] bg-transparent border-none cursor-pointer p-0"
+                >
+                  Zurücksetzen
+                </button>
+              )}
+              {noResults && <span>Keine Ergebnisse gefunden</span>}
             </div>
             <div className="flex gap-2">
               <Button onClick={() => setIsOpen(false)}>Abbrechen</Button>
@@ -1107,38 +1308,56 @@ const SearchModal = ({
                 type="primary"
                 onClick={executeSearch}
                 loading={isSearching}
+                disabled={searchDisabled}
               >
                 Suchen
               </Button>
             </div>
           </div>
         }
-        width={900}
+        width={1200}
         centered
         styles={{
-          body: { paddingTop: 16 },
-          header: { borderBottom: "1px solid #f3f4f6", paddingBottom: 16 },
+          content: { padding: 0, overflow: "hidden" },
+          header: { padding: "20px 24px 0", margin: 0 },
+          body: { padding: 0 },
+          footer: { padding: "0 24px 16px", margin: 0 },
         }}
       >
         <div
           style={{
-            height: showFinalQuery
-              ? "min(400px, calc(100vh - 450px))"
-              : "min(640px, calc(100vh - 250px))",
-            overflowY: "auto",
-            paddingRight: 8,
+            height: "min(720px, calc(100vh - 160px))",
+            display: "flex",
+            flexDirection: "column",
           }}
         >
-          {renderSearchComponent()}
-        </div>
-        {showFinalQuery && (
-          <div className="mt-4 border-t border-gray-200 pt-4">
-            <div className="text-sm font-medium text-gray-500 mb-2">
-              GraphQL Query:
-            </div>
-            <RawDisplay maxHeight={200}>{queryPreview}</RawDisplay>
+          <div
+            style={{
+              flex: 1,
+              minHeight: 0,
+              overflowY: "auto",
+              overflowX: "hidden",
+              paddingTop: 16,
+              paddingLeft: isExpertSearch && !isQueryView ? 0 : 24,
+              paddingRight: isExpertSearch && !isQueryView ? 0 : 24,
+            }}
+          >
+            {isQueryView ? (
+              <div className="h-full flex flex-col">
+                <div className="text-sm font-medium text-gray-500 mb-2">
+                  GraphQL Query:
+                </div>
+                <div className="flex-1 min-h-0">
+                  <RawDisplay fill>{queryPreview}</RawDisplay>
+                </div>
+              </div>
+            ) : isExpertSearch ? (
+              <ExpertSearch objectType={expertObjectType} />
+            ) : (
+              renderSearchComponent()
+            )}
           </div>
-        )}
+        </div>
       </Modal>
     </>
   );

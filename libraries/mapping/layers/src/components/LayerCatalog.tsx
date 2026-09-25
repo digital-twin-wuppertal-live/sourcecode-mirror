@@ -10,9 +10,10 @@ import { useQuery } from "@tanstack/react-query";
 import { faTriangleExclamation, faX } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { LoadingOutlined } from "@ant-design/icons";
-import { Button, Spin } from "antd";
+import { Button, Spin, type InputRef } from "antd";
 
 import { useAuth } from "@carma-providers/auth";
+import { useDeployment } from "@carma-commons/utils";
 import {
   useFeatureFlags,
   type FeatureFlagConfig,
@@ -36,6 +37,7 @@ import {
   useDiscoverRefetch,
   useIsInsideLayerCatalogProvider,
   useLayerCatalog,
+  useSelectedCategoryStorageKey,
 } from "../context/LayerCatalogProvider";
 import {
   CatalogInteractionProvider,
@@ -49,6 +51,7 @@ import {
   applyCatalogDrop,
   buildCatalog,
   EMPTY_DROPPED_CATALOG,
+  getDroppedItemIds,
 } from "../helper/buildCatalog";
 import { fetchDiscoverItems } from "../helper/discover";
 import {
@@ -61,8 +64,14 @@ import {
   useCatalogSearch,
 } from "../hooks/useCatalogSearch";
 import { filterCategoriesByFilters } from "../helper/catalogFilter";
+import {
+  loadSelectedCategoryId,
+  persistSelectedCategoryId,
+} from "../helper/selectedCategoryStorage";
 import { useAdditionalConfig } from "../hooks/useAdditionalConfig";
+import { useAdditionalLayers } from "../hooks/useAdditionalLayers";
 import { useLoadCapabilities } from "../hooks/useLoadCapabilities";
+import { useSyncActiveLayers } from "../hooks/useSyncActiveLayers";
 import { useHandleDrop } from "../hooks/useHandleDrop";
 import { useScrollSpy } from "../hooks/useScrollSpy";
 
@@ -84,6 +93,12 @@ export interface LayerCatalogProps {
   onRemoveCollection?: (layer: Item) => void;
   activeLayers: ActiveLayers;
   /**
+   * Whether a workflow card is on the map. Only the host knows: a card without
+   * layers launches an addon into its channel instead, so `activeLayers` never
+   * mentions it. Cards that bring a layer group do not need this.
+   */
+  isWorkflowActive?: (item: Item) => boolean;
+  /**
    * app-specific subcategories in addition to the registry defaults
    * (`subCategories` of the category definitions); same id overrides a default
    */
@@ -102,6 +117,7 @@ const LayerCatalogView = ({
   setOpen,
   setAdditionalLayers,
   activeLayers,
+  isWorkflowActive,
   customCategories,
   savedCollections,
   onAddCollection,
@@ -116,7 +132,8 @@ const LayerCatalogView = ({
   const categoryDefinitions = useCategoryDefinitions();
   const { isCesium } = useMapFrameworkSwitcherContext();
   const [preview, setPreview] = useState(false);
-  const { serviceCategories, loadingCapabilities } = useCatalogData();
+  const { serviceCategories, loadingCapabilities, setCatalogItems } =
+    useCatalogData();
   const { selectItem } = useCatalogSelectionActions();
   const { discoverRefetchRequested, markDiscoverRefetchHandled } =
     useDiscoverRefetch();
@@ -183,7 +200,29 @@ const LayerCatalogView = ({
     [customCategoryDefinitions, favorites, savedCollections, isCesium]
   );
   const [showItems, setShowItems] = useState(false);
-  const [selectedNavItemIndex, setSelectedNavItemIndex] = useState(0);
+
+  // the category the user left the catalog on survives a reload; the key is
+  // route-scoped by the provider, see its storageScope
+  const selectedCategoryStorageKey = useSelectedCategoryStorageKey();
+
+  const [restoredCategoryIndex] = useState(() => {
+    const storedId = loadSelectedCategoryId(selectedCategoryStorageKey);
+    if (!storedId) {
+      return -1;
+    }
+    return categoryDefinitions.findIndex(
+      (definition) => definition.id === storedId
+    );
+  });
+  const [selectedNavItemIndex, setSelectedNavItemIndex] = useState(
+    restoredCategoryIndex === -1 ? 0 : restoredCategoryIndex
+  );
+
+  const pendingRestoredCategoryId = useRef(
+    restoredCategoryIndex === -1
+      ? null
+      : categoryDefinitions[restoredCategoryIndex].id
+  );
   const [dropped, applyDrop] = useReducer(
     applyCatalogDrop,
     EMPTY_DROPPED_CATALOG
@@ -211,6 +250,17 @@ const LayerCatalogView = ({
     ? "Fehler beim Laden der Inhalte"
     : null;
 
+  const deployment = useDeployment();
+
+  // the layers this catalog config adds on top of the fetched sources; their
+  // references are resolved by the catalog derivation, which knows every item
+  const { categories: additionalLayerCategories, itemIds: additionalLayerIds } =
+    useAdditionalLayers({
+      additionalLayers: catalogConfig.additionalLayers,
+      vectorTileServerUrl: catalogConfig.vectorTileServerUrl,
+      setFeatureFlags,
+    });
+
   const {
     additionalConfig,
     sensorConfig,
@@ -224,8 +274,6 @@ const LayerCatalogView = ({
 
   useLoadCapabilities({
     loadingAdditionalConfig,
-    activeLayers,
-    updateActiveLayer,
     services: catalogConfig.services,
   });
 
@@ -241,11 +289,13 @@ const LayerCatalogView = ({
           categoryConfigs: { sensors: sensorConfig, objects: objectConfig },
           discoverItems,
           dropped,
+          additionalLayers: additionalLayerCategories,
         },
         {
           featureFlags: flags,
           customCategories: resolvedCustomCategories,
           categoryDefinitions,
+          deployment,
         }
       ),
     [
@@ -255,9 +305,11 @@ const LayerCatalogView = ({
       objectConfig,
       discoverItems,
       dropped,
+      additionalLayerCategories,
       flags,
       resolvedCustomCategories,
       categoryDefinitions,
+      deployment,
     ]
   );
 
@@ -276,6 +328,46 @@ const LayerCatalogView = ({
     );
     return index;
   }, [allCategories]);
+
+  // The custom categories carry host-owned items (favorites, collections, the
+  // measurements of the app); those are no catalog definitions, so they must
+  // not drive the active-layer sync below.
+  const customCategoryItemIds = useMemo(
+    () =>
+      new Set(
+        resolvedCustomCategories.flatMap((category) =>
+          category.layers.map((layer) => layer.id)
+        )
+      ),
+    [resolvedCustomCategories]
+  );
+
+  const catalogItemsById = useMemo(() => {
+    const index = new Map<string, Item>();
+    itemsById.forEach((item, id) => {
+      if (!customCategoryItemIds.has(id)) {
+        index.set(id, item);
+      }
+    });
+    return index;
+  }, [itemsById, customCategoryItemIds]);
+
+  // Resolving an id outside the catalog (a collection re-adding its layers, the
+  // carma api) needs the assembled catalog, not just the service structure:
+  // layers the additional config adds on their own only exist in this tree.
+  useEffect(() => {
+    setCatalogItems(catalogItemsById);
+  }, [catalogItemsById, setCatalogItems]);
+
+  // waiting for the capabilities keeps a layer whose service is still loading
+  // out of the "not in the catalog" branch of the sync
+  useSyncActiveLayers({
+    catalogItems: catalogItemsById,
+    activeLayers,
+    updateActiveLayer,
+    enabled: !loadingAdditionalConfig && !loadingCapabilities,
+    vectorTileServerUrl: catalogConfig.vectorTileServerUrl,
+  });
 
   const resolveWorkflowLayers = useCallback(
     (ids: string[]): Item[] =>
@@ -324,22 +416,52 @@ const LayerCatalogView = ({
       ),
     [categoryDefinitions]
   );
+  // Layers the user dropped in are never hidden by a curated filter config, and
+  // neither are the additional layers of that very config: filters and
+  // additional layers are written together, so those are wanted here.
+  const filterExemptItemIds = useMemo(
+    () => new Set([...getDroppedItemIds(dropped), ...additionalLayerIds]),
+    [dropped, additionalLayerIds]
+  );
   const filteredCategories = useMemo(
     () =>
       catalogFilters?.length
-        ? filterCategoriesByFilters(
-            searchedCategories,
-            catalogFilters,
-            filterExemptCategoryIds
-          )
+        ? filterCategoriesByFilters(searchedCategories, catalogFilters, {
+            categoryIds: filterExemptCategoryIds,
+            itemIds: filterExemptItemIds,
+          })
         : searchedCategories,
-    [searchedCategories, catalogFilters, filterExemptCategoryIds]
+    [
+      searchedCategories,
+      catalogFilters,
+      filterExemptCategoryIds,
+      filterExemptItemIds,
+    ]
   );
   // active filters hide empty categories entirely instead of showing them
   // grayed out
   const isFiltering = !!catalogFilters?.length;
 
   const currentDefinition = sidebarElements[selectedNavItemIndex];
+  /**
+   * Every user-driven category change, in contrast to the fallbacks below: it
+   * gives up on an unreached restore, and writes the choice itself because
+   * picking the very category a fallback had landed on leaves the persisting
+   * effect below without a change to react to.
+   */
+  const selectNavItem = useCallback(
+    (index: number) => {
+      const category = sidebarElements[index];
+      if (pendingRestoredCategoryId.current && category) {
+        pendingRestoredCategoryId.current = null;
+        if (category.source !== "searchResults") {
+          persistSelectedCategoryId(selectedCategoryStorageKey, category.id);
+        }
+      }
+      setSelectedNavItemIndex(index);
+    },
+    [sidebarElements, selectedCategoryStorageKey]
+  );
   const isSearchCategory = currentDefinition.source === "searchResults";
   const isDiscoverCategory = currentDefinition.source === "discover";
   const loadingCurrentCategory =
@@ -502,9 +624,34 @@ const LayerCatalogView = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [debouncedSearchTerm, isFiltering, filteredCategories]);
 
+  // declared after the fallbacks above so it wins when the same change (the
+  // arriving discover items, a filter run) makes both of them write
+  useEffect(() => {
+    const pendingId = pendingRestoredCategoryId.current;
+    if (!pendingId) {
+      return;
+    }
+    const categoryIndex = sidebarElements.findIndex(
+      (element) => element.id === pendingId
+    );
+    if (categoryIndex === -1) {
+      pendingRestoredCategoryId.current = null;
+      return;
+    }
+    if (
+      sidebarElements[categoryIndex].disabled ||
+      !mainCategoryHasResults(filteredCategories, pendingId)
+    ) {
+      // still loading or filtered away for now; keep waiting for its content
+      return;
+    }
+    pendingRestoredCategoryId.current = null;
+    setSelectedNavItemIndex(categoryIndex);
+  }, [sidebarElements, filteredCategories]);
+
   useHandleDrop({
     setOpen,
-    setSelectedNavItemIndex,
+    setSelectedNavItemIndex: selectNavItem,
     onDrop: applyDrop,
     activeLayers,
     updateActiveLayer,
@@ -512,8 +659,25 @@ const LayerCatalogView = ({
     vectorTileServerUrl: catalogConfig.vectorTileServerUrl,
   });
 
-  // start on the map layers tab as long as there is nothing in the favorites
+  // the search results are a transient entry, never the category to return to;
+  // an unreached restore must not be overwritten by the fallback it sits on
   useEffect(() => {
+    if (
+      !currentDefinition ||
+      currentDefinition.source === "searchResults" ||
+      pendingRestoredCategoryId.current
+    ) {
+      return;
+    }
+    persistSelectedCategoryId(selectedCategoryStorageKey, currentDefinition.id);
+  }, [currentDefinition, selectedCategoryStorageKey]);
+
+  // start on the map layers tab as long as there is nothing in the favorites;
+  // a restored category is an explicit choice and wins over this default
+  useEffect(() => {
+    if (restoredCategoryIndex !== -1) {
+      return;
+    }
     const numOfCustomLayers = resolvedCustomCategories.reduce(
       (acc, category) => acc + category.layers.length,
       0
@@ -544,10 +708,10 @@ const LayerCatalogView = ({
         sidebarElements[selectedNavItemIndex]?.source === "searchResults" &&
         !value
       ) {
-        setSelectedNavItemIndex(0);
+        selectNavItem(0);
       }
     },
-    [setSearchValue, sidebarElements, selectedNavItemIndex]
+    [setSearchValue, sidebarElements, selectedNavItemIndex, selectNavItem]
   );
   const handleSearchSubmit = useCallback(
     (value: string) => {
@@ -556,12 +720,19 @@ const LayerCatalogView = ({
           (element) => element.source === "searchResults"
         );
         if (searchResultsIndex !== -1) {
-          setSelectedNavItemIndex(searchResultsIndex);
+          selectNavItem(searchResultsIndex);
         }
       }
     },
-    [sidebarElements]
+    [sidebarElements, selectNavItem]
   );
+
+  const searchInputRef = useRef<InputRef>(null);
+  const focusSearchOnOpen = useCallback((isOpen: boolean) => {
+    if (isOpen) {
+      searchInputRef.current?.focus();
+    }
+  }, []);
 
   const closeCatalog = () => {
     setOpen(false);
@@ -573,6 +744,7 @@ const LayerCatalogView = ({
     () => ({
       setAdditionalLayers,
       activeLayers,
+      isWorkflowActive,
       favorites: displayedFavorites,
       addFavorite: handleAddFavorite,
       removeFavorite: handleRemoveFavorite,
@@ -583,6 +755,7 @@ const LayerCatalogView = ({
     [
       setAdditionalLayers,
       activeLayers,
+      isWorkflowActive,
       displayedFavorites,
       handleAddFavorite,
       handleRemoveFavorite,
@@ -595,6 +768,7 @@ const LayerCatalogView = ({
     <ModalShell
       open={open}
       preview={preview}
+      afterOpenChange={focusSearchOnOpen}
       onCancel={() => {
         if (preview) {
           setPreview(false);
@@ -617,7 +791,7 @@ const LayerCatalogView = ({
           <CategorySidebar
             entries={sidebarEntries}
             selectedIndex={selectedNavItemIndex}
-            onSelect={setSelectedNavItemIndex}
+            onSelect={selectNavItem}
           />
 
           <div
@@ -673,6 +847,7 @@ const LayerCatalogView = ({
                   </Button>
                 </div>
                 <CatalogSearch
+                  inputRef={searchInputRef}
                   onChange={handleSearchChange}
                   onSubmit={handleSearchSubmit}
                   isSearching={isSearching}

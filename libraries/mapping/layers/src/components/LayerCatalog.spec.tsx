@@ -50,8 +50,25 @@ const textResponse = (body: string, status = 200) =>
 
 const jsonResponse = (data: unknown) => textResponse(JSON.stringify(data));
 
+const buildVectorStyle = (title: string) => ({
+  version: 8,
+  sources: {},
+  layers: [{ id: "l", type: "fill", source: "s", minzoom: 11, maxzoom: 18 }],
+  metadata: { carmaConf: { layerInfo: { title } } },
+});
+
 const routedFetch = (input: RequestInfo | URL): Promise<Response> => {
   const url = String(input);
+
+  if (url.includes("styles/zusatz.style.json")) {
+    return jsonResponse(buildVectorStyle("Zusatz Style Titel"));
+  }
+  if (url.includes("styles/extern.style.json")) {
+    return jsonResponse(buildVectorStyle("Externer Style Titel"));
+  }
+  if (url.includes("alkis/gebaeude-only.style.json")) {
+    return jsonResponse(buildVectorStyle("ALKIS Gebäude (schwarz)"));
+  }
 
   if (url.includes("additionalLayerConfig.json")) {
     return jsonResponse(additionalLayerConfig);
@@ -434,6 +451,35 @@ describe("LayerCatalog", () => {
     expect(headings?.[0]?.textContent).toBe("Externe Dienste");
   });
 
+  it("adds a plain-text vector style URL directly to the local map", async () => {
+    const { props } = renderModal();
+    await screen.findByText("Stadtgrundkarte (grau)", undefined, {
+      timeout: 8000,
+    });
+
+    const url =
+      "https://tiles.cismet.de/alkis/gebaeude-only.style.json?source=drag";
+    fireEvent.drop(window, {
+      dataTransfer: {
+        files: [],
+        getData: (type: string) => (type === "text/plain" ? url : ""),
+      },
+    });
+
+    await waitFor(() => {
+      expect(props.setAdditionalLayers).toHaveBeenCalledWith(
+        expect.objectContaining({
+          id: `custom:${url}`,
+          title: "ALKIS Gebäude (schwarz)",
+        }),
+        false,
+        false,
+        false,
+        true
+      );
+    });
+  });
+
   it("applies a dropped layer config to the current catalog", async () => {
     renderModal();
     await screen.findByText("Stadtgrundkarte (grau)", undefined, {
@@ -512,6 +558,103 @@ describe("LayerCatalog", () => {
     await waitFor(() => {
       expect(screen.queryByText("Stadtgrundkarte (grau)")).toBeNull();
     });
+  });
+
+  it("rebuilds an active layer from its catalog definition", async () => {
+    const staleLayer = {
+      id: "zusatzTest:testlayer",
+      title: "Zusatz Testlayer (veraltet)",
+      description: "",
+      type: "layer",
+      layerType: "vector",
+      visible: true,
+      opacity: 0.4,
+      props: {
+        style: "https://example.test/styles/veraltet.style.json",
+        minZoom: 9,
+        maxZoom: 20,
+      },
+    };
+    const { props } = renderModal({
+      activeLayers: [backgroundLayer, staleLayer] as unknown as ActiveLayers,
+    });
+
+    await waitFor(
+      () => {
+        expect(props.updateActiveLayer).toHaveBeenCalledTimes(1);
+      },
+      { timeout: 8000 }
+    );
+
+    const updatedLayer = vi.mocked(props.updateActiveLayer).mock.calls[0][0];
+    expect(updatedLayer.id).toBe("zusatzTest:testlayer");
+    expect(updatedLayer.title).toBe("Zusatz Testlayer");
+    // the style of the catalog item, with the zoom range and the layer info
+    // read from the freshly fetched style metadata
+    expect(updatedLayer.props.style).toBe(
+      "https://example.test/styles/zusatz.style.json"
+    );
+    expect(updatedLayer.props.minZoom).toBe(11);
+    expect(updatedLayer.layerInfo.title).toBe("Zusatz Style Titel");
+    // the state the map owns survives the rebuild
+    expect(updatedLayer.visible).toBe(true);
+    expect(updatedLayer.opacity).toBe(0.4);
+  });
+
+  it("refreshes a layer the catalog does not know from its own style", async () => {
+    const externalLayer = {
+      id: "extern:testlayer",
+      title: "Externer Layer",
+      description: "",
+      type: "layer",
+      layerType: "vector",
+      visible: true,
+      opacity: 1,
+      props: {
+        style: "https://example.test/styles/extern.style.json",
+        minZoom: 9,
+        maxZoom: 24,
+        legend: [{ format: "image/png", OnlineResource: "legend.png" }],
+      },
+      other: { serviceName: "extern", name: "extern" },
+    };
+    // no style URL to refetch, so this one stays untouched
+    const externalWmsLayer = {
+      id: "extern:wmslayer",
+      title: "Externer WMS Layer",
+      description: "",
+      type: "layer",
+      layerType: "wmts",
+      visible: true,
+      opacity: 1,
+      props: { url: "https://example.test/wms", name: "wmslayer" },
+    };
+    const { props } = renderModal({
+      activeLayers: [
+        backgroundLayer,
+        externalLayer,
+        externalWmsLayer,
+      ] as unknown as ActiveLayers,
+    });
+
+    await waitFor(
+      () => {
+        expect(props.updateActiveLayer).toHaveBeenCalledTimes(1);
+      },
+      { timeout: 8000 }
+    );
+
+    const updatedLayer = vi.mocked(props.updateActiveLayer).mock.calls[0][0];
+    expect(updatedLayer.id).toBe("extern:testlayer");
+    expect(updatedLayer.props.style).toBe(
+      "https://example.test/styles/extern.style.json"
+    );
+    expect(updatedLayer.props.minZoom).toBe(11);
+    expect(updatedLayer.layerInfo.title).toBe("Externer Style Titel");
+    // nothing the thinner rebuild cannot produce gets lost
+    expect(updatedLayer.props.legend).toEqual([
+      { format: "image/png", OnlineResource: "legend.png" },
+    ]);
   });
 
   it("clears the loading state when capabilities fail to load", async () => {

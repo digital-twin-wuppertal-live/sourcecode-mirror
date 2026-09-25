@@ -1,6 +1,5 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useMemo } from "react";
 import type { ChartOptions } from "chart.js";
-import { Line } from "react-chartjs-2";
 import "chart.js/auto";
 import { Modal, Accordion } from "react-bootstrap";
 import Panel from "react-cismap/commons/Panel";
@@ -19,6 +18,14 @@ import {
   type SensorType,
 } from "./bodenfeuchteContent";
 import texts from "./_data/bodenfeuchteTexts";
+import { ChartLoadingPlaceholder } from "./helper/chartLoading";
+import { valueRange, withYScale } from "./helper/chartAxis";
+import { useProgressiveCharts } from "./helper/useProgressiveCharts";
+import {
+  ChartWithZoom,
+  ZOOM_HINT,
+  ZOOM_PLUGIN_OPTIONS,
+} from "./helper/chartWithZoom";
 
 const fmtValue = (v: unknown, unit: string): string => {
   if (typeof v !== "number" || v === 0) return "–";
@@ -29,8 +36,7 @@ const fmtResistance = (v: unknown): string => {
   if (typeof v !== "number" || v === 0) return "–";
   if (v >= 1_000_000)
     return (v / 1_000_000).toFixed(1).replace(".", ",") + "\u00A0MΩ";
-  if (v >= 1_000)
-    return (v / 1_000).toFixed(1).replace(".", ",") + "\u00A0kΩ";
+  if (v >= 1_000) return (v / 1_000).toFixed(1).replace(".", ",") + "\u00A0kΩ";
   return v.toFixed(1).replace(".", ",") + "\u00A0Ω";
 };
 
@@ -53,9 +59,21 @@ const tblStyle: React.CSSProperties = {
 
 const renderIoplantMeasurements = (sensor: Record<string, unknown>) => {
   const rows = [
-    { d: "30 cm", m: sensor.soilMoisture_Percent_1, t: sensor.temperatureAtDepth_1 },
-    { d: "60 cm", m: sensor.soilMoisture_Percent_2, t: sensor.temperatureAtDepth_2 },
-    { d: "90 cm", m: sensor.soilMoisture_Percent_3, t: sensor.temperatureAtDepth_3 },
+    {
+      d: "30 cm",
+      m: sensor.soilMoisture_Percent_1,
+      t: sensor.temperatureAtDepth_1,
+    },
+    {
+      d: "60 cm",
+      m: sensor.soilMoisture_Percent_2,
+      t: sensor.temperatureAtDepth_2,
+    },
+    {
+      d: "90 cm",
+      m: sensor.soilMoisture_Percent_3,
+      t: sensor.temperatureAtDepth_3,
+    },
   ];
   return (
     <table style={tblStyle}>
@@ -112,7 +130,7 @@ const renderWatermarkMeasurements = (sensor: Record<string, unknown>) => {
 
 const renderMeasurements = (
   sensor: Record<string, unknown>,
-  sensorType: SensorType,
+  sensorType: SensorType
 ) => {
   if (sensorType === "watermark") return renderWatermarkMeasurements(sensor);
   if (sensorType === "tree" || sensorType === "dike")
@@ -239,10 +257,25 @@ const WATERMARK_SERIES: SeriesConfig[] = [
   { attr: "Widerstand_Steckplatz_6", label: "Kanal 6" },
 ];
 
-function buildLineChartData(
-  data: HistoricalData,
-  series: SeriesConfig[],
-) {
+// Einmal angelegt und wiederverwendet. Ueber toLocaleDateString mit
+// Optionsobjekt kostet dieselbe Beschriftung in einer Schleife ueber mehrere
+// tausend Messpunkte ein Vielfaches.
+// Mit Jahr, weil die Messreihen ueber den Jahreswechsel laufen.
+const dfDayShort = new Intl.DateTimeFormat("de-DE", {
+  day: "2-digit",
+  month: "2-digit",
+  year: "2-digit",
+});
+
+const dfTooltip = new Intl.DateTimeFormat("de-DE", {
+  day: "2-digit",
+  month: "2-digit",
+  year: "numeric",
+  hour: "2-digit",
+  minute: "2-digit",
+});
+
+function buildLineChartData(data: HistoricalData, series: SeriesConfig[]) {
   // Collect all unique timestamps across all series and sort them
   const tsSet = new Set<string>();
   for (const s of series) {
@@ -253,12 +286,9 @@ function buildLineChartData(
   }
   const timestamps = [...tsSet].sort();
 
-  const labels = timestamps.map((ts) =>
-    new Date(ts).toLocaleDateString("de-DE", {
-      day: "2-digit",
-      month: "2-digit",
-    }),
-  );
+  // Beschriftungen bleiben die rohen Zeitstempel, formatiert wird ueber die
+  // Callbacks von Achse und Tooltip nur, was angezeigt wird.
+  const labels = timestamps;
 
   const datasets = series
     .map((s, i) => {
@@ -266,10 +296,7 @@ function buildLineChartData(
       if (entries.length === 0) return null;
       const valByTs = new Map<string, number | null>();
       for (const e of entries) {
-        valByTs.set(
-          e.observedAt,
-          typeof e.value === "number" ? e.value : null,
-        );
+        valByTs.set(e.observedAt, typeof e.value === "number" ? e.value : null);
       }
       return {
         label: s.label,
@@ -287,8 +314,20 @@ function buildLineChartData(
   return { labels, datasets };
 }
 
-const lineChartOptions: ChartOptions<"line"> = {
+/** Kleinster und groesster Wert ueber alle Reihen eines Diagramms. */
+function chartRange(chart: { datasets: { data: (number | null)[] }[] }) {
+  const all: (number | null)[] = [];
+  for (const set of chart.datasets) all.push(...set.data);
+  return valueRange(all);
+}
+
+// Bewusst als "line" | "bar" typisiert: so passt das Objekt in ChartWithZoom,
+// das beide Diagrammarten bedient.
+const lineChartOptions: ChartOptions<"line" | "bar"> = {
   maintainAspectRatio: false,
+  // Bei ueber 2.000 Messpunkten je Reihe und bis zu acht Reihen kostet die
+  // Einblendanimation Sekunden, in denen die Zeichenflaeche leer bleibt.
+  animation: false,
   plugins: {
     legend: {
       display: true,
@@ -298,19 +337,107 @@ const lineChartOptions: ChartOptions<"line"> = {
     tooltip: {
       mode: "index",
       intersect: false,
+      callbacks: {
+        title: (items) =>
+          items.length ? dfTooltip.format(new Date(items[0].label)) : "",
+      },
     },
+    zoom: ZOOM_PLUGIN_OPTIONS,
   },
   scales: {
     x: {
-      ticks: { maxTicksLimit: 8, font: { size: 10 } },
+      ticks: {
+        maxTicksLimit: 8,
+        font: { size: 10 },
+        callback: function (value) {
+          const raw = this.getLabelForValue(Number(value));
+          return dfDayShort.format(new Date(raw));
+        },
+      },
       grid: { display: false },
     },
+    // Grenzen und Striche kommen je Diagramm aus withYScale.
     y: {
       ticks: { maxTicksLimit: 6 },
       beginAtZero: false,
     },
   },
 };
+
+interface PreparedPanel {
+  key: string;
+  header: string;
+  data: ReturnType<typeof buildLineChartData>;
+  options: ChartOptions<"line" | "bar">;
+}
+
+/** Welche Diagramme ein Sensortyp bekommt. */
+function panelSpecs(
+  sensorType: string
+): { key: string; header: string; series: SeriesConfig[] }[] {
+  if (sensorType === "tree" || sensorType === "dike") {
+    return [
+      {
+        key: "moisture",
+        header: "Bodenfeuchte (%)",
+        series: IOPLANT_MOISTURE_SERIES,
+      },
+      {
+        key: "temperature",
+        header: "Temperatur (°C)",
+        series: IOPLANT_TEMP_SERIES,
+      },
+    ];
+  }
+  if (sensorType === "watermark") {
+    return [
+      { key: "resistance", header: "Widerstand (Ω)", series: WATERMARK_SERIES },
+    ];
+  }
+  return [];
+}
+
+/**
+ * Diagramme und Datenpunktzahl in einem Durchgang, ausserhalb des Renders:
+ * bei rund 2,7 MB Rohdaten blockiert dieser Schritt den Hauptthread, der
+ * Ladezustand waere sonst nicht zu sehen.
+ */
+function prepareCharts({
+  data,
+  sensorType,
+}: {
+  data: HistoricalData;
+  sensorType: string;
+}): { panels: PreparedPanel[]; pointCount: number } {
+  const ts = new Set<string>();
+  for (const [key, val] of Object.entries(data)) {
+    if (SKIP_HISTORICAL_KEYS.has(key)) continue;
+    for (const e of getAttrValues(val)) {
+      ts.add(e.observedAt);
+    }
+  }
+
+  const panels: PreparedPanel[] = [];
+  for (const spec of panelSpecs(sensorType)) {
+    const chart = buildLineChartData(data, spec.series);
+    if (chart.datasets.length === 0) continue;
+    const range = chartRange(
+      chart as { datasets: { data: (number | null)[] }[] }
+    );
+    panels.push({
+      key: spec.key,
+      header: spec.header,
+      data: chart,
+      // Bodentemperaturen werden im Winter wirklich negativ, die Achse
+      // beschriftet negative Werte deshalb weiter.
+      options: range
+        ? withYScale(lineChartOptions, range.min, range.max)
+        : lineChartOptions,
+    });
+  }
+
+  return { panels, pointCount: ts.size };
+}
 
 interface FeatureType {
   properties?: Record<string, unknown>;
@@ -557,7 +684,7 @@ const SecondaryInfoModal = ({
   const entityId = (sensor?.id as string) ?? "";
 
   const [historicalData, setHistoricalData] = useState<HistoricalData | null>(
-    null,
+    null
   );
   const [historyLoading, setHistoryLoading] = useState(false);
 
@@ -581,6 +708,20 @@ const SecondaryInfoModal = ({
     };
   }, [entityId]);
 
+  const sensorTypeOfFeature = getSensorType((sensor?.name as string) ?? "");
+  const chartSource = useMemo(
+    () =>
+      historicalData
+        ? { data: historicalData, sensorType: sensorTypeOfFeature }
+        : null,
+    [historicalData, sensorTypeOfFeature]
+  );
+  const { prepared, mountedCharts } = useProgressiveCharts(
+    chartSource,
+    prepareCharts
+  );
+  const historicalDataPointCount = prepared?.pointCount ?? 0;
+
   if (sensor === undefined) return null;
 
   const name = (sensor.name as string) ?? "";
@@ -596,32 +737,18 @@ const SecondaryInfoModal = ({
     ? new Date(dateObserved).toLocaleString("de-DE")
     : "–";
 
-  const historicalDataPointCount = historicalData
-    ? (() => {
-        const ts = new Set<string>();
-        for (const [key, val] of Object.entries(historicalData)) {
-          if (SKIP_HISTORICAL_KEYS.has(key)) continue;
-          for (const e of getAttrValues(val)) {
-            ts.add(e.observedAt);
-          }
-        }
-        return ts.size;
-      })()
-    : 0;
-
-  // Build chart data if available
-  let moistureData: ReturnType<typeof buildLineChartData> | null = null;
-  let tempData: ReturnType<typeof buildLineChartData> | null = null;
-  let resistanceData: ReturnType<typeof buildLineChartData> | null = null;
-
-  if (historicalData && historicalDataPointCount > 0) {
-    if (sensorType === "tree" || sensorType === "dike") {
-      moistureData = buildLineChartData(historicalData, IOPLANT_MOISTURE_SERIES);
-      tempData = buildLineChartData(historicalData, IOPLANT_TEMP_SERIES);
-    } else if (sensorType === "watermark") {
-      resistanceData = buildLineChartData(historicalData, WATERMARK_SERIES);
-    }
-  }
+  // Solange nichts aufbereitet ist, stehen die Kopfzeilen aller Diagramme
+  // schon da. Der Platz stimmt damit von Anfang an.
+  const renderedPanels = prepared
+    ? prepared.panels
+    : historyLoading || historicalData
+    ? panelSpecs(sensorType).map((spec) => ({
+        key: spec.key,
+        header: spec.header,
+        data: null,
+        options: lineChartOptions,
+      }))
+    : [];
 
   return (
     <Modal
@@ -703,62 +830,48 @@ const SecondaryInfoModal = ({
         </Accordion>
 
         {/* 2. Diagramme */}
-        {historicalData && historicalDataPointCount > 0 && (
+        {renderedPanels.length > 0 && (
           <>
-            {(sensorType === "tree" || sensorType === "dike") && moistureData && (
-              <Accordion style={{ marginBottom: 6 }} defaultActiveKey="1">
-                <Panel header="Bodenfeuchte (%)" eventKey="1" bsStyle="success">
-                  <div style={{ padding: "10px", paddingTop: 0 }}>
-                    <div style={{ height: 300, width: "100%" }}>
-                      <Line
-                        data={moistureData as any}
-                        options={lineChartOptions}
-                      />
-                    </div>
-                  </div>
-                </Panel>
-              </Accordion>
-            )}
-            {(sensorType === "tree" || sensorType === "dike") && tempData && (
-              <Accordion style={{ marginBottom: 6 }} defaultActiveKey="2">
-                <Panel header="Temperatur (°C)" eventKey="2" bsStyle="success">
-                  <div style={{ padding: "10px", paddingTop: 0 }}>
-                    <div style={{ height: 300, width: "100%" }}>
-                      <Line
-                        data={tempData as any}
-                        options={lineChartOptions}
-                      />
-                    </div>
-                  </div>
-                </Panel>
-              </Accordion>
-            )}
-            {sensorType === "watermark" && resistanceData && (
-              <Accordion style={{ marginBottom: 6 }} defaultActiveKey="3">
-                <Panel header="Widerstand (Ω)" eventKey="3" bsStyle="success">
-                  <div style={{ padding: "10px", paddingTop: 0 }}>
-                    <div style={{ height: 300, width: "100%" }}>
-                      <Line
-                        data={resistanceData as any}
-                        options={lineChartOptions}
-                      />
-                    </div>
-                  </div>
-                </Panel>
-              </Accordion>
-            )}
-          </>
-        )}
-        {historyLoading && (
-          <Accordion style={{ marginBottom: 6 }} defaultActiveKey="1">
-            <Panel header="Diagramm" eventKey="1" bsStyle="success">
-              <div
-                style={{ fontSize: "115%", padding: "10px", paddingTop: "0px" }}
+            <div
+              style={{
+                fontSize: "85%",
+                color: "#888",
+                padding: "0 10px 10px 10px",
+              }}
+            >
+              {ZOOM_HINT}
+            </div>
+            {renderedPanels.map((entry, idx) => (
+              <Accordion
+                key={entry.key}
+                style={{ marginBottom: 6 }}
+                defaultActiveKey={entry.key}
               >
-                <p>Daten werden geladen…</p>
-              </div>
-            </Panel>
-          </Accordion>
+                <Panel
+                  header={entry.header}
+                  eventKey={entry.key}
+                  bsStyle="success"
+                >
+                  <div style={{ padding: "10px", paddingTop: 0 }}>
+                    {prepared && idx < mountedCharts ? (
+                      <ChartWithZoom
+                        data={prepared.panels[idx].data}
+                        options={prepared.panels[idx].options}
+                        height={300}
+                      />
+                    ) : (
+                      <ChartLoadingPlaceholder
+                        height={300}
+                        label={
+                          idx === 0 ? "Messreihen werden geladen…" : "\u00a0"
+                        }
+                      />
+                    )}
+                  </div>
+                </Panel>
+              </Accordion>
+            ))}
+          </>
         )}
 
         {/* 3. Datendownload */}
@@ -770,11 +883,14 @@ const SecondaryInfoModal = ({
               <button
                 type="button"
                 className="btn btn-primary btn-sm"
-                disabled={historyLoading || historicalDataPointCount === 0}
+                disabled={!prepared || historicalDataPointCount === 0}
                 onClick={() => {
                   if (!historicalData) return;
                   const csv = historicalDataToCsv(historicalData);
-                  const filename = `${name.replace(/[^a-zA-Z0-9_\-]/g, "_")}.csv`;
+                  const filename = `${name.replace(
+                    /[^a-zA-Z0-9_\-]/g,
+                    "_"
+                  )}.csv`;
                   triggerCsvDownload(csv, filename);
                 }}
               >
@@ -782,12 +898,14 @@ const SecondaryInfoModal = ({
                   className="glyphicon glyphicon-download"
                   style={{ marginRight: 6 }}
                 />
-                {historyLoading
+                {!prepared && (historyLoading || historicalData)
                   ? "Daten werden geladen…"
                   : "Messdaten herunterladen (CSV)"}
               </button>
-              {!historyLoading && (
-                <span style={{ marginLeft: 10, color: "#666", fontSize: "85%" }}>
+              {prepared && (
+                <span
+                  style={{ marginLeft: 10, color: "#666", fontSize: "85%" }}
+                >
                   ({historicalDataPointCount} Datenpunkte)
                 </span>
               )}

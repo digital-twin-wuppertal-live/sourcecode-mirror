@@ -21,6 +21,7 @@ import {
   getAdditionalLayerOpacities,
   isInPaleMode,
   getEnabledLeitungstypen,
+  getEnabledCategoryFilters,
   isSnappingEnabled,
   setSnappingEnabled,
 } from "../../store/slices/mapSettings";
@@ -34,7 +35,10 @@ import {
   BELIS_BRAND_NEW_STYLE_URL,
   BELIS_ORIGINAL_SOURCE,
   BELIS_SOURCE_LAYERS,
+  ESAVE_STYLE_URL,
+  ESAVE_ORIGINAL_SOURCE,
   AA_LAYER_STYLES,
+  BELIS_MARKER_SYMBOL_SIZE,
 } from "../../config/mapLayerConfigs";
 import type { LibreLayer } from "@carma-mapping/engines/maplibre";
 import { AppDispatch, type RootState } from "../../store";
@@ -135,6 +139,11 @@ import {
 
 const LIST_WIDTH = 300;
 
+/** Above this feature count the sidebar drops the detailed per-item list and
+ *  shows only the grouped counts (overview mode). Applies to both the
+ *  Fachobjekte (viewport) tab and the Highlights tab. */
+const OVERVIEW_FEATURE_LIMIT = 2000;
+
 /** Debug flag: translucent main map + red mini-map border, mini-map always visible */
 const MINI_MAP_DEBUGGING = false;
 
@@ -162,6 +171,7 @@ const MEASUREMENT_DELETE_ICON = (
 );
 
 import type { SidebarFeature } from "../ui/BelisSidebar";
+import type { ExpertSortSpec } from "../ui/expert-search/expertSearchUtils";
 
 import {
   getAllDraftFeatures,
@@ -185,6 +195,16 @@ import {
 } from "../../store/slices/arbeitsauftraegeDrafts";
 import { prepareDraftFeatures } from "../../helper/prepareDraftFeatures";
 import {
+  buildClusterIndex,
+  clusterIdOf,
+  clusterMembers,
+  clusterSourceIds,
+  queryLeuchtenByStandort,
+  queryStandortById,
+  toSidebarFeature,
+} from "../../helper/standortCluster";
+import { buildFeatureKey } from "../../helper/featureKeys";
+import {
   buildLeuchteDraftStandortFeature,
   expandDraftSidebarFeatures,
 } from "../../helper/expandDraftSidebarFeatures";
@@ -195,9 +215,14 @@ import {
 } from "../../helper/buildSyntheticFeature";
 // import { useAaLassoSelection } from "../../hooks/useAaLassoSelection";
 import { useBrandnewFcSync } from "../../hooks/useBrandnewFcSync";
+import { useFilteredHighlights } from "../../hooks/useFilteredHighlights";
 import {
   DrawModeControls,
   MeasurementHost,
+  MeasurementsProvider,
+  MEASUREMENT_FEATUREKIND,
+  featureLengthMeters,
+  formatMeters,
   type DrawMode,
   type MeasurementHostHandle,
 } from "@carma-mapping/measurements";
@@ -205,12 +230,27 @@ import {
   getMeasurements,
   replaceMeasurements,
   selectMeasurement,
-  MEASUREMENT_FEATUREKIND,
 } from "../../store/slices/measurements";
+import { MapLibrePrintPreview } from "@carma-mapping/print-core/maplibre";
 import {
-  featureLengthMeters,
-  formatMeters,
-} from "../../utils/measurementGeometry";
+  getPrintActive,
+  getOrientation as getPrintOrientation,
+  getScale as getPrintScale,
+  getDPI as getPrintDPI,
+  getPrintName,
+  getIsLoading as getPrintLoading,
+  getRedrawPreview as getPrintRedraw,
+  getIfMapPrinted,
+  changePrintActive,
+  changeIsLoading as changePrintLoading,
+  changePrintError,
+  changeIfMapPrinted,
+  changeRedrawPreview,
+} from "../../store/slices/print";
+import {
+  buildBelisInlineFachobjekteLayer,
+  buildBelisPrintLayers,
+} from "../../helper/printLayers";
 
 function buildAAFeatureCollection(
   features: ArbeitsauftragTileFeature[]
@@ -255,6 +295,72 @@ const draftFeatureStateId = (key: string): number => {
   return h >>> 0;
 };
 
+// Stable, globally-unique MapLibre feature id for a SERVER brandnew feature.
+// The server FC assigns volatile top-level ids (100001…) that get reassigned on
+// every regeneration — and the FC regenerates constantly while the user creates
+// / edits brandnew features. Because the brandnew geojson source has no
+// promoteId, `feature.id` IS that volatile top-level id, so a highlighted or
+// selected feature's `feature-state` and highlight toggle key would silently
+// point at a stale id (or a different feature) after any refresh — the
+// "shown in the sidebar but gone on the map" desync. Derive the id from the
+// feature's own stable identity (source-layer + DB pk) instead, so it survives
+// regenerations — mirroring `promoteId: "id"` on the vector layers. The
+// source-layer is folded in because the single-layer geojson source keys
+// feature-state by id alone, so a Leuchte and a Mauerlasche that happen to
+// share a DB integer must not collide. The `bn:` prefix keeps this id space
+// disjoint from the draft ids (draftFeatureStateId of a bare properties.id).
+const brandnewFeatureStateId = (sourceLayer: string, dbId: unknown): number =>
+  draftFeatureStateId(`bn:${sourceLayer}:${String(dbId)}`);
+
+// Re-point SearchModal (expert / funnel) highlight rows that actually belong to
+// a same-day BRANDNEW feature so their identity matches the map.
+//
+// `convertResultsToSidebarFeatures` builds every expert-search row against the
+// vector-tile source (`namespacedSource`) with the DB pk as the feature id —
+// correct for regular Fachobjekte, wrong for an entity that only exists in the
+// brandnew geojson source (created today, not yet baked into the tiles). Both
+// the visual selection (`setFeatureState` in applyVisualSelection) and the
+// dismiss suppression (`matchesCriteria`'s toggleKey) key on the MAP feature's
+// identity — the brandnew SOURCE and its stable stamped id (brandnewFeatureStateId,
+// mirroring the map source stamped by useBrandnewFcSync). A vector-source + DB-pk
+// row matches neither, so selection paints nothing and dismiss never un-highlights
+// the feature on the map (it only leaves the list) — the reported desync.
+//
+// Detect brandnew entities via the live brandnew FC (keyed by _sourceLayer + DB
+// pk) and rewrite only those rows to { source: brandnewSource, id: bnHash },
+// leaving properties.id (and everything the info box / row-highlight pk-match /
+// counts read) untouched. Regular rows — and rows for entities not in the FC —
+// pass through unchanged.
+const repointBrandnewHighlightRows = (
+  rows: SidebarFeature[] | null,
+  brandnewFc: GeoJSON.FeatureCollection,
+  brandnewSource: string
+): SidebarFeature[] | null => {
+  if (!rows || rows.length === 0) return rows;
+  const brandnewKeys = new Set<string>();
+  for (const f of brandnewFc.features ?? []) {
+    const sl = String(f.properties?._sourceLayer ?? "");
+    const dbId = f.properties?.id;
+    if (sl && dbId != null) brandnewKeys.add(`${sl}::${String(dbId)}`);
+  }
+  if (brandnewKeys.size === 0) return rows;
+  let changed = false;
+  const out = rows.map((f) => {
+    const sl = f.sourceLayer ?? "";
+    const dbId = f.properties?.id ?? f.id;
+    if (sl && dbId != null && brandnewKeys.has(`${sl}::${String(dbId)}`)) {
+      changed = true;
+      return {
+        ...f,
+        source: brandnewSource,
+        id: brandnewFeatureStateId(sl, dbId),
+      } as SidebarFeature;
+    }
+    return f;
+  });
+  return changed ? out : rows;
+};
+
 // Move every brandnew sub-style layer to before `leuchten-selection` (the
 // first Leuchten symbol layer in styleY.json) so drafts — and same-day saved
 // features that live in the brandnew layer until the overnight tile build —
@@ -297,14 +403,28 @@ const attachBrandnewBelowLeuchten = (
   };
 };
 
+// Stable default so an absent prop doesn't make a fresh [] each render (which
+// would needlessly retrigger the sidebar's memoised sort).
+const EMPTY_EXPERT_SORT: ExpertSortSpec = [];
+
 interface BelisMapLibWrapperProps {
   mapSizes: { width: number; height: number };
   activeSourceLayers: Set<string>;
   highlightResults: SidebarFeature[] | null;
+  /** Sort list (field + direction) of the expert search behind
+   *  `highlightResults`, or empty. The sidebar applies the same ordering to
+   *  its rows in both the Highlights and Fachobjekte tabs. */
+  highlightExpertSort?: ExpertSortSpec;
   lassoActive: boolean;
   onLassoDeactivate?: () => void;
   sidebarVariant: "fachobjekte" | "arbeitsauftraege";
   onHighlightsChange?: (highlights: SidebarFeature[] | null) => void;
+  /** Notified with the filter-aware highlight list (the same one the Highlights
+   *  sidebar tab renders): the filtered copy when layer/Leitungstyp toggles drop
+   *  something, otherwise the full list. Used by the CSV export so it mirrors the
+   *  visible selection. Separate from `onHighlightsChange`, which stays unfiltered
+   *  for the Arbeitsauftrag actions. */
+  onFilteredHighlightsChange?: (highlights: SidebarFeature[] | null) => void;
   /** Local-dev toggle: include the styleY-based Fachobjekte layer (default true). */
   regularLayerEnabled?: boolean;
   /** Local-dev toggle: include the brand.new.features GeoJSON-backed layer (default true). */
@@ -318,20 +438,24 @@ const BelisMapLibWrapper = ({
   mapSizes,
   activeSourceLayers,
   highlightResults,
+  highlightExpertSort = EMPTY_EXPERT_SORT,
   lassoActive,
   onLassoDeactivate,
   sidebarVariant,
   onHighlightsChange,
+  onFilteredHighlightsChange,
   regularLayerEnabled = true,
   brandnewLayerEnabled = true,
   onBrandnewCountChange,
 }: BelisMapLibWrapperProps) => {
   const dispatch: AppDispatch = useDispatch();
   const store = useStore<RootState>();
-  const { setOnSelectNextDraft, setOnOpenCreationDraft } = useMapPage();
+  const { setOnSelectNextDraft, setOnOpenCreationDraft, setOnDraftsCleared } =
+    useMapPage();
   const jwt = useSelector(getJWT);
   const featureDataVersion = useSelector(getFeatureDataVersion);
   const enabledLeitungstypen = useSelector(getEnabledLeitungstypen);
+  const enabledCategoryFilters = useSelector(getEnabledCategoryFilters);
   const keyTablesData = useSelector(getKeyTablesData);
   const reduxSelectedFeature = useSelector(getReduxSelectedFeature);
   const measurements = useSelector(getMeasurements);
@@ -365,9 +489,7 @@ const BelisMapLibWrapper = ({
   // out so they don't resurrect on top of the draft icons that consumed them.
   const [initialMeasurementFeatures] = useState<Feature[]>(() =>
     measurements
-      .filter(
-        (f) => !attachedMeasurementReduxIds.has(String(f.id))
-      )
+      .filter((f) => !attachedMeasurementReduxIds.has(String(f.id)))
       .map((f) => ({
         ...f,
         id:
@@ -438,7 +560,14 @@ const BelisMapLibWrapper = ({
     selectFeature,
     clearSelection: clearMapSelection,
   } = useMapSelection();
-  const { closeDatasheet, openDatasheet } = useDatasheet();
+  const { closeDatasheet, openDatasheet, isDatasheetOpen } = useDatasheet();
+  // Rendered row order of the Fachobjekte/Entwürfe list, published by the
+  // sidebar. Used to auto-select the first row after the last draft was
+  // removed, so the Datenblatt stays open instead of falling back to the map.
+  const sidebarOrderedFeaturesRef = useRef<SidebarFeature[]>([]);
+  // Armed when a draft removal leaves nothing selected: keep the Datenblatt
+  // open and select the first list row as soon as the list has one.
+  const [selectFirstAfterDrafts, setSelectFirstAfterDrafts] = useState(false);
   const [fetchedFeatureData, setFetchedFeatureData] = useState<any>(null);
   // Preserve last valid featureType to prevent unmount when selectedFeature briefly becomes undefined
   const [lastFeatureType, setLastFeatureType] = useState<string | undefined>(
@@ -481,6 +610,58 @@ const BelisMapLibWrapper = ({
   const additionalLayerOpacities = useSelector(getAdditionalLayerOpacities);
   const inPaleMode = useSelector(isInPaleMode);
 
+  // --- Print preview state (see store/slices/print + PrintControl) ---
+  const printActive = useSelector(getPrintActive);
+  const printOrientation = useSelector(getPrintOrientation);
+  const printScale = useSelector(getPrintScale);
+  const printDpi = useSelector(getPrintDPI);
+  const printName = useSelector(getPrintName);
+  const printLoading = useSelector(getPrintLoading);
+  const printRedraw = useSelector(getPrintRedraw);
+  const printIfMapPrinted = useSelector(getIfMapPrinted);
+  // Mirror the on-screen "Blass" (pale) mode in print: when active, dim the
+  // active background to 10%, matching the on-screen effectiveOpacity factor
+  // (see the `inPaleMode ? bgOpacity * 0.1 : bgOpacity` rule in libreLayers).
+  const printBackgroundOpacities = useMemo(() => {
+    if (!inPaleMode) return backgroundLayerOpacities;
+    const current = backgroundLayerOpacities[activeBackgroundLayer] ?? 1;
+    return {
+      ...backgroundLayerOpacities,
+      [activeBackgroundLayer]: current * 0.1,
+    };
+  }, [inPaleMode, backgroundLayerOpacities, activeBackgroundLayer]);
+
+  const printLayers = useMemo(
+    () =>
+      buildBelisPrintLayers({
+        activeBackgroundLayer,
+        backgroundLayerOpacities: printBackgroundOpacities,
+        activeAdditionalLayers,
+        additionalLayerOpacities,
+        // Print mirrors the on-map filters: only visible categories /
+        // Leitungstypen / sources are printed.
+        enabledCategoryFilters,
+        enabledLeitungstypen,
+        leitungstypen: (keyTablesData.leitungstyp || []) as {
+          id: number;
+          bezeichnung?: string;
+        }[],
+        regularEnabled: regularLayerEnabled,
+        brandnewEnabled: brandnewLayerEnabled,
+      }),
+    [
+      activeBackgroundLayer,
+      printBackgroundOpacities,
+      activeAdditionalLayers,
+      additionalLayerOpacities,
+      enabledCategoryFilters,
+      enabledLeitungstypen,
+      keyTablesData.leitungstyp,
+      regularLayerEnabled,
+      brandnewLayerEnabled,
+    ]
+  );
+
   // Highlighting: compute namespaced source + call useMapHighlighting
   const namespacedSource = `${slugifyUrl(
     BELIS_STYLE_URL
@@ -490,6 +671,10 @@ const BelisMapLibWrapper = ({
   const brandnewSource = `${slugifyUrl(
     BELIS_BRAND_NEW_STYLE_URL
   )}::${BELIS_ORIGINAL_SOURCE}`;
+  // Optional "esave Daten" layer (Smart-Lighting-Controller sensor points).
+  const esaveSource = `${slugifyUrl(
+    ESAVE_STYLE_URL
+  )}::${ESAVE_ORIGINAL_SOURCE}`;
 
   const selectedAAId = useSelector(getSelectedAAId);
   const selectedAAData = useSelector(getSelectedAAData);
@@ -537,26 +722,108 @@ const BelisMapLibWrapper = ({
   // Highlight context: need ensureToggledFeatures + criteria before handleHighlightToggle
   const {
     highlightingActive,
+    setHighlightingActive,
     highlightVersion,
     ensureToggledFeatures,
+    ensureSuppressedFeatures,
+    toggleFeatureHighlight,
+    clearHighlights,
     criteria,
   } = useMapHighlight();
 
+  // Print: build the layer stack fresh at print time so it reflects the live map
+  // (visible features + current selection/highlight). The Fachobjekte go out as
+  // ONE inline-geojson style with the features embedded (see printLayers.ts).
+  const resolvePrintLayers = useCallback(
+    (m: maplibregl.Map, bbox: [number, number, number, number]) => {
+      const inlineFachobjekteLayer = buildBelisInlineFachobjekteLayer({
+        map: m,
+        namespacedSource,
+        brandnewSource,
+        enabledCategoryFilters,
+        enabledLeitungstypen,
+        leitungstypen: (keyTablesData.leitungstyp || []) as {
+          id: number;
+          bezeichnung?: string;
+        }[],
+        regularEnabled: regularLayerEnabled,
+        brandnewEnabled: brandnewLayerEnabled,
+        highlightingActive,
+        bbox,
+      });
+      return buildBelisPrintLayers({
+        activeBackgroundLayer,
+        backgroundLayerOpacities: printBackgroundOpacities,
+        activeAdditionalLayers,
+        additionalLayerOpacities,
+        enabledCategoryFilters,
+        enabledLeitungstypen,
+        leitungstypen: (keyTablesData.leitungstyp || []) as {
+          id: number;
+          bezeichnung?: string;
+        }[],
+        regularEnabled: regularLayerEnabled,
+        brandnewEnabled: brandnewLayerEnabled,
+        inlineFachobjekteLayer,
+      });
+    },
+    [
+      namespacedSource,
+      brandnewSource,
+      enabledCategoryFilters,
+      enabledLeitungstypen,
+      regularLayerEnabled,
+      brandnewLayerEnabled,
+      highlightingActive,
+      activeBackgroundLayer,
+      printBackgroundOpacities,
+      activeAdditionalLayers,
+      additionalLayerOpacities,
+      keyTablesData.leitungstyp,
+    ]
+  );
+
   // Adjusted highlights: starts from highlightResults, updated by Alt+click toggles
-  const [adjustedHighlights, setAdjustedHighlights] = useState<
+  const [unfilteredHighlights, setUnfilteredHighlights] = useState<
     SidebarFeature[] | null
   >(highlightResults);
-  // Reset when new highlight results arrive
+  // Latest brandnew FC, read (not depended on) by the highlight-row re-pointer
+  // below so a 1s brandnew poll never re-runs the reset and clobbers the user's
+  // alt+click / dismiss edits. Assigned from `brandnewFc` once it's declared.
+  const brandnewFcRef = useRef<GeoJSON.FeatureCollection>({
+    type: "FeatureCollection",
+    features: [],
+  });
+  // Reset when new highlight results arrive. Re-point rows that belong to a
+  // brandnew feature onto the brandnew source + stamped id so selection and
+  // dismiss land on the map feature (see repointBrandnewHighlightRows).
   useEffect(() => {
-    setAdjustedHighlights(highlightResults);
-  }, [highlightResults]);
+    setUnfilteredHighlights(
+      repointBrandnewHighlightRows(
+        highlightResults,
+        brandnewFcRef.current,
+        brandnewSource
+      )
+    );
+  }, [highlightResults, brandnewSource]);
 
-  // Clear selection when highlighting activates (e.g. search)
+  // Clear selection when highlighting activates (e.g. search).
+  // When highlighting is deactivated (the "clean" X button), also drop the
+  // accumulated sidebar list. The map feature-state is cleared by
+  // useMapHighlighting's deactivate effect, but unfilteredHighlights otherwise
+  // only resets when the highlightResults prop changes — which is a no-op after
+  // a lasso / street search (highlightResults stays null). Without this reset a
+  // following lasso is treated as the same session (highlightCriteriaSignature
+  // ignores toggledFeatures) and stacks onto the stale old list -> old + new.
   useEffect(() => {
     if (highlightingActive) {
       clearMapSelection();
+    } else if (highlightResults == null) {
+      // Only drop the accumulated list when there's no externally supplied
+      // (funnel/SearchModal) result set to fall back to.
+      setUnfilteredHighlights(null);
     }
-  }, [highlightingActive]);
+  }, [highlightingActive, highlightResults]);
 
   // Drop any fachobjekt selection the moment the user enters a measurement
   // draw mode. Otherwise a previously-selected leuchte stays highlighted
@@ -570,182 +837,364 @@ const BelisMapLibWrapper = ({
 
   // Notify parent about highlight changes
   useEffect(() => {
-    onHighlightsChange?.(adjustedHighlights);
-  }, [adjustedHighlights, onHighlightsChange]);
+    onHighlightsChange?.(unfilteredHighlights);
+  }, [unfilteredHighlights, onHighlightsChange]);
 
   const handleHighlightToggle = useCallback(
     (feature: maplibregl.MapGeoJSONFeature) => {
-      const toSidebarFeature = (f: Record<string, any>): SidebarFeature =>
-        Object.assign(f, { original: f }) as unknown as SidebarFeature;
-
-      // Use the feature's own source so brandnew (geojson) and regular
-      // (vector) features both resolve siblings against the right source.
       const featureSource = feature.source ?? namespacedSource;
-      const isFeatureGeojson =
-        map?.getSource(featureSource)?.type === "geojson";
+      const clickedLayer = feature.sourceLayer ?? "";
+      const sourceIds = clusterSourceIds(
+        namespacedSource,
+        brandnewLayerEnabled ? brandnewSource : undefined
+      );
 
-      // Determine if this is a standort with sibling leuchten to expand
-      const isStandort = feature.sourceLayer === "standorte";
-      let siblingLeuchten: maplibregl.GeoJSONFeature[] = [];
-      if (isStandort && map) {
-        const standortId = String(feature.properties?.id ?? "");
-        if (standortId) {
-          // For geojson sources querySourceFeatures ignores sourceLayer;
-          // we filter by the stamped _sourceLayer property instead.
-          const queryOpts = isFeatureGeojson
-            ? undefined
-            : { sourceLayer: "leuchten" };
-          siblingLeuchten = map
-            .querySourceFeatures(featureSource, queryOpts)
-            .filter((f) => {
-              if (
-                isFeatureGeojson &&
-                String(f.properties?._sourceLayer ?? "") !== "leuchten"
-              )
-                return false;
-              return String(f.properties?.fk_standort ?? "") === standortId;
-            });
+      // A Standort and its Leuchten are one unit: Alt+clicking any member
+      // toggles the whole cluster, so the Highlights tab shows the same nested
+      // block the Fachobjekte tab does. Clicking a Leuchte resolves its parent
+      // first, then re-reads the cluster from that parent — otherwise the
+      // sibling Leuchten stay out and the row cannot nest (BelisSidebar only
+      // indents a Leuchte whose Standort is in the same list).
+      const clicked = toSidebarFeature(feature, featureSource, clickedLayer);
+      const standortDbId =
+        clickedLayer === "standorte"
+          ? String(feature.properties?.id ?? "")
+          : String(feature.properties?.fk_standort ?? "");
+
+      let standort: SidebarFeature | null = null;
+      let leuchten: SidebarFeature[] = [];
+      if (
+        map &&
+        (clickedLayer === "standorte" || clickedLayer === "leuchten")
+      ) {
+        standort =
+          clickedLayer === "standorte"
+            ? clicked
+            : queryStandortById(map, standortDbId, sourceIds);
+        leuchten = queryLeuchtenByStandort(map, standortDbId, sourceIds);
+        // A Leuchte outside the loaded tiles still highlights on its own.
+        if (leuchten.length === 0 && clickedLayer === "leuchten") {
+          leuchten = [clicked];
         }
       }
+      // Any other layer (Leitung, Schaltstelle, …) toggles on its own.
 
-      // Sync sibling leuchten in the highlight context BEFORE updating adjustedHighlights.
-      // toggleFeatureHighlight already toggled the standort itself (called by useMapHighlighting
-      // before onToggle fires), so criteria.toggledFeatures already reflects the standort's state.
-      // Read direction from the ref: if standort is now toggled ON, we add siblings; if OFF, remove.
-      if (isStandort && siblingLeuchten.length > 0) {
-        const standortKey = `${featureSource}::standorte::${feature.id}`;
-        const adding = criteria.toggledFeatures.has(standortKey);
-        ensureToggledFeatures(
-          siblingLeuchten.map((l) => ({
-            source: featureSource,
-            sourceLayer: "leuchten",
-            id: l.id!, // MVT tile ID (or geojson feature id), matching what matchesCriteria uses
-          })),
-          adding
-        );
+      const keyOf = buildFeatureKey;
+      // Standort first — the sidebar's flatten expects the parent before its
+      // children, and the `!prev` branch seeds the list verbatim.
+      const cluster: SidebarFeature[] = standort
+        ? [standort, ...leuchten]
+        : leuchten.length > 0
+        ? leuchten
+        : [clicked];
+
+      const clickedKey = keyOf(clicked);
+
+      // Each member carries its own source: a tile Standort can own a brandnew
+      // Leuchte, so a single `featureSource` would write the feature-state onto
+      // the wrong source. getFeatureState needs the geojson-aware target (no
+      // sourceLayer), while toggleFeatureHighlight keys on the logical layer —
+      // hence the two shapes.
+      const memberOf = (f: SidebarFeature) => ({
+        source: (f as unknown as { source?: string }).source ?? featureSource,
+        sourceLayer: f.sourceLayer ?? "",
+        id: f.id!, // promoted DB id, matching what matchesCriteria uses
+      });
+      // Pre-click highlight state. useMapHighlighting has toggled the clicked
+      // feature in the criteria already, but applyHighlights only runs in an
+      // effect afterwards, so every member still reads its state from before
+      // the click — including the clicked one.
+      const wasHighlighted = (f: SidebarFeature) =>
+        map
+          ? Boolean(
+              map.getFeatureState(buildFeatureStateTarget(map, memberOf(f)))
+                .highlighted
+            )
+          : false;
+
+      // The direction must come from the CLUSTER, not from the clicked member.
+      // A Standort and its Leuchte are drawn on the same coordinate, and
+      // queryRenderedFeatures returns the topmost hit, so which member a click
+      // resolves to varies between clicks on the same symbol. After an expert
+      // search the cluster is mixed — Leuchten lit (they matched queryIds),
+      // Standort dark (it did not) — so reading the direction off the clicked
+      // member made the same click mean "add" or "remove" at random.
+      //
+      // Any lit member => the click clears the cluster; otherwise it lights it.
+      const adding = !cluster.some(wasHighlighted);
+
+      // Drive every member to `adding`, the clicked one included: the hook
+      // already XOR-flipped it, which is only correct when its own pre-state
+      // happened to agree with the cluster's.
+      for (const f of cluster) {
+        const pre = wasHighlighted(f);
+        const post = keyOf(f) === clickedKey ? !pre : pre;
+        if (post !== adding) toggleFeatureHighlight(memberOf(f));
       }
 
       // Update sidebar content
-      setAdjustedHighlights((prev) => {
-        if (!prev) {
-          const items = [toSidebarFeature(feature)];
-          for (const l of siblingLeuchten) items.push(toSidebarFeature(l));
-          return items;
+      setUnfilteredHighlights((prev) => {
+        if (!prev) return adding ? cluster : null;
+
+        if (!adding) {
+          const removeKeys = new Set(cluster.map(keyOf));
+          return prev.filter((f) => !removeKeys.has(keyOf(f)));
         }
 
-        const dbId = String(feature.properties?.id ?? feature.id ?? "");
-        const sl = feature.sourceLayer ?? "";
-        const alreadyPresent = prev.some(
-          (f) =>
-            (f.sourceLayer ?? "") === sl &&
-            String(f.properties?.id ?? f.id ?? "") === dbId
-        );
-
-        if (alreadyPresent) {
-          // Remove standort + all sibling leuchten
-          const removeSet = new Set<string>();
-          removeSet.add(`${sl}::${dbId}`);
-          for (const l of siblingLeuchten) {
-            const lid = String(l.properties?.id ?? l.id ?? "");
-            removeSet.add(`${(l as any).sourceLayer ?? "leuchten"}::${lid}`);
-          }
-          return prev.filter((f) => {
-            const key = `${f.sourceLayer ?? ""}::${String(
-              f.properties?.id ?? f.id ?? ""
-            )}`;
-            return !removeSet.has(key);
-          });
-        }
-
-        // Add standort + all sibling leuchten (skip duplicates)
-        const existing = new Set(
-          prev.map(
-            (f) =>
-              `${f.sourceLayer ?? ""}::${String(
-                f.properties?.id ?? f.id ?? ""
-              )}`
-          )
-        );
-        const toAdd: SidebarFeature[] = [];
-        if (!existing.has(`${sl}::${dbId}`)) {
-          toAdd.push(toSidebarFeature(feature));
-        }
-        for (const l of siblingLeuchten) {
-          const lid = String(l.properties?.id ?? l.id ?? "");
-          const key = `${(l as any).sourceLayer ?? "leuchten"}::${lid}`;
-          if (!existing.has(key)) {
-            toAdd.push(toSidebarFeature(l));
-          }
-        }
-        return [...prev, ...toAdd];
+        const existing = new Set(prev.map(keyOf));
+        const toAdd = cluster.filter((f) => !existing.has(keyOf(f)));
+        return toAdd.length > 0 ? [...prev, ...toAdd] : prev;
       });
     },
-    [map, namespacedSource, ensureToggledFeatures, criteria]
+    [
+      map,
+      namespacedSource,
+      brandnewSource,
+      brandnewLayerEnabled,
+      toggleFeatureHighlight,
+    ]
   );
 
-  // Sidebar dismiss: remove a single feature from highlights
+  // Lasso → sidebar. The lasso only writes map feature-state; the accumulator
+  // in `handleHighlightsApplied` is the sidebar's usual feed, and it bails out
+  // whenever a SearchModal result set is active — so without this the Highlights
+  // tab stayed empty after a lasso on top of a search.
+  //
+  // Fires once with every hit, so the cluster index is built one time instead of
+  // per feature, and this callback OWNS all highlight-state mutation (useLasso-
+  // Highlight defers to us instead of toggling the raw hits itself). Like
+  // Alt+click, a hit expands to its whole Standort/Leuchten cluster and the whole
+  // cluster is driven to one direction.
+  const handleLassoMatched = useCallback(
+    (matched: maplibregl.MapGeoJSONFeature[]) => {
+      if (!map || matched.length === 0) return;
+      const sourceIds = clusterSourceIds(
+        namespacedSource,
+        brandnewLayerEnabled ? brandnewSource : undefined
+      );
+      const index = buildClusterIndex(map, sourceIds);
+
+      // Expand each hit to its whole cluster, deduped so a Standort and its
+      // Leuchten caught by the same lasso are handled once. Standalone layers
+      // (Leitung, Schaltstelle, …) are their own cluster.
+      const clusters = new Map<string, SidebarFeature[]>();
+      for (const raw of matched) {
+        const f = toSidebarFeature(raw, raw.source, raw.sourceLayer ?? "");
+        const clusterId = clusterIdOf(f);
+        const decisionKey = clusterId
+          ? `cluster:${clusterId}`
+          : buildFeatureKey(f);
+        if (clusters.has(decisionKey)) continue;
+        const members = clusterId ? clusterMembers(clusterId, index) : [f];
+        clusters.set(decisionKey, members.length > 0 ? members : [f]);
+      }
+
+      // Each member carries its own source (a tile Standort can own a brandnew
+      // Leuchte). getFeatureState needs the geojson-aware target; toggleFeature-
+      // Highlight keys on the logical layer — same two shapes as Alt+click.
+      const memberOf = (f: SidebarFeature) => ({
+        source: (f as unknown as { source?: string }).source ?? namespacedSource,
+        sourceLayer: f.sourceLayer ?? "",
+        id: f.id!,
+      });
+      // The member's ACTUAL rendered highlight, not its toggledFeatures
+      // membership. On top of an expert search a cluster is mixed — Leuchten lit
+      // via queryIds, Standort dark — and only the real feature-state captures
+      // that. useLassoHighlight now leaves the raw hits untouched, so this reads
+      // the true pre-lasso state for every member.
+      const wasHighlighted = (f: SidebarFeature) =>
+        Boolean(
+          map.getFeatureState(buildFeatureStateTarget(map, memberOf(f)))
+            .highlighted
+        );
+
+      const addRows: SidebarFeature[] = [];
+      const removeKeys = new Set<string>();
+      for (const members of clusters.values()) {
+        // Direction from the whole cluster, exactly like Alt+click: any lit
+        // member clears the cluster, otherwise light it. A uniform
+        // ensureToggledFeatures write cannot do this — toggledFeatures is an XOR
+        // against queryIds, so on an expert-search cluster it would light the
+        // (unmatched) Standort while switching its (matched) Leuchten off,
+        // splitting the group instead of toggling it as a unit.
+        const adding = !members.some(wasHighlighted);
+        for (const f of members) {
+          // toggleFeatureHighlight flips toggled-set membership, which flips the
+          // visible state; only flip members whose current state disagrees.
+          if (wasHighlighted(f) !== adding) toggleFeatureHighlight(memberOf(f));
+        }
+        if (adding) addRows.push(...members);
+        else for (const f of members) removeKeys.add(buildFeatureKey(f));
+      }
+
+      setUnfilteredHighlights((prev) => {
+        const base = (prev ?? []).filter(
+          (f) => !removeKeys.has(buildFeatureKey(f))
+        );
+        const existing = new Set(base.map(buildFeatureKey));
+        const toAdd = addRows.filter((f) => !existing.has(buildFeatureKey(f)));
+        const next = toAdd.length > 0 ? [...base, ...toAdd] : base;
+        // null (not []) is the "nothing highlighted" signal the tab gate reads.
+        return next.length > 0 ? next : null;
+      });
+    },
+    [
+      map,
+      namespacedSource,
+      brandnewSource,
+      brandnewLayerEnabled,
+      toggleFeatureHighlight,
+    ]
+  );
+
+  // Orange lasso (Alt+Shift) → narrow the current highlight set. The hook hands
+  // over exactly the features that were highlighted AND inside the polygon; we
+  // freeze them into an explicit selection.
+  //
+  // clearHighlights first, on purpose: it drops the street-search matchers /
+  // expert-search queryIds that produced the selection, so the highlights
+  // outside the polygon can never come back when their tiles reload on pan or
+  // zoom. From here on the selection is just this list of features — which is
+  // also what makes the gesture repeatable (each orange lasso narrows further).
+  const handleLassoRefine = useCallback(
+    (survivors: maplibregl.MapGeoJSONFeature[]) => {
+      if (!map || survivors.length === 0) return;
+
+      clearHighlights();
+      setHighlightingActive(true);
+      ensureToggledFeatures(
+        survivors.map((f) => ({
+          source: f.source,
+          sourceLayer: f.sourceLayer ?? "",
+          id: f.id!,
+        })),
+        true
+      );
+
+      const keep = new Set(
+        survivors.map((f) => buildFeatureKey(f as unknown as SidebarFeature))
+      );
+      setUnfilteredHighlights((prev) => {
+        if (!prev) return prev;
+        const next = prev.filter((f) => keep.has(buildFeatureKey(f)));
+        // null (not []) is the "nothing highlighted" signal the tab gate reads.
+        return next.length > 0 ? next : null;
+      });
+    },
+    [map, clearHighlights, setHighlightingActive, ensureToggledFeatures]
+  );
+
+  // Sidebar dismiss: remove a single feature from highlights.
+  //
+  // Uniform across origination paths (lasso → toggledFeatures, modal search →
+  // queryIds, street search → propertyMatchers): mark the feature as suppressed
+  // so useMapHighlighting's matchesCriteria treats it as un-highlighted no
+  // matter which store originally selected it. Also drop it from toggledFeatures
+  // to keep state clean when the feature was lasso-selected.
+  //
+  // Key by `feature.id` (the map's own feature id) — that's what matchesCriteria
+  // hashes into the toggleKey. For MVT sources `promoteId: "id"` makes it equal
+  // to the DB pk; for brandnew geojson it's the assigned geojson feature id,
+  // which may differ from `properties.id`. Using `properties.id` here would
+  // silently miss brandnew features.
   const handleSidebarDismiss = useCallback(
     (feature: SidebarFeature) => {
       const sl = feature.sourceLayer ?? "";
-      const dbId = String(feature.properties?.id ?? feature.id ?? "");
-      // Use the source the sidebar feature was stamped with (set by
-      // useMapHighlighting / handleHighlightToggle) and fall back to the
-      // regular source if missing — that way both vector and brandnew
-      // (geojson) features get cleared from the right source.
+      const mapId = feature.id;
+      // Brand-new features have separate id spaces: `f.id` is the geojson
+      // feature id, `properties.id` is the DB / synthetic PK. Either identity
+      // may appear in unfilteredHighlights depending on which path put it
+      // there (accumulator dedup + map-toggle removal both prefer
+      // properties.id). Fire suppression and filter on BOTH so the feature is
+      // removed regardless of which one matches.
+      const dbId = feature.properties?.id;
+      if ((mapId == null && dbId == null) || !sl) return;
       const featureSource =
         (feature as unknown as { source?: string }).source ?? namespacedSource;
-      const isFeatureGeojson =
-        map?.getSource(featureSource)?.type === "geojson";
 
-      // Remove from map highlight state
-      if (map) {
-        const queryOpts = isFeatureGeojson ? undefined : { sourceLayer: sl };
-        const sourceFeatures = map.querySourceFeatures(
-          featureSource,
-          queryOpts
-        );
-        const match = sourceFeatures.find((f) => {
-          if (
-            isFeatureGeojson &&
-            String(f.properties?._sourceLayer ?? "") !== sl
-          )
-            return false;
-          return String(f.properties?.id ?? "") === dbId;
-        });
-        if (match?.id != null) {
-          ensureToggledFeatures(
-            [{ source: featureSource, sourceLayer: sl, id: match.id }],
-            false
-          );
-        }
-      }
+      const ids = [mapId, dbId].filter(
+        (id): id is string | number => id != null && id !== ""
+      );
+      const suppressList = ids.map((id) => ({
+        source: featureSource,
+        sourceLayer: sl,
+        id,
+      }));
+      ensureSuppressedFeatures(suppressList, true);
+      ensureToggledFeatures(suppressList, false);
 
-      // Remove from sidebar list
-      setAdjustedHighlights((prev) => {
+      const idStrs = new Set(ids.map((id) => String(id)));
+      setUnfilteredHighlights((prev) => {
         if (!prev) return prev;
         return prev.filter((f) => {
-          const key = `${f.sourceLayer ?? ""}::${String(
-            f.properties?.id ?? f.id ?? ""
-          )}`;
-          return key !== `${sl}::${dbId}`;
+          if ((f.sourceLayer ?? "") !== sl) return true;
+          const fMapId = f.id != null ? String(f.id) : "";
+          const fDbId = f.properties?.id != null ? String(f.properties.id) : "";
+          return !idStrs.has(fMapId) && !idStrs.has(fDbId);
         });
       });
     },
-    [map, namespacedSource, ensureToggledFeatures]
+    [namespacedSource, ensureToggledFeatures, ensureSuppressedFeatures]
   );
+
+  // Signature of the *match intent* (property/query criteria only — NOT the
+  // individually toggled features). Changes when a new street search starts or
+  // the highlight is cleared, but stays stable across pans, zooms and
+  // alt+click / dismiss toggles.
+  const highlightCriteriaSignature = useMemo(() => {
+    const pm = criteria.propertyMatchers
+      .map((m) => `${m.property}=${m.regex.source}`)
+      .join("|");
+    const qi = criteria.queryIds
+      .map((q) => `${q.sourceLayer}:${q.property}:${q.value}`)
+      .join("|");
+    return `${pm}##${qi}`;
+    // criteria is a stable ref object; highlightVersion is its change signal,
+    // so it must stay in the deps even though it isn't read directly.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [criteria, highlightVersion]);
+
+  // Last criteria signature reflected in unfilteredHighlights. A change means a
+  // fresh highlight session, so the accumulated list must start empty.
+  const appliedCriteriaSigRef = useRef(highlightCriteriaSignature);
 
   const handleHighlightsApplied = useCallback(
     (matched: maplibregl.GeoJSONFeature[]) => {
       // Only collect when there are no SearchModal results (i.e. street search)
       if (highlightResults != null) return;
-      if (matched.length > 0) {
+
+      // For vector-tile sources querySourceFeatures (inside applyHighlights)
+      // only returns features in the currently loaded tiles — i.e. the
+      // viewport. Replacing the list on every callback made the highlight
+      // count track the viewport (shrinking on zoom-in, growing on zoom-out).
+      // Instead we ACCUMULATE: a feature, once matched, stays in the list as
+      // the user pans/zooms and more tiles load, so the count is stable and
+      // converges to the true total. The accumulation is reset only when the
+      // match criteria themselves change (new / cleared search).
+      const isNewSession =
+        appliedCriteriaSigRef.current !== highlightCriteriaSignature;
+      appliedCriteriaSigRef.current = highlightCriteriaSignature;
+
+      const keyOf = (f: SidebarFeature) =>
+        `${f.sourceLayer ?? ""}::${String(f.properties?.id ?? f.id ?? "")}`;
+
+      setUnfilteredHighlights((prev) => {
+        const base = isNewSession ? null : prev;
         const converted = matched.map(
           (f) => Object.assign(f, { original: f }) as unknown as SidebarFeature
         );
-        setAdjustedHighlights(converted);
-      }
+        if (!base) return converted.length > 0 ? converted : null;
+        const seen = new Set(base.map(keyOf));
+        const toAdd = converted.filter((f) => {
+          const k = keyOf(f);
+          if (seen.has(k)) return false;
+          seen.add(k);
+          return true;
+        });
+        return toAdd.length > 0 ? [...base, ...toAdd] : base;
+      });
     },
-    [highlightResults]
+    [highlightResults, highlightCriteriaSignature]
   );
 
   useMapHighlighting({
@@ -756,13 +1205,26 @@ const BelisMapLibWrapper = ({
     onHighlightsApplied: handleHighlightsApplied,
   });
 
-  // Lasso freehand selection
+  // Lasso freehand selection — Fachobjekte only. Handing the hook a null map on
+  // Arbeitsaufträge is what switches it off: every effect inside bails on
+  // `!map`, so neither the explicit manager nor the always-on Alt+drag one is
+  // created there. Going back to Fachobjekte re-supplies the map and both come
+  // back; the transition to null runs the hooks' cleanup (destroy → deactivate),
+  // which clears any leftover lasso outline. Keeps the shared hook untouched.
   useLassoHighlight({
-    map,
+    map: sidebarVariant === "arbeitsauftraege" ? null : map,
     active: lassoActive,
     sources: highlightSources,
     onDeactivate: onLassoDeactivate,
-    onToggle: handleHighlightToggle,
+    // NOTE: handleHighlightToggle is intentionally NOT passed as `onToggle`. For
+    // the lasso it is pure waste (~10s of the freeze): it fires per feature and
+    // each call rescans the whole source. `onMatched` fires once with every hit,
+    // so handleLassoMatched builds the cluster index a single time.
+    onMatched: handleLassoMatched,
+    // Alt+Shift refine lasso: only useful while something is highlighted, so it
+    // is armed exactly for the duration of a highlight session.
+    refineActive: highlightingActive,
+    onRefine: handleLassoRefine,
   });
 
   // Brandnew FC poll-and-reload: short cadence in localhost (yellow-border
@@ -779,6 +1241,22 @@ const BelisMapLibWrapper = ({
     type: "FeatureCollection",
     features: [],
   });
+  // Keep the re-pointer's ref current every render (before effects flush) so the
+  // reset effect above reads the freshly-fetched FC without depending on it.
+  brandnewFcRef.current = brandnewFc;
+  // Pin each server brandnew feature to a stable, regeneration-proof id
+  // (see brandnewFeatureStateId). Features lacking a source-layer or DB pk keep
+  // the server's id untouched.
+  const assignBrandnewStableId = useCallback(
+    (f: GeoJSON.Feature): number | undefined => {
+      const props = f.properties as Record<string, unknown> | null;
+      const sl = props?._sourceLayer != null ? String(props._sourceLayer) : "";
+      const dbId = props?.id;
+      if (!sl || dbId == null) return undefined;
+      return brandnewFeatureStateId(sl, dbId);
+    },
+    []
+  );
   useBrandnewFcSync({
     map,
     enabled: brandnewLayerEnabled,
@@ -788,6 +1266,7 @@ const BelisMapLibWrapper = ({
     syncVersion: featureDataVersion,
     onCountChange: onBrandnewCountChange,
     onDataChange: setBrandnewFc,
+    assignStableId: assignBrandnewStableId,
   });
 
   // AA lasso selection (disabled – button now only logs "hallo world")
@@ -926,7 +1405,8 @@ const BelisMapLibWrapper = ({
         if (rawCount != null && Number.isFinite(Number(rawCount)))
           p.count = Number(rawCount);
       }
-      if (p.lfd == null) p.lfd = props.lfd_nummer as string | number | undefined;
+      if (p.lfd == null)
+        p.lfd = props.lfd_nummer as string | number | undefined;
       // Read off a non-`props` expression to dodge the react/prop-types false
       // positive (member access on a local named `props`).
       const propsRec = draft.feature?.properties as Record<string, unknown>;
@@ -1105,7 +1585,8 @@ const BelisMapLibWrapper = ({
   // and persisted hidden sets are empty. Hiding by id is a no-op for freshly
   // created features (their new ids aren't in the tiles).
   const SELF_POSITIONED_EDIT_LAYERS = useMemo(
-    () => new Set(["mauerlaschen", "schaltstelle", "abzweigdosen", "leitungen"]),
+    () =>
+      new Set(["mauerlaschen", "schaltstelle", "abzweigdosen", "leitungen"]),
     []
   );
   const brandnewHiddenOriginalIds = useMemo<HiddenOriginalIds>(() => {
@@ -1174,7 +1655,8 @@ const BelisMapLibWrapper = ({
       const bucket = merged[sourceLayer] ?? (merged[sourceLayer] = new Set());
       for (const id of ids) bucket.add(id);
     };
-    for (const [sl, ids] of Object.entries(draftHiddenOriginalIds)) add(sl, ids);
+    for (const [sl, ids] of Object.entries(draftHiddenOriginalIds))
+      add(sl, ids);
     for (const [sl, ids] of Object.entries(brandnewHiddenOriginalIds))
       add(sl, ids);
     for (const [sl, ids] of Object.entries(geometryEditHiddenOriginalIds))
@@ -1212,8 +1694,7 @@ const BelisMapLibWrapper = ({
       if (!ids) continue;
       for (const [sourceLayer, list] of Object.entries(ids)) {
         if (!list || list.length === 0) continue;
-        const bucket =
-          merged[sourceLayer] ?? (merged[sourceLayer] = new Set());
+        const bucket = merged[sourceLayer] ?? (merged[sourceLayer] = new Set());
         for (const id of list) bucket.add(id);
       }
     }
@@ -1394,7 +1875,7 @@ const BelisMapLibWrapper = ({
       maplibreMap: map,
       visibleMapWidth: mapWidth,
       visibleMapHeight: mapSizes.height,
-      maxFeatures: 2000,
+      maxFeatures: OVERVIEW_FEATURE_LIMIT,
       layerFilterExpressions: [
         "Leuchten.*-base",
         "Leuchten.*-icon",
@@ -1566,14 +2047,22 @@ const BelisMapLibWrapper = ({
   useEffect(() => {
     if (!highlightingActive) {
       setSidebarMode("fachobjekte");
-      setAdjustedHighlights(null);
+      setUnfilteredHighlights(null);
     }
   }, [highlightingActive]);
+
+  const hasHighlights =
+    highlightingActive ||
+    (unfilteredHighlights != null && unfilteredHighlights.length > 0);
 
   // The Entwürfe tab disappears once all drafts are saved/discarded, but
   // `sidebarMode` would otherwise stay "drafts" — gating out the Messungen
   // group (and anything else fachobjekte-only) until the user toggles modes
-  // by some other route. Fall back to fachobjekte automatically.
+  // by some other route. Fall back automatically.
+  // The landing tab is Highlights whenever there is a highlight selection: the
+  // drafts were made from that selection (batch paste over the highlighted
+  // objects), so it — not the viewport list — is the context the user was
+  // working in. Without a selection there is no Highlights tab, so fachobjekte.
   // Read-only ("Gast") users have no draft workflow at all, so the Entwürfe
   // tab is hidden — never leave them stranded on it.
   useEffect(() => {
@@ -1581,9 +2070,9 @@ const BelisMapLibWrapper = ({
       sidebarMode === "drafts" &&
       (draftSidebarFeatures.length === 0 || isReadOnly)
     ) {
-      setSidebarMode("fachobjekte");
+      setSidebarMode(hasHighlights ? "highlights" : "fachobjekte");
     }
-  }, [sidebarMode, draftSidebarFeatures.length, isReadOnly]);
+  }, [sidebarMode, draftSidebarFeatures.length, isReadOnly, hasHighlights]);
 
   // Drop the captured parent selection (and the highlighted Entwürfe row) once
   // the active selection is no longer a creation draft — covers draft save
@@ -1604,46 +2093,157 @@ const BelisMapLibWrapper = ({
     }
   }, [selectedFeatureId, parentFachobjektSelection, activeDraftRow]);
 
-  const hasHighlights =
-    highlightingActive ||
-    (adjustedHighlights != null && adjustedHighlights.length > 0);
+  // Mirror the map's layer-filter toggles onto the highlight list: when a
+  // category (Leuchten / Standorte / … / Mauerlaschen) is toggled off — or a
+  // Leitungstyp is switched off in the Leitungen dropdown — drop the matching
+  // highlights from the Highlights sidebar tab too. `highlightsForSidebar` is the
+  // filtered copy when something was removed, otherwise the original reference.
+  const { filteredHighlights, isHighlightFiltered } = useFilteredHighlights(
+    unfilteredHighlights,
+    activeSourceLayers,
+    enabledLeitungstypen,
+    (keyTablesData.leitungstyp || []) as {
+      id: number;
+      bezeichnung?: string;
+    }[]
+  );
+  const highlightsForSidebar = isHighlightFiltered
+    ? filteredHighlights
+    : unfilteredHighlights;
 
-  // Compute effective sidebar data based on mode
-  const effectiveSidebarData = useMemo(() => {
-    // Shared derivation: counts per sourceLayer + merged activeSourceLayers.
-    // Used by every branch that doesn't get pre-computed counts straight from
-    // `useVisibleMapFeatures` (i.e. anything that builds a synthetic list).
-    const buildFromFeatures = (
-      list: typeof features,
+  // Notify the parent with the filter-aware list (same as the sidebar shows) so
+  // the CSV export mirrors the visible selection. Kept separate from
+  // `onHighlightsChange` above, which stays unfiltered for the AA actions.
+  useEffect(() => {
+    onFilteredHighlightsChange?.(highlightsForSidebar);
+  }, [highlightsForSidebar, onFilteredHighlightsChange]);
+
+  // Shared derivation: counts per sourceLayer + merged activeSourceLayers.
+  // Used by every branch that doesn't get pre-computed counts straight from
+  // `useVisibleMapFeatures` (i.e. anything that builds a synthetic list).
+  const buildFromFeatures = useCallback(
+    (
+      list: SidebarFeature[],
       overrides?: { isLoading?: boolean; isOverviewMode?: boolean }
     ) => {
+      // The category toggles apply to every row, synthetic draft rows included:
+      // a layer the user switched off must not come back through the sidebar.
+      // (This used to union the layers present in `list` into the active set,
+      // which meant the Standort parent of a Leuchten creation draft silently
+      // re-enabled `standorte` for the whole list — flipping the group header
+      // from "Leuchten" to "Standorte / Leuchten" with the toggle still off.)
+      // Rows whose layer can't be resolved are kept — the toggles have nothing
+      // to say about them.
+      const visible = list.filter((f) => {
+        const sl = f.sourceLayer || String(f.properties?._sourceLayer ?? "");
+        return sl === "" || activeSourceLayers.has(sl);
+      });
       const counts: Record<string, number> = {};
-      for (const f of list) {
+      for (const f of visible) {
         const sl = f.sourceLayer || "";
         counts[sl] = (counts[sl] || 0) + 1;
       }
       return {
-        features: list,
+        features: visible,
         countsByLayer: counts,
-        totalCount: list.length,
+        totalCount: visible.length,
         isLoading: overrides?.isLoading ?? false,
         isOverviewMode: overrides?.isOverviewMode ?? false,
-        activeSourceLayers: new Set([
-          ...activeSourceLayers,
-          ...Object.keys(counts),
-        ]),
+        activeSourceLayers,
       };
-    };
+    },
+    [activeSourceLayers]
+  );
 
-    if (
-      sidebarMode === "highlights" &&
-      adjustedHighlights &&
-      adjustedHighlights.length > 0
-    ) {
-      return buildFromFeatures(adjustedHighlights);
+  // Identity keys ("<sourceLayer>:<dbId>") of everything the viewport query
+  // actually returned, before any draft-related filtering. The Fachobjekte tab
+  // is a viewport list; a draft row may only stand in for a feature that is
+  // genuinely on screen.
+  const viewportDbKeys = useMemo(() => {
+    const keys = new Set<string>();
+    for (const f of features) {
+      const sl = f.sourceLayer || String(f.properties?._sourceLayer ?? "");
+      const dbId = Number(f.properties?.id ?? f.id);
+      if (sl && Number.isFinite(dbId)) keys.add(`${sl}:${dbId}`);
     }
-    if (sidebarMode === "drafts" && draftSidebarFeatures.length > 0) {
-      return buildFromFeatures(draftSidebarFeatures);
+    return keys;
+  }, [features]);
+
+  // Draft keys of open non-creation drafts whose feature is NOT in the current
+  // viewport. Their rows must stay out of the Fachobjekte list — they live in
+  // the Entwürfe tab. Without this, editing many features at once (batch paste
+  // into the highlighted selection) spliced every one of those drafts back into
+  // Fachobjekte, so the tab showed the whole selection instead of the handful
+  // of rows actually on screen.
+  // Skipped in overview mode: the Fachobjekte list splices no draft rows at all
+  // there (see `fachobjekteSidebarData`), so there is nothing to classify.
+  const offscreenDraftKeys = useMemo(() => {
+    const keys = new Set<string>();
+    if (isOverviewMode) return keys;
+    for (const [draftKey, draft] of Object.entries(
+      allDraftsForMeasurementLink
+    )) {
+      if (draft.isCreation) continue;
+      const sl =
+        featureTypeToSourceLayer[draft.featureType] ?? draft.featureType;
+      const dbId = draft.featureDbId ?? Number(draftKey.split(":")[1]);
+      if (!Number.isFinite(dbId)) continue;
+      const dbKey = `${sl}:${Number(dbId)}`;
+      if (viewportDbKeys.has(dbKey)) continue;
+      // Both identities: the redux draft key (what the expanded rows carry as
+      // `_draftKey` / row-id prefix) and the DB key (what the draft's own row
+      // resolves to). They differ when a draft was opened through the brandnew
+      // GeoJSON source, which keys on that source name instead of the layer.
+      keys.add(draftKey);
+      keys.add(dbKey);
+    }
+    return keys;
+  }, [allDraftsForMeasurementLink, viewportDbKeys, isOverviewMode]);
+
+  // `draftSidebarFeatures` restricted to the drafts the Fachobjekte tab may
+  // show. A draft contributes several rows (a deletion draft adds one
+  // display-only row per cascade-deleted Leuchte, keyed "<draftKey>::…"), so an
+  // off-viewport draft is dropped whole — never a parent without its children
+  // or the other way round. The Entwürfe tab keeps using the unrestricted list.
+  const fachobjekteDraftFeatures = useMemo(() => {
+    if (offscreenDraftKeys.size === 0) return draftSidebarFeatures;
+    return draftSidebarFeatures.filter((f) => {
+      const draftKey = String(f.properties?._draftKey ?? "");
+      if (draftKey) return !offscreenDraftKeys.has(draftKey);
+      // Rows without `_draftKey`: the draft's own feature (keyed by DB
+      // identity, which is exactly the draft key) and the synthetic cascade
+      // rows (row id prefixed with the draft key).
+      const sl = f.sourceLayer || String(f.properties?._sourceLayer ?? "");
+      const dbId = Number(f.properties?.id ?? f.id);
+      if (Number.isFinite(dbId) && offscreenDraftKeys.has(`${sl}:${dbId}`)) {
+        return false;
+      }
+      const rowId = String(f.id ?? "");
+      const sep = rowId.indexOf("::");
+      if (sep > 0 && offscreenDraftKeys.has(rowId.slice(0, sep))) return false;
+      return true;
+    });
+  }, [draftSidebarFeatures, offscreenDraftKeys]);
+
+  // The Fachobjekte list, derived independently of the active tab so its
+  // badge count stays correct while another tab is open.
+  const fachobjekteSidebarData = useMemo(() => {
+    // Overview mode is a pure count summary: `useVisibleMapFeatures` blanks its
+    // feature list past OVERVIEW_FEATURE_LIMIT and the sidebar derives its group
+    // rows from `countsByLayer` alone. Splicing draft rows into that empty list
+    // would rebuild the counts from the drafts — the whole city collapsing to
+    // "Leuchten (142)" instead of the real per-layer totals. Nothing is lost:
+    // no individual row is rendered in overview mode anyway, and the drafts
+    // keep their own Entwürfe tab.
+    if (isOverviewMode) {
+      return {
+        features,
+        countsByLayer,
+        totalCount,
+        isLoading,
+        isOverviewMode,
+        activeSourceLayers,
+      };
     }
     // Fachobjekte mode with drafts present: splice the expanded draft rows
     // (Standort parent + Leuchten children, same shape used by the Entwürfe
@@ -1689,17 +2289,19 @@ const BelisMapLibWrapper = ({
         // row comes from the cascade rows in `draftSidebarFeatures` instead.
         if (
           sl === "leuchten" &&
-          cascadeDeletionStandortIds.has(String(f.properties?.fk_standort ?? ""))
+          cascadeDeletionStandortIds.has(
+            String(f.properties?.fk_standort ?? "")
+          )
         ) {
           return false;
         }
         return true;
       });
-    if (draftSidebarFeatures.length > 0) {
+    if (fachobjekteDraftFeatures.length > 0) {
       return buildFromFeatures(
         [
           ...filterViewport(features),
-          ...draftSidebarFeatures,
+          ...fachobjekteDraftFeatures,
           ...retainedDeletionFeatures,
         ],
         { isLoading, isOverviewMode }
@@ -1725,9 +2327,7 @@ const BelisMapLibWrapper = ({
       activeSourceLayers,
     };
   }, [
-    sidebarMode,
-    adjustedHighlights,
-    draftSidebarFeatures,
+    fachobjekteDraftFeatures,
     openDraftDbKeys,
     cascadeDeletionStandortIds,
     retainedDeletionFeatures,
@@ -1737,7 +2337,65 @@ const BelisMapLibWrapper = ({
     isLoading,
     isOverviewMode,
     activeSourceLayers,
+    buildFromFeatures,
   ]);
+
+  // Compute effective sidebar data based on mode
+  const effectiveSidebarData = useMemo(() => {
+    if (
+      sidebarMode === "highlights" &&
+      unfilteredHighlights &&
+      unfilteredHighlights.length > 0
+    ) {
+      // Build from the filter-aware copy so toggled-off categories drop out of
+      // the Highlights tab. Gate availability on the raw `unfilteredHighlights`
+      // above (the tab stays open even if everything is currently filtered out).
+      const highlightsList = highlightsForSidebar ?? unfilteredHighlights;
+      // Above the limit, fall back to grouped counts only (overview mode) —
+      // same threshold the Fachobjekte viewport list uses. Blank the feature
+      // list (keeping counts + totalCount) so the sidebar derives its groups
+      // purely from countsByLayer, matching the viewport overview exactly —
+      // otherwise the distribution loop would also build a stray merged
+      // "Standorte / Leuchten" group with a 0 total.
+      if (highlightsList.length > OVERVIEW_FEATURE_LIMIT) {
+        const base = buildFromFeatures(highlightsList, {
+          isOverviewMode: true,
+        });
+        return { ...base, features: [] };
+      }
+      return buildFromFeatures(highlightsList);
+    }
+    if (sidebarMode === "drafts" && draftSidebarFeatures.length > 0) {
+      return buildFromFeatures(draftSidebarFeatures);
+    }
+    return fachobjekteSidebarData;
+  }, [
+    sidebarMode,
+    unfilteredHighlights,
+    highlightsForSidebar,
+    draftSidebarFeatures,
+    buildFromFeatures,
+    fachobjekteSidebarData,
+  ]);
+
+  // Count for the "Fachobjekte" tab badge. It used to be the raw
+  // `useVisibleMapFeatures` total, which ignores the category toggles: a layer
+  // still rendered on the map (or returned by the query for a layer the toggle
+  // only visually hid) kept counting even though no row for it appears in the
+  // list — e.g. switching Leitungen on brought the Standorte back into the
+  // number while the list and the Highlights tab stayed without them.
+  // Summing the toggle-gated `countsByLayer` is exactly what the group headers
+  // in the list do, and it also survives overview mode (where the feature list
+  // is blanked but the counts remain).
+  const fachobjekteCount = useMemo(() => {
+    let sum = 0;
+    for (const [layerKey, count] of Object.entries(
+      fachobjekteSidebarData.countsByLayer
+    )) {
+      if (activeSourceLayers.has(layerKey)) sum += count;
+    }
+    return sum;
+  }, [fachobjekteSidebarData, activeSourceLayers]);
 
   // Neighborhood: mark leuchten sharing the same Standort as the selected feature
   useSelectionNeighborhood({
@@ -1822,12 +2480,6 @@ const BelisMapLibWrapper = ({
         setLastFeatureType(sourceLayer);
       }
 
-      // console.log("xxx [SELECTION] fetching feature by id:", {
-      //   featureId,
-      //   sourceLayer,
-      //   fallback: !selectedFeature,
-      // });
-
       // Creation drafts have synthetic fetchedData — skip API fetch. There is
       // no DB record to fetch by their synthetic key, and the draft already
       // carries its synthetic fetchedData. Without this, the override useEffect
@@ -1857,7 +2509,6 @@ const BelisMapLibWrapper = ({
       const cachedData =
         store.getState().featuresForms?.drafts[draftKey]?.fetchedData;
       if (cachedData) {
-        console.log("[SELECTION] using cached draft data for", draftKey);
         setFetchedFeatureData(cachedData);
         return;
       }
@@ -1887,27 +2538,36 @@ const BelisMapLibWrapper = ({
     sidebarVariant,
   ]);
 
-  // Close the datasheet when the selection is cleared in fachobjekte mode
+  // Close the datasheet when the selection is cleared in fachobjekte mode.
+  // Suppressed while `selectFirstAfterDrafts` is armed — there the empty
+  // selection is a transient step towards selecting the first list row.
   useEffect(() => {
-    if (sidebarVariant === "fachobjekte" && !selectedFeatureId) {
+    if (
+      sidebarVariant === "fachobjekte" &&
+      !selectedFeatureId &&
+      !selectFirstAfterDrafts
+    ) {
       closeDatasheet();
     }
-  }, [selectedFeatureId, sidebarVariant, closeDatasheet]);
+  }, [
+    selectedFeatureId,
+    sidebarVariant,
+    closeDatasheet,
+    selectFirstAfterDrafts,
+  ]);
 
   // Check if selected feature is inside visible map boundary.
   // When not visible, auto-open the datasheet to show NoFeatureSelected.
+  // Skipped in "highlights" mode: a highlight is deliberately selected from
+  // the sidebar and may sit outside the current viewport — there we keep the
+  // map and let the overrideSelectedFeature info box render instead of forcing
+  // the empty datasheet.
   const [featureOnMap, setFeatureOnMap] = useState(true);
 
   useEffect(() => {
-    console.log("[AA-DEBUG] bounds-check effect fired", {
-      sidebarMode,
-      sidebarVariant,
-      selectedFeatureId,
-      rawFeature: !!rawFeature,
-    });
     if (
       sidebarVariant === "arbeitsauftraege" ||
-      (sidebarMode !== "fachobjekte" && sidebarMode !== "highlights") ||
+      sidebarMode !== "fachobjekte" ||
       !selectedFeatureId ||
       !map
     ) {
@@ -1922,7 +2582,6 @@ const BelisMapLibWrapper = ({
 
     const geometry = rawFeature?.geometry;
     if (!geometry) {
-      console.log("[AA-DEBUG] no geometry, skipping");
       setFeatureOnMap(true);
       return;
     }
@@ -1945,14 +2604,8 @@ const BelisMapLibWrapper = ({
       );
     }
     setFeatureOnMap(inside);
-    console.log("[AA-DEBUG] bounds check result", {
-      inside,
-      geometryType: geometry.type,
-      sourceLayer: selectedFeatureId.sourceLayer,
-    });
 
     if (!inside) {
-      console.log("[AA-DEBUG] >>> openDatasheet() called from bounds-check");
       openDatasheet();
     }
   }, [map, selectedFeatureId, rawFeature, sidebarMode, openDatasheet]);
@@ -2179,62 +2832,19 @@ const BelisMapLibWrapper = ({
     sidebarVariant,
   ]);
 
-  // Visually select the MVT feature on the map when using the override path.
-  // The override path means LibreMap didn't handle the selection (no on-map click),
-  // so we need to set feature-state { selected: true } ourselves.
-  // Retry on sourcedata because the tile may not be loaded yet (e.g. after fly-to).
-  useEffect(() => {
-    if (!map || !overrideSelectedFeature || !selectedFeatureId) return;
-
-    const sourceLayer = selectedFeatureId.sourceLayer ?? "";
-    const dbId = selectedFeatureId.id;
-    if (dbId == null) return;
-
-    let prevMvtId: string | number | undefined;
-
-    const trySelect = () => {
-      try {
-        const features = map.querySourceFeatures(namespacedSource, {
-          sourceLayer,
-        });
-        const match = features.find(
-          (f) => f.properties && String(f.properties.id) === String(dbId)
-        );
-        if (match?.id != null) {
-          if (prevMvtId != null && prevMvtId !== match.id) {
-            map.setFeatureState(
-              { source: namespacedSource, sourceLayer, id: prevMvtId },
-              { selected: false }
-            );
-          }
-          map.setFeatureState(
-            { source: namespacedSource, sourceLayer, id: match.id },
-            { selected: true }
-          );
-          prevMvtId = match.id;
-        }
-      } catch {
-        // source/layer may not exist yet
-      }
-    };
-
-    trySelect();
-    map.on("sourcedata", trySelect);
-
-    return () => {
-      map.off("sourcedata", trySelect);
-      if (prevMvtId != null) {
-        try {
-          map.setFeatureState(
-            { source: namespacedSource, sourceLayer, id: prevMvtId },
-            { selected: false }
-          );
-        } catch {
-          // ignore
-        }
-      }
-    };
-  }, [map, overrideSelectedFeature, selectedFeatureId, namespacedSource]);
+  // NOTE: the on-map visual selection is owned solely by LibreMap's external
+  // selection watcher (clearVisualSelection + applyVisualSelection on
+  // selectedFeatureId). Now that `belis-source` promotes the DB pk to the
+  // feature id (`promoteId: "id"` on leuchtenDataLayer), that native path keys
+  // feature-state by the stable DB id and MapLibre applies it even for tiles
+  // that load after a fly-to — so no manual override is needed here.
+  //
+  // A previous override effect re-set `feature-state.selected` via
+  // querySourceFeatures because, before promoteId, LibreMap selected the wrong
+  // (tile-local MVT) id. With promoteId both paths share the same DB id, so
+  // that override only fought LibreMap: its cleanup cleared the real selection
+  // ("loses selection at the final moment"), and its stale sets survived
+  // LibreMap's clear ("two features selected"). Removed intentionally.
 
   const libreLayers = useMemo(() => {
     const layers: LibreLayer[] = [];
@@ -3834,6 +4444,18 @@ const BelisMapLibWrapper = ({
           (BELIS_SOURCE_LAYERS as readonly string[]).includes(h.sourceLayer)
       );
       if (belisHits.length === 0) {
+        // Exception to the rule above: the optional "esave Daten" layer
+        // (Smart-Lighting-Controller) is a genuine data layer, not basemap
+        // decoration. Its style ships a `carmaconf://infoBoxMapping` function,
+        // so returning the hit lets LibreMap run its generic mapping flow and
+        // render the sensor's info box (and the style's own
+        // `belis-sensoren-selection` layer paints the selection halo).
+        // Fachobjekte keep priority: a sensor sits on top of its Standort /
+        // Leuchte and must not shadow it, hence only when no BelIS hit exists.
+        const esaveHit = hits.find((h) => h.source === esaveSource);
+        if (esaveHit) {
+          return esaveHit;
+        }
         return undefined;
       }
 
@@ -3888,6 +4510,7 @@ const BelisMapLibWrapper = ({
       allDraftFeatures,
       store,
       namespacedSource,
+      esaveSource,
       selectFeature,
       openDraftDbKeys,
     ]
@@ -4032,7 +4655,10 @@ const BelisMapLibWrapper = ({
       for (const id of geometryEditPreviewStateIds) {
         try {
           mapInstance.setFeatureState(
-            buildFeatureStateTarget(mapInstance, { source: brandnewSource, id }),
+            buildFeatureStateTarget(mapInstance, {
+              source: brandnewSource,
+              id,
+            }),
             { selected: id === selectedEditPreviewStateId }
           );
         } catch {
@@ -4053,8 +4679,7 @@ const BelisMapLibWrapper = ({
             const match = mapInstance
               .querySourceFeatures(namespacedSource, { sourceLayer })
               .find(
-                (f) =>
-                  f.properties && String(f.properties.id) === String(dbId)
+                (f) => f.properties && String(f.properties.id) === String(dbId)
               );
             if (match?.id != null) {
               matchId = match.id;
@@ -4263,15 +4888,31 @@ const BelisMapLibWrapper = ({
     return selectedFeatureId;
   }, [sidebarMode, activeDraftRow, selectedFeatureId]);
 
-  // Database primary key of the selected feature (from tile properties).
-  // MVT feature IDs differ from database PKs; Highlights mode uses database PKs.
+  // Database primary key of the selected feature, used by the sidebar's
+  // pk-match branch to highlight the selected row.
+  //
+  // Prefer the id carried by the *live* selection: `sidebarSelectedFeatureId`
+  // updates synchronously on click and — now that the source promotes the DB
+  // pk to the feature id (`promoteId: "id"`) — already IS the database pk.
+  // `selectedFeature` / `rawFeature` only catch up after the info-box data
+  // resolves; deriving the pk from them alone let the sidebar briefly show TWO
+  // selected rows during a switch (the new row matched by id, the old row still
+  // matched by this now-stale pk). Fall back to the async sources only when the
+  // live id isn't a plain numeric pk (e.g. a creation-draft key).
   const selectedDatabaseId = useMemo(() => {
+    const liveId = sidebarSelectedFeatureId?.id;
+    if (
+      typeof liveId === "number" ||
+      (typeof liveId === "string" && /^\d+$/.test(liveId))
+    ) {
+      return liveId;
+    }
     return (
       selectedFeature?.properties?.sourceProps?.id ??
       rawFeature?.properties?.id ??
       null
     );
-  }, [selectedFeature, rawFeature]);
+  }, [sidebarSelectedFeatureId, selectedFeature, rawFeature]);
 
   // Always pass the raw feature so the mini-map can center on its geometry.
   // LibreMap's external selection watcher will attempt createFeature() via
@@ -4428,6 +5069,31 @@ const BelisMapLibWrapper = ({
 
       // Normal flow for fachobjekte/highlights
       setActiveDraftRow(null);
+
+      // `identifier.id` is an MVT tile id in Fachobjekte mode (rows come from
+      // queryRenderedFeatures) but a database primary key in Highlights mode
+      // (expert / street search rows carry `id: <dbId>`). The `belis-source`
+      // vector tiles are served WITHOUT `promoteId`, so `setFeatureState` keys
+      // on the tile-local MVT id — passing a DB id there aliases every feature
+      // that happens to share that integer in each loaded tile, painting
+      // phantom `mauerlaschen-selection` icons across the map (and shifting
+      // them as tiles reload on zoom). Resolve the DB id to the real MVT id via
+      // the loaded tiles first — exactly like the drafts branch above.
+      if (map) {
+        const sl = identifier.sourceLayer ?? "";
+        const dbPK = String(feature.properties?.id ?? identifier.id);
+        const match = map
+          .querySourceFeatures(namespacedSource, { sourceLayer: sl })
+          .find((f) => f.properties && String(f.properties.id) === dbPK);
+        if (match) {
+          selectFeature(
+            { source: identifier.source, sourceLayer: sl, id: match.id },
+            match as any
+          );
+          return;
+        }
+      }
+
       selectFeature(identifier, feature as any);
     },
     [
@@ -4443,12 +5109,15 @@ const BelisMapLibWrapper = ({
   );
 
   // After a draft is cancelled/removed, select the next remaining draft.
-  // If no drafts remain, clear the selection and close the datasheet.
+  // If no drafts remain, stay in the Datenblatt and fall back to the first row
+  // of the list (armed via `selectFirstAfterDrafts`, resolved once the list has
+  // re-rendered without the removed draft).
   const handleSelectNextDraft = useCallback(
     (removedFeatureId: string) => {
       if (sidebarMode !== "drafts") {
         clearMapSelection();
-        closeDatasheet();
+        openDatasheet();
+        setSelectFirstAfterDrafts(true);
         return;
       }
       // allDraftFeatures still contains the removed draft at this point
@@ -4465,7 +5134,8 @@ const BelisMapLibWrapper = ({
       });
       if (remaining.length === 0) {
         clearMapSelection();
-        closeDatasheet();
+        openDatasheet();
+        setSelectFirstAfterDrafts(true);
         return;
       }
       const next = remaining[0];
@@ -4480,14 +5150,70 @@ const BelisMapLibWrapper = ({
       allDraftFeatures,
       handleSidebarFeatureSelect,
       clearMapSelection,
-      closeDatasheet,
+      openDatasheet,
     ]
   );
+
+  // Resolve the armed "select the first row" request from a draft removal.
+  // Waits for the sidebar to leave the Entwürfe tab (the effect above flips it
+  // back to Fachobjekte once the last draft is gone) and for the list to carry
+  // a row — until then the Datenblatt shows the "kein Objekt selektiert" hint
+  // rather than dropping back to the map.
+  useEffect(() => {
+    if (!selectFirstAfterDrafts) return;
+    // The user left the Datenblatt or picked something themselves — disarm.
+    if (!isDatasheetOpen || selectedFeatureId) {
+      setSelectFirstAfterDrafts(false);
+      return;
+    }
+    if (sidebarMode === "drafts") return;
+    const first = sidebarOrderedFeaturesRef.current[0];
+    if (!first) return;
+    setSelectFirstAfterDrafts(false);
+    handleSidebarFeatureSelect(
+      {
+        source: first.source ?? "",
+        sourceLayer: first.sourceLayer ?? "",
+        id: first.id,
+      },
+      first
+    );
+  }, [
+    selectFirstAfterDrafts,
+    isDatasheetOpen,
+    selectedFeatureId,
+    sidebarMode,
+    // Re-run when the rendered list changes; the row order itself is read from
+    // the ref the sidebar keeps in sync.
+    effectiveSidebarData,
+    handleSidebarFeatureSelect,
+  ]);
 
   useEffect(() => {
     setOnSelectNextDraft(() => handleSelectNextDraft);
     return () => setOnSelectNextDraft(undefined);
   }, [handleSelectNextDraft, setOnSelectNextDraft]);
+
+  // Bulk draft actions ("Alle verwerfen" / "Alle speichern") drop every draft
+  // in one go, so there is no "next draft" to walk to — they used to close the
+  // Datenblatt instead. Stay in it: a creation draft's selection dies with the
+  // draft (clear it and fall back to the first list row), while an ordinary
+  // feature keeps its selection and just re-reads the server values.
+  const handleDraftsCleared = useCallback(() => {
+    openDatasheet();
+    const selectionWasCreationDraft =
+      selectedFeatureId?.id != null &&
+      isCreationDraftKey(String(selectedFeatureId.id));
+    if (selectionWasCreationDraft) {
+      clearMapSelection();
+      setSelectFirstAfterDrafts(true);
+    }
+  }, [selectedFeatureId, clearMapSelection, openDatasheet]);
+
+  useEffect(() => {
+    setOnDraftsCleared(() => handleDraftsCleared);
+    return () => setOnDraftsCleared(undefined);
+  }, [handleDraftsCleared, setOnDraftsCleared]);
 
   const handleOpenCreationDraft = useCallback(
     (featureType: string, draftKey: string) => {
@@ -4593,17 +5319,31 @@ const BelisMapLibWrapper = ({
           }
           sidebarMode={sidebarMode}
           onModeChange={setSidebarMode}
+          expertSort={highlightExpertSort}
+          // Frozen search results, used as the rank source when expert sort is
+          // active. Passing `highlightResults` (shell state) rather than the
+          // mutable `unfilteredHighlights` means dismisses don't reshuffle
+          // ranks — a dismissed feature keeps its slot instead of dropping to
+          // the street-sort tail.
+          expertRankFeatures={highlightResults}
+          // Highlights list is already in backend expert-sort order — tell the
+          // sidebar to keep it as-is instead of re-sorting. Fachobjekte gets
+          // the same order via `expertRankFeatures` + `expertSort`.
+          preserveOrder={
+            sidebarMode === "highlights" && highlightExpertSort.length > 0
+          }
           hasHighlights={hasHighlights}
           hasDrafts={!isReadOnly && draftFeaturesCount > 0}
-          fachobjekteCount={totalCount}
-          highlightCount={adjustedHighlights?.length ?? undefined}
+          fachobjekteCount={fachobjekteCount}
+          highlightCount={highlightsForSidebar?.length ?? undefined}
           draftsCount={draftFeaturesCount}
           onFeatureDismiss={handleSidebarDismiss}
+          orderedFeaturesRef={sidebarOrderedFeaturesRef}
           auswahlActiveSourceLayers={activeSourceLayers}
           namespacedSource={namespacedSource}
           brandnewSource={brandnewSource}
-          adjustedHighlights={adjustedHighlights}
-          setAdjustedHighlights={setAdjustedHighlights}
+          unfilteredHighlights={unfilteredHighlights}
+          setUnfilteredHighlights={setUnfilteredHighlights}
           measurements={isReadOnly ? [] : measurementsForSidebar}
           selectedMeasurementId={selectedMeasurementId}
           onMeasurementSelect={(id) => dispatch(selectMeasurement(id))}
@@ -4666,6 +5406,7 @@ const BelisMapLibWrapper = ({
               overrideGlyphs="https://tiles.cismet.de/fonts/{fontstack}/{range}.pbf"
               backgroundLayers="basemap_grey@60"
               layerMode="imperative"
+              markerSymbolSize={BELIS_MARKER_SYMBOL_SIZE}
               libreLayers={[leuchtenDataLayer, brandNewDataLayer]}
               setLibreMap={handleMiniMapReady}
             />
@@ -4712,6 +5453,7 @@ const BelisMapLibWrapper = ({
               <CarmaMap
                 mapEngine="maplibre"
                 layerMode="imperative"
+                markerSymbolSize={BELIS_MARKER_SYMBOL_SIZE}
                 embedded
                 debugLog
                 logErrors={showRaw}
@@ -4746,38 +5488,68 @@ const BelisMapLibWrapper = ({
                   )
                 }
               />
-              <MeasurementHost
-                ref={measurementHostRef}
-                mode={drawMode}
-                snapping={snappingEnabled}
-                // Tighten terra-draw's click-to-finish tolerance (native
-                // default 40px) so short segments drawn along a building edge
-                // near a snapped corner don't terminate the line prematurely
-                // (#691). Kept <= the snap radius (20px).
-                closePointerDistancePx={10}
-                initialFeatures={initialMeasurementFeatures}
-                onChange={(features) => {
-                  // Prefix terra-draw's UUIDs to namespace measurement ids
-                  // away from any other id space (fachobjekte, brandnew FC,
-                  // etc.). Redux state is persisted via redux-persist
-                  // (see measurementsConfig in store/index.ts) so the next
-                  // refresh re-seeds terra-draw via initialFeatures above.
-                  dispatch(
-                    replaceMeasurements(
-                      features.map((f) => ({
-                        ...f,
-                        id: `measurement.${f.id}`,
-                      }))
-                    )
-                  );
-                }}
-                onSelectionChange={(id) => {
-                  // terra-draw fires with the raw UUID; redux stores the
-                  // prefixed form. Translate before dispatching so the
-                  // shared selectedFeature slot lands on the matching item.
-                  dispatch(
-                    selectMeasurement(id != null ? `measurement.${id}` : null)
-                  );
+              {/* Provider wraps the host so descendants can use the new
+                  useMeasurements() context. Redux dispatch still happens
+                  via the imperative onChange below because replaceMeasurements
+                  also re-syncs the shared selectedFeature slot (the simple
+                  setMeasurements bridge would lose that). */}
+              <MeasurementsProvider>
+                <MeasurementHost
+                  ref={measurementHostRef}
+                  mode={drawMode}
+                  snapping={snappingEnabled}
+                  // Tighten terra-draw's click-to-finish tolerance (native
+                  // default 40px) so short segments drawn along a building edge
+                  // near a snapped corner don't terminate the line prematurely
+                  // (#691). Kept <= the snap radius (20px).
+                  closePointerDistancePx={10}
+                  initialFeatures={initialMeasurementFeatures}
+                  onChange={(features) => {
+                    // Prefix terra-draw's UUIDs to namespace measurement ids
+                    // away from any other id space (fachobjekte, brandnew FC,
+                    // etc.). Redux state is persisted via redux-persist
+                    // (see measurementsConfig in store/index.ts) so the next
+                    // refresh re-seeds terra-draw via initialFeatures above.
+                    dispatch(
+                      replaceMeasurements(
+                        features.map((f) => ({
+                          ...f,
+                          id: `measurement.${f.id}`,
+                        }))
+                      )
+                    );
+                  }}
+                  onSelectionChange={(id) => {
+                    // terra-draw fires with the raw UUID; redux stores the
+                    // prefixed form. Translate before dispatching so the
+                    // shared selectedFeature slot lands on the matching item.
+                    dispatch(
+                      selectMeasurement(id != null ? `measurement.${id}` : null)
+                    );
+                  }}
+                />
+              </MeasurementsProvider>
+              <MapLibrePrintPreview
+                map={map}
+                active={printActive}
+                orientation={printOrientation}
+                scale={printScale}
+                dpi={printDpi}
+                name={printName}
+                layers={printLayers}
+                resolveLayers={resolvePrintLayers}
+                redrawTrigger={printRedraw}
+                keepRectangle={printIfMapPrinted}
+                loading={printLoading}
+                onClose={() => dispatch(changePrintActive(false))}
+                onLoadingChange={(loading) =>
+                  dispatch(changePrintLoading(loading))
+                }
+                onError={(message) => dispatch(changePrintError(message))}
+                onPrintStart={() => dispatch(changeIfMapPrinted(true))}
+                onRequestRedraw={() => {
+                  dispatch(changeIfMapPrinted(false));
+                  dispatch(changeRedrawPreview(!printRedraw));
                 }}
               />
             </>

@@ -12,11 +12,52 @@ interface SelectionContentProps {
   map: maplibregl.Map | null;
 }
 
+// Purely decorative layers for the gazetteer/area overlay. They sit on top of
+// the style, so queryRenderedFeatures reports them as the topmost hit; the hit
+// filters in LibreMap must drop them or they shadow real feature selections.
+const MASK_LAYER_ID = "mask-layer";
+const FEATURE_FILL_LAYER_ID = "feature-fill";
+const FEATURE_OUTLINE_LAYER_ID = "feature-outline";
+
+export const SELECTION_OVERLAY_LAYER_IDS = [
+  MASK_LAYER_ID,
+  FEATURE_FILL_LAYER_ID,
+  FEATURE_OUTLINE_LAYER_ID,
+];
+
+// The overlay feature arrives in EPSG:3857; MapLibre needs EPSG:4326.
+const toWgs84Feature = (overlayFeature: unknown) => {
+  const featureGeoJSON = JSON.parse(JSON.stringify(overlayFeature));
+
+  if (
+    featureGeoJSON.geometry?.coordinates &&
+    featureGeoJSON.geometry.type === "Polygon"
+  ) {
+    featureGeoJSON.geometry.coordinates =
+      featureGeoJSON.geometry.coordinates.map((ring: number[][]) =>
+        ring.map((coord: number[]) =>
+          proj4(proj4crs3857def, proj4crs4326def, [coord[0], coord[1]])
+        )
+      );
+
+    if (featureGeoJSON.geometry.crs) {
+      featureGeoJSON.geometry.crs = {
+        type: "name",
+        properties: {
+          name: "EPSG:4326",
+        },
+      };
+    }
+  }
+
+  return featureGeoJSON;
+};
+
 export const LibreMapSelectionContent = ({ map }: SelectionContentProps) => {
   const [marker, setMarker] = useState<maplibregl.Marker | undefined>();
   const { selection, overlayFeature } = useSelection();
   const maskSourceId = useRef("mask-source");
-  const maskLayerId = useRef("mask-layer");
+  const maskLayerId = useRef(MASK_LAYER_ID);
   const featureSourceId = useRef("feature-source");
 
   useEffect(() => {
@@ -47,11 +88,11 @@ export const LibreMapSelectionContent = ({ map }: SelectionContentProps) => {
           if (map.getSource(maskSourceId.current)) {
             map.removeSource(maskSourceId.current);
           }
-          if (map.getLayer("feature-outline")) {
-            map.removeLayer("feature-outline");
+          if (map.getLayer(FEATURE_OUTLINE_LAYER_ID)) {
+            map.removeLayer(FEATURE_OUTLINE_LAYER_ID);
           }
-          if (map.getLayer("feature-fill")) {
-            map.removeLayer("feature-fill");
+          if (map.getLayer(FEATURE_FILL_LAYER_ID)) {
+            map.removeLayer(FEATURE_FILL_LAYER_ID);
           }
           if (map.getSource(featureSourceId.current)) {
             map.removeSource(featureSourceId.current);
@@ -63,8 +104,17 @@ export const LibreMapSelectionContent = ({ map }: SelectionContentProps) => {
     };
   }, [map, selection]);
 
+  // Rebuilding the overlay is driven by `overlayFeature`/`selection`, but a
+  // `setStyle` (background switch, layer add/remove) drops every imperatively
+  // added source and layer. So the same builder also runs on `styledata`,
+  // where it only steps in when the layers really went missing.
   useEffect(() => {
-    if (map && overlayFeature && selection?.isAreaSelection) {
+    if (!(map && overlayFeature && selection?.isAreaSelection)) return;
+
+    const applyOverlay = (rebuild: boolean) => {
+      // Nothing was wiped and no new data to push: leave the overlay alone
+      // rather than redoing the turf.difference on every style event.
+      if (!rebuild && map.getLayer(maskLayerId.current)) return;
       // Create a mask that covers the entire viewport except for the feature
       try {
         const bounds = map.getBounds();
@@ -81,35 +131,7 @@ export const LibreMapSelectionContent = ({ map }: SelectionContentProps) => {
         // @ts-expect-error turf types
         const worldPolygon = turf.bboxPolygon(worldBbox);
 
-        const featureGeoJSON = JSON.parse(JSON.stringify(overlayFeature));
-
-        // We need to convert from EPSG:3857 to EPSG:4326 for MapLibre to display correctly
-        if (
-          featureGeoJSON.geometry?.coordinates &&
-          featureGeoJSON.geometry.type === "Polygon"
-        ) {
-          const transformedCoordinates =
-            featureGeoJSON.geometry.coordinates.map((ring: number[][]) => {
-              return ring.map((coord: number[]) => {
-                const transformed = proj4(proj4crs3857def, proj4crs4326def, [
-                  coord[0],
-                  coord[1],
-                ]);
-                return transformed;
-              });
-            });
-
-          featureGeoJSON.geometry.coordinates = transformedCoordinates;
-
-          if (featureGeoJSON.geometry.crs) {
-            featureGeoJSON.geometry.crs = {
-              type: "name",
-              properties: {
-                name: "EPSG:4326",
-              },
-            };
-          }
-        }
+        const featureGeoJSON = toWgs84Feature(overlayFeature);
 
         // Add the feature source for highlighting the actual feature
         if (!map.getSource(featureSourceId.current)) {
@@ -138,11 +160,11 @@ export const LibreMapSelectionContent = ({ map }: SelectionContentProps) => {
         }
 
         // Create a mask using a feature-state filter instead of a separate polygon
-        if (map.getLayer("feature-fill")) {
-          map.removeLayer("feature-fill");
+        if (map.getLayer(FEATURE_FILL_LAYER_ID)) {
+          map.removeLayer(FEATURE_FILL_LAYER_ID);
         }
         map.addLayer({
-          id: "feature-fill",
+          id: FEATURE_FILL_LAYER_ID,
           type: "fill",
           source: featureSourceId.current,
           paint: {
@@ -152,11 +174,11 @@ export const LibreMapSelectionContent = ({ map }: SelectionContentProps) => {
         });
 
         // Add the feature outline layer
-        if (map.getLayer("feature-outline")) {
-          map.removeLayer("feature-outline");
+        if (map.getLayer(FEATURE_OUTLINE_LAYER_ID)) {
+          map.removeLayer(FEATURE_OUTLINE_LAYER_ID);
         }
         map.addLayer({
-          id: "feature-outline",
+          id: FEATURE_OUTLINE_LAYER_ID,
           type: "line",
           source: featureSourceId.current,
           paint: {
@@ -197,7 +219,7 @@ export const LibreMapSelectionContent = ({ map }: SelectionContentProps) => {
                   "fill-opacity": 0.5,
                 },
               },
-              "feature-fill"
+              FEATURE_FILL_LAYER_ID
             );
           }
         } catch (maskError) {
@@ -229,50 +251,66 @@ export const LibreMapSelectionContent = ({ map }: SelectionContentProps) => {
           });
         }
 
-        const shouldFitBounds =
-          selection?.selectionTimestamp &&
-          Date.now() - selection.selectionTimestamp < 1000;
-
-        if (shouldFitBounds) {
-          try {
-            if (
-              featureGeoJSON.geometry?.coordinates &&
-              featureGeoJSON.geometry.type === "Polygon"
-            ) {
-              const coordinates = featureGeoJSON.geometry.coordinates[0];
-
-              if (coordinates && coordinates.length > 0) {
-                let minX = coordinates[0][0];
-                let minY = coordinates[0][1];
-                let maxX = coordinates[0][0];
-                let maxY = coordinates[0][1];
-
-                coordinates.forEach((coord: number[]) => {
-                  const x = coord[0];
-                  const y = coord[1];
-
-                  minX = Math.min(minX, x);
-                  minY = Math.min(minY, y);
-                  maxX = Math.max(maxX, x);
-                  maxY = Math.max(maxY, y);
-                });
-
-                map.fitBounds(
-                  [
-                    [minX, minY],
-                    [maxX, maxY],
-                  ],
-                  { padding: 50, maxZoom: 18 }
-                );
-              }
-            }
-          } catch (fitError) {
-            console.error("Error fitting bounds:", fitError);
-          }
-        }
       } catch (error) {
         console.error("Error creating mask:", error);
       }
+    };
+
+    applyOverlay(true);
+
+    const onStyleData = () => applyOverlay(false);
+    map.on("styledata", onStyleData);
+    return () => {
+      map.off("styledata", onStyleData);
+    };
+  }, [map, overlayFeature, selection]);
+
+  // Framing the hit is a one-off reaction to a fresh selection, so it stays out
+  // of the builder above: a restyle must not yank the camera back.
+  useEffect(() => {
+    if (!(map && overlayFeature && selection?.isAreaSelection)) return;
+    if (
+      !selection.selectionTimestamp ||
+      Date.now() - selection.selectionTimestamp >= 1000
+    ) {
+      return;
+    }
+
+    try {
+      const featureGeoJSON = toWgs84Feature(overlayFeature);
+      if (
+        featureGeoJSON.geometry?.coordinates &&
+        featureGeoJSON.geometry.type === "Polygon"
+      ) {
+        const coordinates = featureGeoJSON.geometry.coordinates[0];
+
+        if (coordinates && coordinates.length > 0) {
+          let minX = coordinates[0][0];
+          let minY = coordinates[0][1];
+          let maxX = coordinates[0][0];
+          let maxY = coordinates[0][1];
+
+          coordinates.forEach((coord: number[]) => {
+            const x = coord[0];
+            const y = coord[1];
+
+            minX = Math.min(minX, x);
+            minY = Math.min(minY, y);
+            maxX = Math.max(maxX, x);
+            maxY = Math.max(maxY, y);
+          });
+
+          map.fitBounds(
+            [
+              [minX, minY],
+              [maxX, maxY],
+            ],
+            { padding: 50, maxZoom: 18 }
+          );
+        }
+      }
+    } catch (fitError) {
+      console.error("Error fitting bounds:", fitError);
     }
   }, [map, overlayFeature, selection]);
 

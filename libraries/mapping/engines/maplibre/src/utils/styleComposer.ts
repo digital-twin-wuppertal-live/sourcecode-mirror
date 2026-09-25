@@ -15,12 +15,38 @@ import type {
 } from "maplibre-gl";
 import slugify from "slugify";
 import {
+  ensureLayerLoadingTracker,
+  type LayerLoadingTracker,
+} from "@carma-mapping/utils";
+import {
   getPaintProperty,
-  prefixPatternExpression,
   extractGeoJson,
   transformedPois,
+  isStopsObject,
+  scaleStopsObject,
 } from "./styleBuilder";
-import type { LibreLayer, RasterPaintOverrides } from "../components/LibreMap";
+import {
+  prefixSpriteImages,
+  resolveSpriteNamespace,
+  SPRITE_IMAGE_LAYOUT_PROPERTIES,
+  SPRITE_IMAGE_PAINT_PROPERTIES,
+} from "./spriteNamespace";
+import type {
+  LibreLayer,
+  OpacityTransition,
+  RasterPaintOverrides,
+} from "../components/LibreMap";
+
+/** what MapLibre transitions a paint property over when nothing says otherwise */
+const MAPLIBRE_DEFAULT_TRANSITION_MS = 300;
+import {
+  createNonTiledImageSource,
+  createNonTiledMetadata,
+} from "./nonTiledWms";
+import {
+  styleProvidesTerrain,
+  withTerrainProviderMetadata,
+} from "./terrainProviderMetadata";
 
 /**
  * Slugify a URL into a compact ID: strips protocol and .json extension,
@@ -35,9 +61,11 @@ export function slugifyUrl(url: string): string {
 interface ManagedSubStyle {
   sourceIds: string[];
   layerIds: string[];
-  spriteId: string | null;
+  /** Sprites registered for this sub-style (refcounted in `spriteRefs`). */
+  spriteIds: string[];
   firstId: string;
   lastId: string;
+  carmaLayerId?: string;
   /** Original paint opacity values per layer, keyed by "layerId::property". */
   baseOpacities?: Map<string, number>;
 }
@@ -63,6 +91,7 @@ export interface AddGeoJsonSubStyleOptions {
   zIndex: number;
   clusteringEnabled?: boolean;
   beforeId?: string;
+  carmaLayerId?: string;
 }
 
 export interface AddRasterSubStyleOptions {
@@ -81,7 +110,7 @@ function applySymbolScaling(
   markerSymbolSize: number
 ): void {
   if (layer.type !== "symbol") return;
-  const scale = (markerSymbolSize / 35) * 1.35;
+  const scale = markerSymbolSize / 35;
   const layout = (
     layer as LayerSpecification & { layout?: Record<string, unknown> }
   ).layout;
@@ -99,12 +128,43 @@ function applySymbolScaling(
         }
       }
       layout["icon-size"] = copy;
+    } else if (isStopsObject(iconSize)) {
+      layout["icon-size"] = scaleStopsObject(
+        iconSize,
+        (value) => (value as number) * scale
+      );
     }
   }
   if (layout["text-size"] !== undefined) {
     const textSize = layout["text-size"];
     if (typeof textSize === "number") {
       layout["text-size"] = textSize * scale;
+    }
+  }
+  if (layout["text-offset"] !== undefined) {
+    const textOffset = layout["text-offset"];
+    if (Array.isArray(textOffset) && textOffset[0] === "interpolate") {
+      const copy = [...textOffset] as unknown[];
+      for (let i = 3; i < copy.length; i += 2) {
+        if (
+          Array.isArray(copy[i + 1]) &&
+          (copy[i + 1] as unknown[])[0] === "literal"
+        ) {
+          const literalArray = [...((copy[i + 1] as unknown[])[1] as number[])];
+          literalArray[1] = literalArray[1] * scale;
+          copy[i + 1] = ["literal", literalArray];
+        }
+      }
+      layout["text-offset"] = copy;
+    } else if (Array.isArray(textOffset) && textOffset.length === 2) {
+      const x = typeof textOffset[0] === "number" ? textOffset[0] : 0;
+      const y = typeof textOffset[1] === "number" ? textOffset[1] : 0;
+      layout["text-offset"] = [x, y * scale];
+    } else if (isStopsObject(textOffset)) {
+      layout["text-offset"] = scaleStopsObject(textOffset, (v) => {
+        const offset = v as [number, number];
+        return [offset[0], offset[1] * scale];
+      });
     }
   }
 }
@@ -143,11 +203,21 @@ export class StyleComposer {
   /** Refcount sprites by spriteId so multiple sub-styles sharing the same
    * sprite URL don't tear it down for each other on removal. */
   private spriteRefs: Map<string, number> = new Map();
+  /**
+   * "layerId::property" for every opacity whose transition we overrode. Only
+   * used to put MapLibre's default back once a layer stops asking for one: the
+   * transition is a paint property that outlives the write that set it, so a
+   * declared duration would otherwise also apply to whoever changes that
+   * opacity next, an opacity slider included.
+   */
+  private overriddenOpacityTransitions: Set<string> = new Set();
   private debugLog: boolean;
+  private loadingTracker: LayerLoadingTracker;
 
   constructor(map: MaplibreMap, debugLog = false) {
     this.map = map;
     this.debugLog = debugLog;
+    this.loadingTracker = ensureLayerLoadingTracker(map);
   }
 
   /** Sync the bidirectional map to the map instance so other hooks can read it. */
@@ -178,8 +248,12 @@ export class StyleComposer {
     vectorLayer: Extract<LibreLayer, { type: "vector" }>,
     opts: AddVectorSubStyleOptions
   ): Promise<void> {
-    // Compute layerId from the style URL (slugified)
-    const layerId = slugifyUrl(vectorLayer.style!);
+    // Compute layerId: slugified URL when style is a URL string, layer name
+    // when style is an inline spec (no URL to slugify).
+    const layerId =
+      typeof vectorLayer.style === "string"
+        ? slugifyUrl(vectorLayer.style)
+        : vectorLayer.name;
 
     // Compute the merged-mode-equivalent prefix (same logic as styleBuilder)
     let mergedPrefix = vectorLayer.name;
@@ -191,15 +265,23 @@ export class StyleComposer {
     // Idempotency: skip if already managed
     if (this.managed.has(layerId)) return;
 
-    const response = await fetch(vectorLayer.style!);
-    const styleJson = await response.json();
-    let spriteId = layerId;
-    if (styleJson.sprite) {
-      spriteId = slugify(styleJson.sprite, {
-        remove: /[^a-zA-Z0-9]/g,
-        lower: true,
-      });
+    if (vectorLayer.carmaLayerId) {
+      this.loadingTracker.markPreparing(vectorLayer.carmaLayerId);
     }
+
+    let styleJson;
+    try {
+      styleJson =
+        typeof vectorLayer.style === "string"
+          ? await (await fetch(vectorLayer.style)).json()
+          : JSON.parse(JSON.stringify(vectorLayer.style));
+    } catch (err) {
+      if (vectorLayer.carmaLayerId) {
+        this.loadingTracker.markFailed(vectorLayer.carmaLayerId);
+      }
+      throw err;
+    }
+    const spriteNamespace = resolveSpriteNamespace(styleJson.sprite, layerId);
 
     const firstId = `---${layerId}:first---`;
     const lastId = `---${layerId}:last---`;
@@ -224,20 +306,20 @@ export class StyleComposer {
       lastId
     );
 
-    // 2. Add sprite (MapLibre handles namespace prefixing natively)
-    if (styleJson.sprite) {
+    // 2. Add sprites (MapLibre handles namespace prefixing natively); a
+    //    sprite array in the style yields one registration per entry.
+    const spriteIds: string[] = [];
+    for (const { id: spriteId, url } of spriteNamespace.sprites) {
       try {
-        this.map.addSprite(spriteId, styleJson.sprite);
+        this.map.addSprite(spriteId, url);
       } catch (err) {
         // Sprite may already exist from a previous add
         console.debug(`[StyleComposer] addSprite(${spriteId}) skipped:`, err);
       }
       // Refcount so removeSubStyle keeps the sprite alive while another
       // managed sub-style still references the same spriteId.
-      this.spriteRefs.set(
-        spriteId,
-        (this.spriteRefs.get(spriteId) ?? 0) + 1
-      );
+      this.spriteRefs.set(spriteId, (this.spriteRefs.get(spriteId) ?? 0) + 1);
+      spriteIds.push(spriteId);
     }
 
     // 3. Add sources (namespaced to prevent collisions)
@@ -248,7 +330,16 @@ export class StyleComposer {
       for (const [srcId, srcDef] of Object.entries(remoteSources)) {
         const namespacedSrc = `${layerId}::${srcId}`;
         if (!this.map.getSource(namespacedSrc)) {
-          this.map.addSource(namespacedSrc, srcDef);
+          // Opt-in: promote a feature property (e.g. "id") to the source's
+          // feature id so `feature-state` keys by the stable DB pk instead of
+          // the tile-local MVT id, which is only unique within one tile.
+          const withPromote =
+            vectorLayer.promoteId &&
+            "type" in srcDef &&
+            srcDef.type === "vector"
+              ? { ...srcDef, promoteId: vectorLayer.promoteId }
+              : srcDef;
+          this.map.addSource(namespacedSrc, withPromote);
         }
         sourceIds.push(namespacedSrc);
       }
@@ -256,6 +347,7 @@ export class StyleComposer {
 
     // 4. Add layers
     const remoteLayers = (styleJson.layers || []) as LayerSpecification[];
+    const providesTerrain = styleProvidesTerrain(styleJson);
     const opacity = opts.opacity ?? 1;
     const markerSymbolSize = opts.markerSymbolSize ?? 35;
 
@@ -286,11 +378,21 @@ export class StyleComposer {
         layer.source = `${layerId}::${layer.source}`;
       }
 
-      // Set metadata for HidingForwardingManager and z-ordering
+      // Set metadata for HidingForwardingManager and z-ordering.
+      // "layer-id" is the slugified style URL; "carma-layer-id" is the catalog
+      // id, which is what the layer apis (hasLayer/addLayer) speak.
+      const styleLayerMetadata = layer.metadata;
+      // Preserve the terrain-provider marker in imperative composition just
+      // like styleBuilder does in merged mode. The runtime uses this marker to
+      // keep MapLibre terrain available for draping while making its base
+      // surfaces transparent underneath a photogrammetric terrain mesh.
       layer.metadata = {
-        ...(layer.metadata || {}),
+        ...withTerrainProviderMetadata(styleLayerMetadata, providesTerrain),
         "z-index": opts.zIndex,
         "layer-id": layerId,
+        ...(vectorLayer.carmaLayerId
+          ? { "carma-layer-id": vectorLayer.carmaLayerId }
+          : {}),
       };
 
       // Apply opacity (skip selection layers)
@@ -318,21 +420,26 @@ export class StyleComposer {
         layer.paint = paint;
       }
 
-      // Prefix fill-pattern with sprite namespace
-      if (layer.paint?.["fill-pattern"] !== undefined) {
-        layer.paint["fill-pattern"] = prefixPatternExpression(
-          spriteId,
-          layer.paint["fill-pattern"]
+      // Prefix fill-pattern / line-pattern / icon-image with the sprite namespace
+      if (layer.paint) {
+        Object.assign(
+          layer.paint,
+          prefixSpriteImages(
+            spriteNamespace,
+            layer.paint,
+            SPRITE_IMAGE_PAINT_PROPERTIES
+          )
         );
       }
-
-      // Prefix icon-image with sprite namespace
-      if (layer.layout?.["icon-image"] !== undefined) {
-        layer.layout["icon-image"] = [
-          "concat",
-          `${spriteId}:`,
-          layer.layout["icon-image"],
-        ];
+      if (layer.layout) {
+        Object.assign(
+          layer.layout,
+          prefixSpriteImages(
+            spriteNamespace,
+            layer.layout,
+            SPRITE_IMAGE_LAYOUT_PROPERTIES
+          )
+        );
       }
 
       // Apply marker symbol size scaling
@@ -346,11 +453,15 @@ export class StyleComposer {
     this.managed.set(layerId, {
       sourceIds,
       layerIds,
-      spriteId,
+      spriteIds,
       firstId,
       lastId,
       baseOpacities,
+      carmaLayerId: vectorLayer.carmaLayerId,
     });
+    if (vectorLayer.carmaLayerId) {
+      this.loadingTracker.registerSources(vectorLayer.carmaLayerId, sourceIds);
+    }
     this.syncToMapInstance();
     if (this.debugLog)
       console.log(
@@ -540,10 +651,14 @@ export class StyleComposer {
     this.managed.set(id, {
       sourceIds,
       layerIds,
-      spriteId: null,
+      spriteIds: [],
       firstId,
       lastId,
+      carmaLayerId: opts.carmaLayerId,
     });
+    if (opts.carmaLayerId) {
+      this.loadingTracker.registerSources(opts.carmaLayerId, sourceIds);
+    }
     return { sourceId, uniqueColors };
   }
 
@@ -585,11 +700,59 @@ export class StyleComposer {
     const crsParam = version >= "1.3.0" ? "crs" : "srs";
     const isWmts = layer.type === "wmts";
 
-    const tileUrl = `${layer.url}${
-      layer.url.endsWith("?") ? "" : "?"
-    }service=WMS&version=${version}&request=GetMap&layers=${
+    if (layer.nonTiled) {
+      this.map.addSource(sourceId, createNonTiledImageSource());
+      const nonTiledLayerId = `${id}-raster`;
+      this.map.addLayer(
+        {
+          id: nonTiledLayerId,
+          type: "raster",
+          source: sourceId,
+          paint: {
+            "raster-opacity": layer.opacity ?? 1,
+            ...("rasterPaint" in layer ? layer.rasterPaint : undefined),
+          },
+          metadata: {
+            "z-index": opts.zIndex,
+            "layer-id": id,
+            ...createNonTiledMetadata({
+              url: layer.url,
+              layers: layer.layers,
+              styles: layer.styles,
+              version: layer.version,
+              format: layer.format,
+              transparent: layer.transparent,
+              isWmts,
+            }),
+          },
+        } as LayerSpecification,
+        lastId
+      );
+
+      this.managed.set(id, {
+        sourceIds: [sourceId],
+        layerIds: [nonTiledLayerId],
+        spriteIds: [],
+        firstId,
+        lastId,
+        carmaLayerId: layer.carmaLayerId,
+      });
+      if (layer.carmaLayerId) {
+        this.loadingTracker.registerSources(layer.carmaLayerId, [sourceId]);
+      }
+      return;
+    }
+
+    const querySep = layer.url.endsWith("?")
+      ? ""
+      : layer.url.includes("?")
+      ? "&"
+      : "?";
+    const tileUrl = `${
+      layer.url
+    }${querySep}service=WMS&version=${version}&request=GetMap&layers=${
       layer.layers
-    }&styles=${layer.styles || (isWmts ? "default" : "")}&format=${
+    }&styles=${layer.styles || ""}&format=${
       layer.format || "image/png"
     }&transparent=${layer.transparent ? "true" : "false"}${
       isWmts ? "&type=wmts" : ""
@@ -621,10 +784,82 @@ export class StyleComposer {
     this.managed.set(id, {
       sourceIds: [sourceId],
       layerIds: [layerId],
-      spriteId: null,
+      spriteIds: [],
       firstId,
       lastId,
+      carmaLayerId: layer.carmaLayerId,
     });
+    if (layer.carmaLayerId) {
+      this.loadingTracker.registerSources(layer.carmaLayerId, [sourceId]);
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Pre-built raster tiles sub-style ({z}/{x}/{y} URL template)
+  // -------------------------------------------------------------------------
+
+  addTilesSubStyle(
+    id: string,
+    layer: Extract<LibreLayer, { type: "tiles" }>,
+    opts: AddRasterSubStyleOptions
+  ): void {
+    if (this.managed.has(id)) return;
+
+    const firstId = `---${id}:first---`;
+    const lastId = `---${id}:last---`;
+    const sanitized = layer.name.replace(/[^a-zA-Z0-9]/g, "-");
+    const sourceId = `${id}::${sanitized}`;
+
+    this.map.addLayer(
+      {
+        id: lastId,
+        type: "background",
+        paint: { "background-opacity": 0 },
+      } as LayerSpecification,
+      opts.beforeId
+    );
+    this.map.addLayer(
+      {
+        id: firstId,
+        type: "background",
+        paint: { "background-opacity": 0 },
+      } as LayerSpecification,
+      lastId
+    );
+
+    this.map.addSource(sourceId, {
+      type: "raster",
+      tiles: [layer.url],
+      tileSize: layer.tileSize ?? 256,
+      ...(layer.maxZoom !== undefined ? { maxzoom: layer.maxZoom } : {}),
+    });
+
+    const layerId = `${id}-raster`;
+    this.map.addLayer(
+      {
+        id: layerId,
+        type: "raster",
+        source: sourceId,
+        paint: {
+          "raster-opacity": layer.opacity ?? 1,
+          ...("rasterPaint" in layer ? layer.rasterPaint : undefined),
+        },
+        metadata: { "z-index": opts.zIndex, "layer-id": id },
+      } as LayerSpecification,
+      lastId
+    );
+
+    this.managed.set(id, {
+      sourceIds: [sourceId],
+      layerIds: [layerId],
+      spriteIds: [],
+      firstId,
+      lastId,
+      carmaLayerId: layer.carmaLayerId,
+    });
+    if (layer.carmaLayerId) {
+      this.loadingTracker.registerSources(layer.carmaLayerId, [sourceId]);
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -684,23 +919,57 @@ export class StyleComposer {
     this.managed.set(id, {
       sourceIds: [sourceId],
       layerIds: [layerId],
-      spriteId: null,
+      spriteIds: [],
       firstId,
       lastId,
+      carmaLayerId: layer.carmaLayerId,
     });
+    if (layer.carmaLayerId) {
+      this.loadingTracker.registerSources(layer.carmaLayerId, [sourceId]);
+    }
   }
 
   // -------------------------------------------------------------------------
   // In-place opacity updates (no layer rebuild)
   // -------------------------------------------------------------------------
 
-  updateVectorOpacity(styleUrl: string, opacity: number): void {
-    const id = slugifyUrl(styleUrl);
+  /**
+   * Put the requested transition on an opacity property, or MapLibre's default
+   * back if this property carried an override and no longer asks for one.
+   * Writes on every declared update rather than memoizing the value: a rebuilt
+   * layer starts without the paint property, and a memo that survived the
+   * rebuild would silently swallow the transition it is supposed to apply.
+   */
+  private applyOpacityTransition(
+    namespacedId: string,
+    prop: string,
+    transition?: OpacityTransition
+  ): void {
+    const key = `${namespacedId}::${prop}`;
+    if (transition === undefined) {
+      if (!this.overriddenOpacityTransitions.delete(key)) return;
+      this.map.setPaintProperty(namespacedId, `${prop}-transition`, {
+        duration: MAPLIBRE_DEFAULT_TRANSITION_MS,
+      });
+      return;
+    }
+    const spec =
+      typeof transition === "number" ? { duration: transition } : transition;
+    this.map.setPaintProperty(namespacedId, `${prop}-transition`, spec);
+    this.overriddenOpacityTransitions.add(key);
+  }
+
+  updateVectorOpacity(
+    id: string,
+    opacity: number,
+    transition?: OpacityTransition
+  ): void {
     const entry = this.managed.get(id);
     if (!entry) return;
     const bases = entry.baseOpacities;
 
     const applyProp = (namespacedId: string, prop: string) => {
+      this.applyOpacityTransition(namespacedId, prop, transition);
       const base = bases?.get(`${namespacedId}::${prop}`) ?? 1;
       this.map.setPaintProperty(namespacedId, prop, base * opacity);
     };
@@ -732,11 +1001,16 @@ export class StyleComposer {
     }
   }
 
-  updateRasterOpacity(id: string, opacity: number): void {
+  updateRasterOpacity(
+    id: string,
+    opacity: number,
+    transition?: OpacityTransition
+  ): void {
     const entry = this.managed.get(id);
     if (!entry) return;
     for (const layerId of entry.layerIds) {
       if (this.map.getLayer(layerId)) {
+        this.applyOpacityTransition(layerId, "raster-opacity", transition);
         this.map.setPaintProperty(layerId, "raster-opacity", opacity);
       }
     }
@@ -760,6 +1034,13 @@ export class StyleComposer {
   removeSubStyle(id: string): void {
     const entry = this.managed.get(id);
     if (!entry) return;
+
+    if (entry.carmaLayerId) {
+      this.loadingTracker.unregisterSources(
+        entry.carmaLayerId,
+        entry.sourceIds
+      );
+    }
 
     // Remove layers in reverse order (top to bottom) and clean up ID mappings
     for (let i = entry.layerIds.length - 1; i >= 0; i--) {
@@ -800,18 +1081,26 @@ export class StyleComposer {
       }
     }
 
-    // Remove sprite (only when no other sub-style still references it)
-    if (entry.spriteId) {
-      const remaining = (this.spriteRefs.get(entry.spriteId) ?? 1) - 1;
+    // Remove sprites (only when no other sub-style still references them)
+    for (const spriteId of entry.spriteIds) {
+      const remaining = (this.spriteRefs.get(spriteId) ?? 1) - 1;
       if (remaining <= 0) {
-        this.spriteRefs.delete(entry.spriteId);
+        this.spriteRefs.delete(spriteId);
         try {
-          this.map.removeSprite(entry.spriteId);
+          this.map.removeSprite(spriteId);
         } catch {
           // Already gone
         }
       } else {
-        this.spriteRefs.set(entry.spriteId, remaining);
+        this.spriteRefs.set(spriteId, remaining);
+      }
+    }
+
+    for (const layerId of entry.layerIds) {
+      for (const key of [...this.overriddenOpacityTransitions]) {
+        if (key.startsWith(`${layerId}::`)) {
+          this.overriddenOpacityTransitions.delete(key);
+        }
       }
     }
 

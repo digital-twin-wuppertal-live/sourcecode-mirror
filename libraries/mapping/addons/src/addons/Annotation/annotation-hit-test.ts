@@ -1,0 +1,68 @@
+import type { ExcalidrawImperativeAPI } from "@excalidraw/excalidraw/types/types";
+
+import { isClipProxy } from "./annotation-clip";
+
+/** a client point read into scene units, see `annotation-plane` */
+export type ScreenToScene = (
+  clientX: number,
+  clientY: number
+) => { x: number; y: number } | null;
+
+const TOLERANCE = 6;
+
+type Bounds = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  angle: number;
+};
+
+const contains = (element: Bounds, x: number, y: number, pad: number) => {
+  const centreX = element.x + element.width / 2;
+  const centreY = element.y + element.height / 2;
+  const sin = Math.sin(-element.angle);
+  const cos = Math.cos(-element.angle);
+  const dx = x - centreX;
+  const dy = y - centreY;
+  const turnedX = centreX + dx * cos - dy * sin;
+  const turnedY = centreY + dx * sin + dy * cos;
+  return (
+    turnedX >= element.x - pad &&
+    turnedX <= element.x + element.width + pad &&
+    turnedY >= element.y - pad &&
+    turnedY <= element.y + element.height + pad
+  );
+};
+
+/**
+ * Whether the drawing has anything under a client point. The point is taken
+ * into the scene the same way the plane transform takes it, when there is one:
+ * on a tilted or rotated map the flat reading below is not where the user is
+ * pointing. See `annotation-plane`.
+ */
+export const sceneHasElementAt = (
+  api: ExcalidrawImperativeAPI | null,
+  box: HTMLElement | null,
+  clientX: number,
+  clientY: number,
+  screenToScene?: ScreenToScene
+): boolean => {
+  if (!api || !box) {
+    return false;
+  }
+  const { scrollX, scrollY, zoom } = api.getAppState();
+  const rect = box.getBoundingClientRect();
+  const at = screenToScene?.(clientX, clientY);
+  const x = at ? at.x : (clientX - rect.left) / zoom.value - scrollX;
+  const y = at ? at.y : (clientY - rect.top) / zoom.value - scrollY;
+  const pad = TOLERANCE / zoom.value;
+
+  return api.getSceneElements().some(
+    (element) =>
+      !element.isDeleted &&
+      // the element a copy stands for is in here too, at its full size
+      !isClipProxy(element) &&
+      contains(element, x, y, pad)
+  );
+};

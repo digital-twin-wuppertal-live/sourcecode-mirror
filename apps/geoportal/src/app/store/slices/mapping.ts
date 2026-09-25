@@ -10,10 +10,10 @@ import type {
   SavedLayerConfig,
 } from "@carma-mapping/layers";
 import {
+  entryHasInfoView,
   findStackEntryByLayerId,
   flattenLayerStack,
   isLayerGroup,
-  layerGroupHasInfoView,
 } from "@carma-mapping/layers";
 import {
   SELECTED_LAYER_INDEX,
@@ -22,10 +22,23 @@ import {
 } from "@carma-appframeworks/portals";
 
 import { extractCarmaConfig } from "@carma-commons/utils";
+import { isAlwaysOnTop } from "@carma-mapping/addons";
 
 import { RootState } from "..";
+import {
+  dropUnrestorableRows,
+  stripInteractionButtons,
+} from "../persisted-layer-stack";
 import { shouldShowAdhocLayerInLayerList } from "../../helper/adhoc-feature-utils";
-import { backgroundLayerCatalog, layerMap } from "../../config";
+import {
+  backgroundLayerCatalog,
+  DEFAULT_BACKGROUND_LAYER_ID,
+  DEFAULT_BACKGROUND_SELECTED_LAYER_ID,
+} from "../../config";
+import {
+  backgroundConfig,
+  toBackgroundLayer,
+} from "../../config/backgroundConfig";
 
 type MapLibreMapEntry = {
   id: string;
@@ -36,10 +49,46 @@ const defaultOpacity = 0.2;
 
 type GeoportalMappingState = Omit<MappingState, "layers"> & {
   layers: LayerStackEntry[];
+  /**
+   * The base map chosen inside each background category, keyed by category id.
+   * `backgroundLayer` is the one of the active category, with its `id` swapped
+   * for the category id.
+   */
+  selectedByCategory: Record<string, BackgroundLayer>;
+  /**
+   * Ids of the permanent rows the visitor has hidden. Their own row cannot
+   * hold it: a permanent row is rebuilt from the config on every boot, so the
+   * choice is kept here, where it is persisted, and the owning addon reads it
+   * back through its channel.
+   */
+  hiddenPermanentLayers: string[];
 };
 
-const getPinning = (entry: LayerStackEntry) =>
-  isLayerGroup(entry) ? undefined : entry.pinned;
+/**
+ * Where an entry sits in the stack. Besides an explicit `pinned`, the
+ * "alwaysOnTop" tool pins a layer last, which is what keeps it above the layers
+ * added after it, in the renderers and in the layer bar alike.
+ */
+export const getPinning = (entry: LayerStackEntry) =>
+  isLayerGroup(entry)
+    ? undefined
+    : entry.pinned ?? (isAlwaysOnTop(entry) ? "last" : undefined);
+
+/** the stack in pinning order, entries of one block keeping their order */
+const applyPinning = (layers: LayerStackEntry[]): LayerStackEntry[] => [
+  ...layers.filter((l) => getPinning(l) === "first"),
+  ...layers.filter((l) => !getPinning(l)),
+  ...layers.filter((l) => getPinning(l) === "last"),
+];
+
+/**
+ * A row the app owns rather than the visitor, e.g. a default workflow's. It
+ * survives every removal path, which is guarded here rather than in the layer
+ * bar alone: "Alle Karteninhalte entfernen", loading a saved configuration and
+ * the carma-map-api all reach the stack through these two reducers.
+ */
+const isPermanent = (entry: LayerStackEntry): boolean =>
+  !isLayerGroup(entry) && entry.permanent === true;
 
 const resolveStackTarget = (
   state: GeoportalMappingState,
@@ -56,9 +105,6 @@ const resolveLayer = (
   const target = resolveStackTarget(state, id);
   return target && !isLayerGroup(target) ? target : undefined;
 };
-
-const entryHasInfoView = (entry: LayerStackEntry): boolean =>
-  isLayerGroup(entry) ? layerGroupHasInfoView(entry) : !entry.skipSelection;
 
 const shouldSkipEntryForSelection = (
   entry: LayerStackEntry | undefined,
@@ -84,52 +130,31 @@ const shouldSkipEntryForSelection = (
   return false;
 };
 
+const initialSelectedByCategory: Record<string, BackgroundLayer> =
+  Object.fromEntries(
+    backgroundConfig.categories.map((category) => [
+      category.id,
+      toBackgroundLayer(category.defaultEntry ?? category.entries[0]),
+    ])
+  );
+
 const initialState: GeoportalMappingState = {
   layers: [],
+  hiddenPermanentLayers: [],
   savedLayerConfigs: [],
   selectedLayerIndex: SELECTED_LAYER_INDEX.NO_SELECTION,
   activeInteractionLayerID: null,
   activeInteractionButtonID: null,
   paleOpacityValue: defaultOpacity,
-  libreMapRef: null,
   maplibreMaps: [],
   layersIdle: false,
   backgroundLayers: backgroundLayerCatalog,
 
-  selectedMapLayer: {
-    title: "Stadtplan",
-    id: "stadtplan",
-    opacity: 1.0,
-    description: layerMap["stadtplan"].description,
-    inhalt: layerMap["stadtplan"].inhalt,
-    eignung: layerMap["stadtplan"].eignung,
-    visible: true,
-    layerType: "wmts",
-    layers: layerMap["stadtplan"].layers,
-  },
-
-  selectedLuftbildLayer: {
-    title: "Luftbildkarte 03/24",
-    id: "luftbild",
-    opacity: 1.0,
-    description: layerMap["luftbild"].description,
-    inhalt: layerMap["luftbild"].inhalt,
-    eignung: layerMap["luftbild"].eignung,
-    visible: true,
-    layerType: "wmts",
-    layers: layerMap["luftbild"].layers,
-  },
+  selectedByCategory: initialSelectedByCategory,
 
   backgroundLayer: {
-    title: "Stadtplan",
-    id: "karte",
-    opacity: 1.0,
-    description: layerMap["stadtplan"].description,
-    inhalt: layerMap["stadtplan"].inhalt,
-    eignung: layerMap["stadtplan"].eignung,
-    visible: true,
-    layerType: "wmts",
-    layers: layerMap["stadtplan"].layers,
+    ...toBackgroundLayer(DEFAULT_BACKGROUND_SELECTED_LAYER_ID),
+    id: DEFAULT_BACKGROUND_LAYER_ID,
   },
 
   showLeftScrollButton: false,
@@ -151,11 +176,14 @@ const slice = createSlice({
   initialState,
   reducers: {
     setLayers(state, action) {
+      // A permanent layer is the app's own row and no stack the user or a URL
+      // brings along carries it, so it is kept across a replacement.
       const incoming = action.payload as LayerStackEntry[];
-      const pinnedFirst = incoming.filter((l) => getPinning(l) === "first");
-      const unpinned = incoming.filter((l) => !getPinning(l));
-      const pinnedLast = incoming.filter((l) => getPinning(l) === "last");
-      state.layers = [...pinnedFirst, ...unpinned, ...pinnedLast];
+      const incomingIds = new Set(incoming.map((entry) => entry.id));
+      const kept = state.layers.filter(
+        (entry) => isPermanent(entry) && !incomingIds.has(entry.id)
+      );
+      state.layers = applyPinning([...incoming, ...kept]);
     },
     appendLayer(state, action: PayloadAction<LayerStackEntry>) {
       const entry = action.payload;
@@ -186,15 +214,48 @@ const slice = createSlice({
         }
       }
     },
+    /**
+     * Hide or show a permanent row. Kept apart from `changeVisibility`, which
+     * writes `visible` on the stack entry: the owning addon hands its row over
+     * again on every readout change and would overwrite that.
+     */
+    setPermanentLayerHidden(
+      state,
+      action: PayloadAction<{ id: string; hidden: boolean }>
+    ) {
+      const { id, hidden } = action.payload;
+      const kept = state.hiddenPermanentLayers.filter(
+        (entryId) => entryId !== id
+      );
+      state.hiddenPermanentLayers = hidden ? [...kept, id] : kept;
+    },
     updateLayer(state, action: PayloadAction<Layer>) {
       const layer = resolveLayer(state, action.payload.id);
       if (layer) {
         Object.assign(layer, action.payload);
+        // the update may be what pins the layer: the catalog sync hands the
+        // layer its tools after it is already on the map
+        state.layers = applyPinning(state.layers);
       }
     },
-    removeLayer(state, action: PayloadAction<string>) {
-      const id = action.payload;
+    /**
+     * `force` is the owner's way out: an addon whose engine is no longer
+     * mounted takes its own permanent row down, where every visitor-facing
+     * path is refused. Plain string payloads keep working.
+     */
+    removeLayer(
+      state,
+      action: PayloadAction<string | { id: string; force?: boolean }>
+    ) {
+      const { id, force = false } =
+        typeof action.payload === "string"
+          ? { id: action.payload, force: false }
+          : action.payload;
       const found = findStackEntryByLayerId(state.layers, id);
+      const target = found?.member ?? found?.entry;
+      if (!force && target && isPermanent(target)) {
+        return;
+      }
       let newLayers = state.layers;
       if (found?.member) {
         const group = found.entry as LayerGroup;
@@ -251,10 +312,9 @@ const slice = createSlice({
     },
 
     changeBackgroundOpacity(state, action) {
-      if (state.backgroundLayer.id === "karte") {
-        state.selectedMapLayer.opacity = action.payload.opacity;
-      } else {
-        state.selectedLuftbildLayer.opacity = action.payload.opacity;
+      const selected = state.selectedByCategory[state.backgroundLayer.id];
+      if (selected) {
+        selected.opacity = action.payload.opacity;
       }
       state.backgroundLayer.opacity = action.payload.opacity;
       if (action.payload.opacity === 1) {
@@ -449,14 +509,16 @@ const slice = createSlice({
     setActiveInteractionButtonID(state, action: PayloadAction<string | null>) {
       state.activeInteractionButtonID = action.payload;
     },
-    setSelectedMapLayer(state, action: PayloadAction<BackgroundLayer>) {
-      state.selectedMapLayer = action.payload;
+    /** remember which base map a category shows; does not activate it */
+    setSelectedByCategory(
+      state,
+      action: PayloadAction<{ categoryId: string; layer: BackgroundLayer }>
+    ) {
+      state.selectedByCategory[action.payload.categoryId] =
+        action.payload.layer;
     },
     setBackgroundLayer(state, action: PayloadAction<BackgroundLayer>) {
       state.backgroundLayer = action.payload;
-    },
-    setSelectedLuftbildLayer(state, action: PayloadAction<BackgroundLayer>) {
-      state.selectedLuftbildLayer = action.payload;
     },
 
     setShowLeftScrollButton(state, action) {
@@ -488,9 +550,6 @@ const slice = createSlice({
     setClickFromInfoView(state, action: PayloadAction<boolean>) {
       state.clickFromInfoView = action.payload;
     },
-    setLibreMapRef(state, action: PayloadAction<any>) {
-      state.libreMapRef = action.payload;
-    },
     setMaplibreMaps(state, action: PayloadAction<MapLibreMapEntry>) {
       const entry = action.payload;
       const current = state.maplibreMaps;
@@ -518,6 +577,7 @@ export const {
   updateLayer,
   removeLayer,
   removeLastLayer,
+  setPermanentLayerHidden,
 
   appendSavedLayerConfig,
   deleteSavedLayerConfig,
@@ -534,9 +594,8 @@ export const {
   setPreviousSelectedLayerIndex,
   setActiveInteractionLayerID,
   setActiveInteractionButtonID,
-  setSelectedMapLayer,
+  setSelectedByCategory,
   setBackgroundLayer,
-  setSelectedLuftbildLayer,
   setShowLeftScrollButton,
   setShowRightScrollButton,
   setShowFullscreenButton,
@@ -553,7 +612,6 @@ export const {
   setLayerFilterState,
   setLayerDynamicStylingSelection,
   updateLayerFromLayerInfo,
-  setLibreMapRef,
   setMaplibreMaps,
   setConfigSelection,
   setLayersIdle,
@@ -561,6 +619,15 @@ export const {
 
 export const getBackgroundLayer = (state: RootState) =>
   state.mapping.backgroundLayer;
+
+export const getHiddenPermanentLayers = (state: RootState): string[] =>
+  state.mapping.hiddenPermanentLayers;
+
+/** whether the visitor has hidden this permanent row */
+export const getPermanentLayerHidden = (
+  state: RootState,
+  id: string
+): boolean => state.mapping.hiddenPermanentLayers.includes(id);
 export const getClickFromInfoView = (state: RootState) =>
   state.mapping.clickFromInfoView;
 export const getFocusMode = (state: RootState) => state.mapping.focusMode;
@@ -574,8 +641,14 @@ export const getLayerStack = (state: RootState): LayerStackEntry[] =>
  * The layers the map actually draws, with groups flattened into their members.
  * This is what renderers, feature info, print and share consume, so grouping
  * stays invisible to them.
+ *
+ * Pinning is applied here as well, not only in the reducers: a stack rehydrated
+ * from storage was ordered by whatever was stored, and a layer pinned by its
+ * "alwaysOnTop" tool has to end up on top there too.
  */
-export const getLayers = createSelector([getLayerStack], flattenLayerStack);
+export const getLayers = createSelector([getLayerStack], (stack) =>
+  flattenLayerStack(applyPinning(stack))
+);
 export const getSavedLayerConfigs = (state: RootState) =>
   state.mapping.savedLayerConfigs;
 export const getSelectedLayerIndex = (state: RootState) =>
@@ -589,10 +662,14 @@ export const getSelectedLayerIndexIsBackground = (state: RootState): boolean =>
 export const getSelectedLayerIndexIsAddedLayer = (state: RootState): boolean =>
   state.mapping.selectedLayerIndex > SELECTED_LAYER_INDEX.NO_SELECTION;
 
-export const getSelectedMapLayer = (state: RootState) =>
-  state.mapping.selectedMapLayer;
-export const getSelectedLuftbildLayer = (state: RootState) =>
-  state.mapping.selectedLuftbildLayer;
+export const getSelectedByCategory = (state: RootState) =>
+  state.mapping.selectedByCategory;
+/** the base map behind the active background category, with its own id */
+export const getSelectedBackgroundEntry = createSelector(
+  [getSelectedByCategory, getBackgroundLayer],
+  (selectedByCategory, backgroundLayer): BackgroundLayer | undefined =>
+    selectedByCategory[backgroundLayer.id]
+);
 export const getShowFullscreenButton = (state: RootState) =>
   state.mapping.showFullscreenButton;
 export const getShowHamburgerMenu = (state: RootState) =>
@@ -610,7 +687,6 @@ export const getActiveInteractionLayerID = (state: RootState) =>
 export const getActiveInteractionButtonID = (state: RootState) =>
   state.mapping.activeInteractionButtonID;
 export const getStartDrawing = (state: RootState) => state.mapping.startDrawing;
-export const getLibreMapRef = (state: RootState) => state.mapping.libreMapRef;
 export const getMaplibreMaps = (state: RootState) => state.mapping.maplibreMaps;
 export const getConfigSelection = (state: RootState) =>
   state.mapping.configSelection;
@@ -639,21 +715,15 @@ export const getLayerState = createSelector(
   [
     getLayerStack,
     getBackgroundLayer,
-    getSelectedMapLayer,
-    getSelectedLuftbildLayer,
+    getSelectedByCategory,
     getSelectedLayerIndex,
   ],
-  (
-    layers,
+  (layers, backgroundLayer, selectedByCategory, selectedLayerIndex) => ({
+    // this state is what gets shared, and a share config is a stored stack:
+    // no live React elements, no rows the app rebuilds on its own
+    layers: dropUnrestorableRows(stripInteractionButtons(layers)),
     backgroundLayer,
-    selectedMapLayer,
-    selectedLuftbildLayer,
-    selectedLayerIndex
-  ) => ({
-    layers,
-    backgroundLayer,
-    selectedMapLayer,
-    selectedLuftbildLayer,
+    selectedByCategory,
     selectedLayerIndex,
   })
 );

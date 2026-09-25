@@ -9,7 +9,6 @@ import {
   faHouseChimney,
   faInfo,
   faMinus,
-  faMountainCity,
   faPlus,
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
@@ -28,7 +27,6 @@ import { ENDPOINT, isAreaType } from "@carma-commons/resources";
 import type { SearchResultItem } from "@carma-mapping/fuzzy-search";
 import { detectWebGLContext } from "@carma-commons/utils";
 import { ResponsiveStatusBar } from "@carma-commons/ui/components";
-
 import {
   PitchingCompass,
   useCesiumContext,
@@ -39,10 +37,12 @@ import { flyViewStateInCesium } from "@carma-mapping/engines-interop/view-state"
 import {
   MapFrameworkSwitcher,
   FullscreenControl,
+  LibreMapLocateControl,
   LibrePitchingCompass,
   RoutedMapLocateControl,
   useMapFrameworkSwitcherContext,
 } from "@carma-mapping/components";
+import { AddonHost, useAddonState } from "@carma-mapping/addons";
 import { LibFuzzySearch } from "@carma-mapping/fuzzy-search";
 import {
   Control,
@@ -50,19 +50,24 @@ import {
   ControlLayout,
   ControlLayoutCanvas,
 } from "@carma-mapping/map-controls-layout";
+import { useCameraRestriction } from "@carma-mapping/engines/maplibre";
 import { useFeatureFlags } from "@carma-providers/feature-flag";
+import { useLibreMapEnabled } from "../../../hooks/useLibreMapEnabled";
 import { MeasurementControl } from "@carma-commons/measurements";
+import { useLibreContext } from "@carma-mapping/contexts";
 
 import { GeoportalMap } from "../GeoportalMap.tsx";
-import LibreGeoportalMap from "../LibreGeoportalMap.tsx";
+import { MapLoadingProgress } from "../MapLoadingProgress";
 import { ObliqueControls } from "../../../oblique/components/ObliqueControls.tsx";
 import LayerWrapper from "../../layers/LayerWrapper.tsx";
 
 import useLeafletZoomControls from "../../../hooks/leaflet/useLeafletZoomControls.ts";
 import { useDispatchSachdatenInfoText } from "../../../hooks/useDispatchSachdatenInfoText.ts";
 import { useFeatureInfoModeCursorStyle } from "../../../hooks/useFeatureInfoModeCursorStyle.ts";
+import { useHighlightModeSync } from "../../../hooks/useHighlightModeSync.ts";
+import { useAnnotationModeSync } from "../../../hooks/useAnnotationModeSync";
 import { useMapStyleReduxSync } from "../../../hooks/useMapStyleReduxSync";
-import { useTourRefCollabLabels } from "../../../hooks/useTourRefCollabLabels.ts";
+import { useTourRefCollabLabels } from "../../../hooks/useTourRefCollabLabels.tsx";
 import { useWindowSize } from "../../../hooks/useWindowSize.ts";
 import { useGeoportalCesiumNavigationShortcuts } from "../../../hooks/useGeoportalCesiumNavigationShortcuts.ts";
 import { useGeoportalHomeValues } from "../../../hooks/useGeoportalInitialValues.ts";
@@ -79,10 +84,13 @@ import {
 } from "../../../store/slices/features.ts";
 import {
   getConfigSelection,
-  getLibreMapRef,
   getShowFullscreenButton,
   getShowLocatorButton,
 } from "../../../store/slices/mapping.ts";
+import {
+  getLibreDrawMode,
+  setLibreDrawMode,
+} from "../../../store/slices/measurements.ts";
 import {
   getUIMode,
   getUIVisibleControls,
@@ -126,12 +134,16 @@ const MapWrapper = () => {
     ) ||
     "ontouchstart" in window;
 
-  const showLibreMap = flags.featureFlagLibreMap;
+  const showLibreMap = useLibreMapEnabled();
+  // The map-frame loading bar reports terrain and shadow work, so it only
+  // belongs on screen while the shadow simulation is switched on.
+  const [shadowSimulationState] = useAddonState("shadowSimulation");
+  const showLoadingProgress = shadowSimulationState?.enabled ?? false;
 
   const wrapperRef = useRef<HTMLDivElement>(null);
 
   // State and Selectors
-  const libreMapRef = useSelector(getLibreMapRef);
+  const { map: libreMap } = useLibreContext();
 
   // Get framework switcher state from context
   const {
@@ -147,6 +159,10 @@ const MapWrapper = () => {
   const uiMode = useSelector(getUIMode);
   const isModeMeasurement = uiMode === UIMode.MEASUREMENT;
   const isModeFeatureInfo = uiMode === UIMode.FEATURE_INFO;
+  const isRotationLockedForPrint = uiMode === UIMode.PRINT && showLibreMap;
+
+  const cameraRestricted = useCameraRestriction(libreMap)?.restricted ?? true;
+  const libreDrawMode = useSelector(getLibreDrawMode);
   const showFullscreenButton = useSelector(getShowFullscreenButton);
   const showLocatorButton = useSelector(getShowLocatorButton);
   const visibleControls = useSelector(getUIVisibleControls);
@@ -175,6 +191,9 @@ const MapWrapper = () => {
     homeCenter,
     homeLeafletZoom,
     homeMaplibreZoom,
+    homeMaplibrePitch,
+    homeMaplibreBearing,
+    homeTooltip,
   } = useGeoportalHomeValues();
   const handleCesiumHomeClick = useCallback(() => {
     if (!isCesium) return;
@@ -214,8 +233,6 @@ const MapWrapper = () => {
   const { routedMapRef: routedMap } =
     useContext<typeof TopicMapContext>(TopicMapContext);
 
-  const [showTerrain, setShowTerrain] = useState(false);
-
   const [zenButtonHidden, setZenButtonHidden] = useState(false);
   const [isHoveringZenButton, setIsHoveringZenButton] = useState(false);
 
@@ -228,11 +245,26 @@ const MapWrapper = () => {
       return () => clearTimeout(timer);
     }
   }, [zenMode, zenButtonHidden, isHoveringZenButton]);
+  const prevIsModeMeasurementRef = useRef(isModeMeasurement);
+  useEffect(() => {
+    const prev = prevIsModeMeasurementRef.current;
+    prevIsModeMeasurementRef.current = isModeMeasurement;
+
+    if (!prev && isModeMeasurement) {
+      dispatch(setLibreDrawMode("line"));
+      return;
+    }
+    if (prev && !isModeMeasurement && libreDrawMode !== "none") {
+      dispatch(setLibreDrawMode("none"));
+    }
+  }, [dispatch, isModeMeasurement, libreDrawMode]);
 
   // custom hooks
 
   useDispatchSachdatenInfoText();
   useMapStyleReduxSync();
+  useHighlightModeSync();
+  useAnnotationModeSync();
 
   const tourRefLabels = useTourRefCollabLabels();
   const { gazData } = useGazData();
@@ -243,7 +275,7 @@ const MapWrapper = () => {
     dispatch(toggleUIMode(UIMode.FEATURE_INFO));
   };
 
-  useFeatureInfoModeCursorStyle();
+  useFeatureInfoModeCursorStyle("routedMap", libreMap);
 
   const { setSelection } = useSelection();
 
@@ -270,6 +302,7 @@ const MapWrapper = () => {
 
   return (
     <ControlLayout>
+      <AddonHost />
       {zenMode ? (
         <Control position="topcenter" order={10}>
           <button
@@ -321,9 +354,7 @@ const MapWrapper = () => {
                     onClick={(event) => {
                       if (isLeaflet) {
                         if (showLibreMap) {
-                          if (libreMapRef.current) {
-                            libreMapRef.current.zoomIn();
-                          }
+                          libreMap?.zoomIn();
                         } else {
                           zoomInLeaflet();
                         }
@@ -345,9 +376,7 @@ const MapWrapper = () => {
                     onClick={(event) => {
                       if (isLeaflet) {
                         if (showLibreMap) {
-                          if (libreMapRef.current) {
-                            libreMapRef.current.zoomOut();
-                          }
+                          libreMap?.zoomOut();
                         } else {
                           zoomOutLeaflet();
                         }
@@ -379,11 +408,13 @@ const MapWrapper = () => {
                     ref={tourRefLabels.alignNorth}
                     dataTestId="compass-control"
                     disabled={
-                      (isLeaflet && !showLibreMap) || isObliquePreviewVisible
+                      (isLeaflet && (!showLibreMap || cameraRestricted)) ||
+                      isRotationLockedForPrint ||
+                      isObliquePreviewVisible
                     }
                   >
-                    {showLibreMap ? (
-                      <LibrePitchingCompass map={libreMapRef.current} />
+                    {showLibreMap && !isCesium ? (
+                      <LibrePitchingCompass map={libreMap} />
                     ) : (
                       <PitchingCompass />
                     )}
@@ -395,7 +426,6 @@ const MapWrapper = () => {
                   className="!rounded-t-none !border-t-[1px]"
                   ref={tourRefLabels.toggle2d3d}
                   useDisabledStyle={false}
-
                   // nativeTooltip={true}
                 />
               </div>
@@ -406,29 +436,41 @@ const MapWrapper = () => {
               <FullscreenControl tourRef={tourRefLabels?.fullScreen} />
             </Control>
           )}
-          {!isObliquePreviewVisible && showLocatorButton && isMobile && (
+          {!isObliquePreviewVisible && showLocatorButton && showLibreMap && (
             <Control position="topleft" order={30}>
-              <RoutedMapLocateControl
-                tourRefLabels={tourRefLabels}
-                disabled={false}
-                nativeTooltip={true}
-              />
+              <LibreMapLocateControl disabled={false} nativeTooltip={true} />
             </Control>
           )}
+          {!isObliquePreviewVisible &&
+            showLocatorButton &&
+            !showLibreMap &&
+            isMobile && (
+              <Control position="topleft" order={30}>
+                <RoutedMapLocateControl
+                  tourRefLabels={tourRefLabels}
+                  disabled={false}
+                  nativeTooltip={true}
+                />
+              </Control>
+            )}
           {!isObliquePreviewVisible && visibleControls.home && (
             <Control position="topleft" order={40}>
               <Tooltip
-                title="Auf Rathaus Barmen positionieren"
+                title={homeTooltip ?? "Auf Rathaus Barmen positionieren"}
                 placement="right"
               >
                 <ControlButtonStyler
                   ref={tourRefLabels.home}
                   onClick={() => {
                     if (showLibreMap) {
-                      if (libreMapRef.current) {
-                        libreMapRef.current.flyTo({
+                      if (isCesium) {
+                        handleCesiumHomeClick();
+                      } else {
+                        libreMap?.flyTo({
                           center: [homeCenter[1], homeCenter[0]],
                           zoom: homeMaplibreZoom,
+                          pitch: homeMaplibrePitch,
+                          bearing: homeMaplibreBearing,
                           essential: true,
                         });
                       }
@@ -453,8 +495,6 @@ const MapWrapper = () => {
               <MeasurementControl
                 position="topleft"
                 order={60}
-                disabled={isLeaflet && showLibreMap}
-                useDisabledStyle={isLeaflet && showLibreMap}
                 tooltip={
                   isModeMeasurement
                     ? "Messungsmodus ausschalten"
@@ -498,32 +538,6 @@ const MapWrapper = () => {
             </Control>
           )}
 
-          {!isObliquePreviewVisible && showLibreMap && (
-            <Control position="topleft" order={80}>
-              <Tooltip title={"Terrain"} placement="right">
-                <ControlButtonStyler
-                  onClick={() => {
-                    if (libreMapRef.current.terrain) {
-                      libreMapRef.current?.setTerrain(null);
-                      setShowTerrain(false);
-                    } else {
-                      libreMapRef.current?.setTerrain({
-                        source: "terrainSource",
-                        exaggeration: 1,
-                      });
-                      setShowTerrain(true);
-                    }
-                  }}
-                  className="font-semibold"
-                >
-                  <FontAwesomeIcon
-                    icon={faMountainCity}
-                    className={showTerrain ? "text-[#1677ff]" : ""}
-                  />
-                </ControlButtonStyler>
-              </Tooltip>
-            </Control>
-          )}
           {!isObliquePreviewVisible && visibleControls.layerButtons && (
             <Control position="topcenter" order={10}>
               <LayerWrapper />
@@ -565,14 +579,13 @@ const MapWrapper = () => {
             marginTop: zenMode || !visibleControls.navbar ? "0px" : "-56px",
           }}
         >
-          {showLibreMap && isLeaflet ? (
-            <LibreGeoportalMap />
-          ) : (
-            <>
-              <GeoportalMap height={height} width={width} allow3d={allow3d} />
-              {isCesium && <ObliqueControls hideControls={zenMode} />}
-            </>
+          <GeoportalMap height={height} width={width} allow3d={allow3d} />
+          {showLibreMap && !isCesium && showLoadingProgress && (
+            <MapLoadingProgress
+              navbarVisible={!zenMode && visibleControls.navbar}
+            />
           )}
+          {isCesium && <ObliqueControls hideControls={zenMode} />}
         </div>
       </ControlLayoutCanvas>
       <div

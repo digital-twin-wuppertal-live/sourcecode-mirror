@@ -1,7 +1,7 @@
 import { isNaN } from "lodash";
 
 import type { FeatureInfoProperties } from "./contracts/feature-info/feature-info";
-import type { Item, Layer } from "@carma-mapping/layers";
+import type { Item, Layer, ToolEntry } from "@carma-mapping/layers";
 import {
   extractCarmaConfig,
   resolveLayerTitle,
@@ -11,6 +11,7 @@ import envelope from "@turf/envelope";
 import L from "leaflet";
 import { sandboxedEvalExternal } from "@carma-commons/sandbox-eval";
 import localforage from "localforage";
+import { getStyleFeatureBounds } from "./styleFeatureBounds";
 
 export const getInternetExplorerVersion = () => {
   var rV = -1; // Return value assumes failure.
@@ -156,6 +157,61 @@ function isJson(str) {
   return true;
 }
 
+/**
+ * `ToolEntry` accepts three spellings, a bare kind and an object naming its
+ * addon with either `kind` or `addon`, and configs are written in all of them.
+ * Accepting only `kind` here dropped every `{ addon: "..." }` entry on the way
+ * into the layer, without a trace: the addon registry never saw it.
+ */
+const isToolEntry = (value: unknown): value is ToolEntry =>
+  typeof value === "string" ||
+  (typeof value === "object" &&
+    value !== null &&
+    (typeof (value as { kind?: unknown }).kind === "string" ||
+      typeof (value as { addon?: unknown }).addon === "string"));
+
+const parseToolEntries = (value: unknown): ToolEntry[] | null => {
+  let entries = value;
+  if (typeof entries === "string") {
+    try {
+      entries = JSON.parse(entries);
+    } catch {
+      return null;
+    }
+  }
+  if (!Array.isArray(entries)) {
+    return null;
+  }
+  const tools = entries.filter(isToolEntry);
+  return tools.length > 0 ? tools : null;
+};
+
+const toolKind = (tool: ToolEntry): string =>
+  typeof tool === "string" ? tool : "kind" in tool ? tool.kind : tool.addon;
+
+/**
+ * The tools of a layer from both places that may declare them: the style speaks
+ * about itself (a "zoomToExtent" on its own extent), the catalog item about
+ * this deployment's use of it. Both are kept; where they name the same addon
+ * the item wins, since it is the more specific statement.
+ */
+const mergeToolEntries = (
+  styleTools: unknown,
+  itemTools: unknown
+): ToolEntry[] | null => {
+  const fromStyle = parseToolEntries(styleTools) ?? [];
+  const fromItem = parseToolEntries(itemTools) ?? [];
+  if (fromStyle.length === 0) {
+    return fromItem.length > 0 ? fromItem : null;
+  }
+  const itemKinds = new Set(fromItem.map(toolKind));
+  const merged = [
+    ...fromStyle.filter((tool) => !itemKinds.has(toolKind(tool))),
+    ...fromItem,
+  ];
+  return merged.length > 0 ? merged : null;
+};
+
 export const parseToMapLayer = async (
   layer: Item,
   forceWMS: boolean,
@@ -168,6 +224,10 @@ export const parseToMapLayer = async (
   const carmaConf = extractCarmaConfig(layer.keywords);
   const resolvedTitle = resolveLayerTitle(layer);
   const resolvedDescription = resolveLayerDescription(layer);
+  // Addon tools of this layer, from the item and from what the layer declares
+  // about itself; a vector layer's style is read in the vector branch below.
+  let tools: ToolEntry[] | null = mergeToolEntries(carmaConf?.tools, layer.tools);
+  let resolvedStyleJson: object | null = null;
   if (layer.type === "layer" || layer.type === "object") {
     let capabilitiesUrl = layer?.props?.url
       ? layer?.props?.url + "service=WMS&request=GetCapabilities&version=1.1.1"
@@ -215,6 +275,7 @@ export const parseToMapLayer = async (
       let filterConfig = null;
       let dynamicStyling = null;
       if (vectorStyle && typeof vectorStyle === "object") {
+        resolvedStyleJson = vectorStyle;
         zoom = parseZoom(vectorStyle.layers, {
           minzoom: 9,
           maxzoom: 24,
@@ -231,6 +292,7 @@ export const parseToMapLayer = async (
         }
       } else if (typeof vectorStyle === "string" && vectorStyle) {
         zoom = await fetchVectorStyle(vectorStyle).then((result) => {
+          resolvedStyleJson = result;
           const parsedZoom = parseZoom(result.layers, {
             minzoom: 9,
             maxzoom: 24,
@@ -256,12 +318,19 @@ export const parseToMapLayer = async (
         );
       }
 
-      let layerInfo = metaData?.carmaConf?.layerInfo || [];
+      const layerInfo: {
+        keywords?: string[];
+        links?: { url: string; text: string }[];
+        [key: string]: unknown;
+      } = metaData?.carmaConf?.layerInfo ?? {};
+      const styleLinks = Array.isArray(layerInfo.links) ? layerInfo.links : [];
+      const itemLinks = layer.links ?? [];
 
       const metaDataCarmaConf = metaData?.carmaConf as
         | Record<string, unknown>
         | undefined;
       const mergedConf = { ...vectorConf, ...metaDataCarmaConf, ...carmaConf };
+      tools = mergeToolEntries(mergedConf.tools, layer.tools);
 
       newLayer = {
         title: resolvedTitle,
@@ -301,6 +370,10 @@ export const parseToMapLayer = async (
         },
         layerInfo: {
           ...layerInfo,
+          // style links first, then the ones from the catalog item
+          ...(styleLinks.length || itemLinks.length
+            ? { links: [...styleLinks, ...itemLinks] }
+            : {}),
         },
         filterConfig,
         dynamicStyling,
@@ -347,6 +420,7 @@ export const parseToMapLayer = async (
               vectorLegend: layer.vectorLegend,
               thumbnail: layer.thumbnail,
             },
+            ...(layer.links?.length ? { layerInfo: { links: layer.links } } : {}),
           };
           break;
         }
@@ -385,6 +459,7 @@ export const parseToMapLayer = async (
               vectorLegend: layer.vectorLegend,
               thumbnail: layer.thumbnail,
             },
+            ...(layer.links?.length ? { layerInfo: { links: layer.links } } : {}),
           };
           break;
         }
@@ -395,6 +470,14 @@ export const parseToMapLayer = async (
   // Check if newLayer was assigned and throw an error if not
   if (newLayer === null) {
     throw new Error(`Could not parse layer ${layer.id} to map layer.`);
+  }
+
+  if (tools) {
+    newLayer.tools = tools;
+  }
+  const featureBounds = await getStyleFeatureBounds(resolvedStyleJson);
+  if (featureBounds) {
+    newLayer.featureBounds = featureBounds;
   }
   return newLayer;
 };

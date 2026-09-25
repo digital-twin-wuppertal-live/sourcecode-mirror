@@ -7,6 +7,7 @@ import {
   faArrowPointer,
   faLocationDot,
   faRuler,
+  faDrawPolygon,
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 
@@ -42,22 +43,29 @@ const Help46ZeichnenUndMessen = ({ showOverlayFromOutside }) => {
             einstellen, dass alle Messungsgeometrien auf der Zeichnungsebene
             angezeigt werden. Außerdem können Sie hierüber alle
             Messungsgeometrien speichern (dazu unten mehr) oder löschen und auch
-            hier den Messungsmodus beenden.
+            hier den Messungsmodus beenden. 
           </p>
           <p>
-            In der <b>2D-Betrachtung</b> gibt es nur einen allgemeinen Modus für
-            das Messen. Mit Ihren Mausklicks erzeugen Sie darin Messgeometrien
-            in Form von Linienzügen oder geschlossenen Flächen. Dabei werden
-            Stützpunkte der Geometrien von Vektor-Kartenebenen eingefangen, eine
-            Funktion, die als "Snapping" bezeichnet wird. Bei einem Gerät mit
-            externer Tastatur können Sie das Snapping unterdrücken, indem Sie
-            beim Anlegen der Messgeometrie die ALT-Taste gedrückt halten. Einen
-            Linienzug beenden Sie durch erneutes Anklicken des letzten Punktes
-            oder einfach durch einen Doppelklick. Eine Fläche schließen Sie,
-            indem Sie wieder auf den Startpunkt klicken. Die Messergebnisse zu
-            einer einzelnen selektierten Messgeometrie (bei Linienzügen die
-            Streckenlänge, bei Flächen zusätzlich der Flächeninhalt) werden in
-            der Info-Box angezeigt, auch schon fortlaufend während des Anlegens
+            Sowohl in der 2D- als auch in der 3D-Betrachtung stehen Ihnen 
+            unterschiedliche Messmodi zur Verfügung, die in einem Auswahlmenü 
+            unterhalb des Zeichnung-Steuerelementes angeboten werden. Wenn Sie 
+            auf den weißen Hintergrund des Zeichnung-Steuerelements klicken, 
+            wird dieses Auswahlmenü aus- bzw. wieder eingeblendet. Im Auswahlmenü 
+            finden Sie einen Wechselschalter 
+            {" "}<FontAwesomeIcon icon={faArrowPointer} />{" "}"Messung auswählen" 
+            zum Ein- und Ausschalten des Selektionsmodus für bestehende Messgeometrien. 
+            Für neue Messungen stehen die Modi
+            {" "}<FontAwesomeIcon icon={faLocationDot} />{" "}"Punkt
+            messen" (2D und 3D), {" "}<FontAwesomeIcon icon={faRuler} />{" "}
+            "Linienzug messen" (2D) bzw. "Distanz messen" (3D) und 
+            {" "}<FontAwesomeIcon icon={faDrawPolygon} />{" "}"Fläche messen" 
+            (zzt. nur in 2D) zur Verfügung. Nachdem Sie einen dieser Modi 
+            ausgewählt haben, werden in der Info-Box Hinweise dazu angezeigt, wie
+            Sie die jeweiligen Messgeometrien mit Ihren Mausklicks erzeugen können.  
+          </p>
+          <p>
+            Die Messergebnisse zu einer einzelnen selektierten Messgeometrie werden 
+            in der Info-Box angezeigt, auch schon fortlaufend während des Anlegens
             der Messgeometrie. Dort können sie außerdem mit den Pfeiltasten{" "}
             <a className="useAClassNameToRenderProperLink">&lt;&lt;</a> und{" "}
             <a className="useAClassNameToRenderProperLink">&gt;&gt;</a> durch
@@ -70,24 +78,24 @@ const Help46ZeichnenUndMessen = ({ showOverlayFromOutside }) => {
             Messgeometrien sichtbar sind.
           </p>
           <p>
-            In der <b>3D-Betrachtung</b> gibt es unterschiedliche Messmodi. Wenn
-            Sie auf den weißen Hintergrund des Zeichnung-Steuerelements klicken,
-            wird ihnen dazu ein Auswahlmenü angeboten. Mit der Funktion 
-            {" "}<FontAwesomeIcon icon={faLocationDot} />{" "}"Punkt
-            messen" können Sie Punkte auf der Oberfläche des 3D-Modells anlegen
-            und deren dreidimensionale Koordinaten einschließlich der Höhe
-            ermitteln. Wechseln Sie in den Selektionsmodus 
-            {" "}<FontAwesomeIcon icon={faArrowPointer} />{" "}"Messung auswählen" 
-            und klicken Sie auf den Messpunkt oder (einfacher) auf seine Beschriftung,
-            um den Messpunkt auszuwählen. Klicken Sie dann erneut auf seine Beschriftung, 
+            In der <b>2D-Betrachtung</b> werden Stützpunkte der Geometrien von 
+            Vektor-Kartenebenen eingefangen, eine Funktion, die als "Snapping" 
+            bezeichnet wird. Bei einem Gerät mit externer Tastatur können Sie das 
+            Snapping unterdrücken, indem Sie beim Anlegen der Messgeometrie die 
+            ALT-Taste gedrückt halten. 
+          </p>
+          <p>
+            In der <b>3D-Betrachtung</b> ist die Messung von Punkten vor allem 
+            nützlich, um die Höhenverhältnisse zu untersuchen. Klicken Sie im 
+            Selektionsmodus auf einen Messpunkt oder (einfacher) auf seine Beschriftung,
+            um diesen Punkt auszuwählen. Klicken Sie dann erneut auf seine Beschriftung, 
             um zwischen der Anzeige der absoluten und der relativen Höhe des Messpunktes 
             hin- und herzuschalten. Mit der Funktion 
             {" "}<FontAwesomeIcon icon={faArrowsDownToLine} />{" "}"Als Referenzhöhe 
             setzen" in der Info-Box eines Messpunktes können Sie diesen als 
             Bezugspunkt für alle relativen Höhenangaben festlegen. Im Modus 
-            {" "}<FontAwesomeIcon icon={faRuler} />{" "}"Distanz messen" können
-            Sie schräge Strecken auf der Geländeoberfläche messen. Dabei wird
-            automatisch ein rechtwinkliges Hilfsdreieck konstruiert, das Ihnen
+            "Distanz messen" können Sie schräge Strecken auf der Geländeoberfläche messen. 
+            Dabei wird automatisch ein rechtwinkliges Hilfsdreieck konstruiert, das Ihnen
             neben der schrägen Strecke auch den Höhenunterschied und die ebene
             (projizierte) Strecke anzeigt. So können Sie z. B. eine
             Gebäudefassade ausmessen, indem Sie einfach die Diagonale bestimmen.
@@ -95,7 +103,7 @@ const Help46ZeichnenUndMessen = ({ showOverlayFromOutside }) => {
             bei Punkt- wie auch bei Streckenmessungen wird rund um das Fadenkreuz eine
             tellerförmige Messmarke ausgeprägt. Durch die perspektivische Darstellung 
             dieser Marke können Sie erkennen, wie Sie das Fadenkreuz auf die
-            das digitale Modell der Oberfläche aufgesetzt haben. Wenn Sie Im 
+            das digitale Modell der Oberfläche aufgesetzt haben. Wenn Sie im 
             Selektionsmodus eine Messung ausgewählt haben, können Sie durch einen langen
             Klick auf einen Punkt in den Bearbeitungsmodus für diesen Punkt wechseln.
             Sie können ihn auf der Oberfläche des 3D-Modells verschieben, in einer Ebene 

@@ -15,6 +15,23 @@ export type CameraPosition3D = {
   roll: number;
 };
 
+export type HomeView = {
+  lat: number;
+  lng: number;
+  zoom?: number;
+  /** ground altitude in meters at that position, for the 3d camera */
+  altitude?: number;
+  /** camera pitch in degrees, 3d only */
+  pitch?: number;
+  /** camera bearing in degrees, 3d only */
+  bearing?: number;
+  pitch2D?: number;
+  bearing2D?: number;
+  tooltip?: string;
+  overlayLabel?: string;
+  overlayDestination?: string;
+};
+
 /**
  * A switchable base map, as returned by `getBackgroundLayers`. `id` is what you
  * pass to `setBackgroundLayer`; `group` is the base-map group it belongs to
@@ -36,15 +53,25 @@ export interface MapAdapter {
   // mode (cross-cutting) ---------------------------------------------------
   getMode: () => MapMode | null;
   setMode: (mode: MapMode) => void;
+  setHomeOverride?: (view: HomeView | null) => void;
 
   // 2d (leaflet) -----------------------------------------------------------
   getPosition2D: () => Position2D | null;
   zoomIn2D?: () => void;
   zoomOut2D?: () => void;
   flyTo2D?: (lat: number, lng: number, zoom?: number) => void;
+  fitBounds2D?: (
+    minLng: number,
+    minLat: number,
+    maxLng: number,
+    maxLat: number,
+    padding?: number
+  ) => boolean;
   hasLayer?: (id: string) => boolean;
   addLayer?: (id: string) => Promise<boolean>;
   removeLayer?: (id: string) => boolean;
+  setLayerVisibility?: (id: string, visible: boolean) => boolean;
+  getLayerVisibility?: (id: string) => boolean | null;
   getLayerIDs?: () => string[];
   setBackgroundLayer?: (id: string) => boolean;
   getBackgroundLayers?: () => BackgroundLayerInfo[];
@@ -59,6 +86,7 @@ export interface MapAdapter {
 /** Public shape seen by callers of `carma.mapping`. */
 export interface MappingFacade {
   getMode: () => MapMode | null;
+  setHomeOverride: (view: HomeView | null) => void;
 }
 
 /** Public shape seen by callers of `carma.mapping2D`. */
@@ -68,9 +96,19 @@ export interface Mapping2DFacade {
   zoomIn: () => void;
   zoomOut: () => void;
   flyTo: (lat: number, lng: number, zoom?: number) => void;
+  fitBounds: (
+    minLng: number,
+    minLat: number,
+    maxLng: number,
+    maxLat: number,
+    padding?: number
+  ) => boolean;
   hasLayer: (id: string) => boolean;
   addLayer: (id: string) => Promise<boolean>;
   removeLayer: (id: string) => boolean;
+  setLayerVisibility: (id: string, visible: boolean) => boolean;
+  /** Whether a layer on the map is shown; `null` when it is not on the map. */
+  getLayerVisibility: (id: string) => boolean | null;
   getLayerIDs: () => string[];
   setBackgroundLayer: (id: string) => boolean;
   /**
@@ -101,6 +139,7 @@ export const registerMapping = (adapter: MapAdapter | null): void => {
 
 export const mapping: MappingFacade = {
   getMode: () => getAdapter()?.getMode() ?? null,
+  setHomeOverride: (view) => getAdapter()?.setHomeOverride?.(view),
 };
 
 export const mapping2D: Mapping2DFacade = {
@@ -109,9 +148,15 @@ export const mapping2D: Mapping2DFacade = {
   zoomIn: () => getAdapter()?.zoomIn2D?.(),
   zoomOut: () => getAdapter()?.zoomOut2D?.(),
   flyTo: (lat, lng, zoom) => getAdapter()?.flyTo2D?.(lat, lng, zoom),
+  fitBounds: (minLng, minLat, maxLng, maxLat, padding) =>
+    getAdapter()?.fitBounds2D?.(minLng, minLat, maxLng, maxLat, padding) ??
+    false,
   hasLayer: (id) => getAdapter()?.hasLayer?.(id) ?? false,
   addLayer: (id) => getAdapter()?.addLayer?.(id) ?? Promise.resolve(false),
   removeLayer: (id) => getAdapter()?.removeLayer?.(id) ?? false,
+  setLayerVisibility: (id, visible) =>
+    getAdapter()?.setLayerVisibility?.(id, visible) ?? false,
+  getLayerVisibility: (id) => getAdapter()?.getLayerVisibility?.(id) ?? null,
   getLayerIDs: () => getAdapter()?.getLayerIDs?.() ?? [],
   setBackgroundLayer: (id) => getAdapter()?.setBackgroundLayer?.(id) ?? false,
   getBackgroundLayers: () => getAdapter()?.getBackgroundLayers?.() ?? [],

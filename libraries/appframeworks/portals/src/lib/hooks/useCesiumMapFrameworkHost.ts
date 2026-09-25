@@ -31,10 +31,29 @@ export type UseCesiumMapFrameworkHostOptions = {
   allow3d?: boolean;
   /** ANDed into the nav-bridge commit gate (e.g. !isTransitioning). Default true. */
   isCommitEnabled?: boolean;
+  /**
+   * ANDed into the nav-bridge sync gate. Default true, i.e. sync as soon as a
+   * scene exists. Set this when a sibling 2D runtime is subscribed to the same
+   * view state (maplibre), otherwise Cesium keeps publishing while the 2D map
+   * is active and the two engines fight over the camera.
+   */
+  isSyncEnabled?: boolean;
   /** App staging awaited before 2D->3D (memoize). Default undefined = no-op. */
   onBeforeTransitionToCesium?: () => void | Promise<void>;
   /** App teardown awaited before 3D->2D (memoize). Default undefined = no-op. */
   onBeforeTransitionToLeaflet?: () => void | Promise<void>;
+  /**
+   * Optional direct (un-animated) camera handover, for a 2D engine that can hold
+   * the same camera as Cesium. Returning false falls back to the animated
+   * transition, so these are always safe to leave out.
+   */
+  tryDirectTransitionToCesium?: () => boolean | Promise<boolean>;
+  tryDirectTransitionToLeaflet?: () => boolean | Promise<boolean>;
+  /**
+   * Whether the upcoming 3D->2D handover will keep bearing/pitch. Read before the
+   * handover runs, because the hash keys are reduced first.
+   */
+  willPreserveOrientationOnHandover?: () => boolean;
 };
 
 export type CesiumMapFrameworkHost = CesiumNavigationBridgeHandle & {
@@ -55,8 +74,12 @@ export const useCesiumMapFrameworkHost = ({
   getCesiumTerrainProviders,
   allow3d = true,
   isCommitEnabled = true,
+  isSyncEnabled = true,
   onBeforeTransitionToCesium,
   onBeforeTransitionToLeaflet,
+  tryDirectTransitionToCesium,
+  tryDirectTransitionToLeaflet,
+  willPreserveOrientationOnHandover,
 }: UseCesiumMapFrameworkHostOptions): CesiumMapFrameworkHost => {
   const { getScene, isRuntimeReady, initialViewApplied } = useCesiumContext();
   const cesiumScene = getScene();
@@ -135,17 +158,25 @@ export const useCesiumMapFrameworkHost = ({
   const bridge = useCesiumNavigationBridge({
     id: viewAdapterId,
     scene: cesiumScene,
-    isSyncEnabled: Boolean(cesiumScene),
+    isSyncEnabled: Boolean(cesiumScene) && isSyncEnabled,
     isCommitEnabled: isCesium && initialViewApplied && isCommitEnabled,
   });
   const { commitCurrentSceneState, reduceToTopDownView } = bridge;
 
   // Handover to 2D: the cesium writer drops its own 3D-only hash keys, then the
   // app's before-leaflet step runs. lat/lng/zoom are left for the 2D map to own.
+  // A direct handover to a rotatable 2D map keeps bearing/pitch, so only the keys
+  // 2D cannot represent are dropped.
   const handleBeforeTransitionToLeaflet = useCallback(() => {
-    reduceToTopDownView();
+    reduceToTopDownView({
+      keepOrientation: willPreserveOrientationOnHandover?.() ?? false,
+    });
     return onBeforeTransitionToLeaflet?.();
-  }, [reduceToTopDownView, onBeforeTransitionToLeaflet]);
+  }, [
+    reduceToTopDownView,
+    onBeforeTransitionToLeaflet,
+    willPreserveOrientationOnHandover,
+  ]);
 
   // Host owns all switcher transition callbacks. force:true on the post-transition
   // commit bypasses suppressCommitsUntilInteraction.
@@ -157,6 +188,8 @@ export const useCesiumMapFrameworkHost = ({
       },
       onBeforeTransitionToCesium,
       onBeforeTransitionToLeaflet: handleBeforeTransitionToLeaflet,
+      tryDirectTransitionToCesium,
+      tryDirectTransitionToLeaflet,
     });
   }, [
     allow3d,
@@ -165,6 +198,8 @@ export const useCesiumMapFrameworkHost = ({
     onBeforeTransitionToCesium,
     handleBeforeTransitionToLeaflet,
     registerCallbacks,
+    tryDirectTransitionToCesium,
+    tryDirectTransitionToLeaflet,
   ]);
 
   return {

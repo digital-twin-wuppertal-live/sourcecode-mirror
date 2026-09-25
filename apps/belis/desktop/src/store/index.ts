@@ -1,7 +1,9 @@
 import { configureStore } from "@reduxjs/toolkit";
 import { createLogger } from "redux-logger";
-import { persistReducer } from "redux-persist";
+import { persistReducer, createTransform } from "redux-persist";
 import localForage from "localforage";
+import { serializeValues, deserializeValues } from "../helper/draftSerialize";
+import type { ExpertTypeState } from "./slices/expertSearch";
 import authSlice from "./slices/auth";
 import mapSettings from "./slices/mapSettings";
 import ui from "./slices/ui";
@@ -12,30 +14,23 @@ import featuresFormsSlice from "./slices/featuresForms";
 import arbeitsauftraegeDraftsSlice from "./slices/arbeitsauftraegeDrafts";
 import measurementsSlice from "./slices/measurements";
 import creationDefaultsSlice from "./slices/creationDefaults";
-
-console.log("store initializing ....");
+import repeatableChangesSlice from "./slices/repeatableChanges";
+import printSlice from "./slices/print";
+import expertSearchSlice from "./slices/expertSearch";
 
 const devToolsEnabled =
   new URLSearchParams(window.location.search).get("devToolsEnabled") === "true";
-console.log("devToolsEnabled:", devToolsEnabled);
 const stateLoggingEnabledFromSearch = new URLSearchParams(
   window.location.search
 ).get("stateLoggingEnabled");
 
 const inProduction = process.env.NODE_ENV === "production";
 
-console.log("in Production Mode:", inProduction);
 const stateLoggingEnabled =
   (stateLoggingEnabledFromSearch !== null &&
     stateLoggingEnabledFromSearch !== "false") ||
   !inProduction;
 
-console.log(
-  "stateLoggingEnabled:",
-  stateLoggingEnabledFromSearch,
-  "x",
-  stateLoggingEnabled
-);
 const logger = createLogger({
   collapsed: true,
 });
@@ -106,10 +101,40 @@ const creationDefaultsConfig = {
   whitelist: ["defaults", "draftIdToType"],
 };
 
+// The copied field set outlives a reload. Its values are stored already
+// serialized (dayjs → tagged string, same as the featuresForms drafts), so
+// plain JSON persistence is enough — no transform needed here.
+const repeatableChangesConfig = {
+  key: "@belis-desktop.repeatableChanges",
+  storage: localForage,
+  whitelist: ["byType"],
+};
+
 const measurementsConfig = {
   key: "@belis-desktop.measurements",
   storage: localForage,
   whitelist: ["features"],
+};
+
+// The expert-search filter tree can hold dayjs values in `rule.value` (date
+// fields like Prüfdatum), which redux-persist's JSON.stringify would collapse
+// into bare ISO strings and lose on reload. This transform runs each per-type
+// slice through the shared draft (de)serializer, which tags dayjs values with
+// DAYJS_PREFIX on the way to storage and rebuilds them on rehydrate — the same
+// mechanism the featuresForms drafts use.
+const expertSearchTransform = createTransform<ExpertTypeState, unknown>(
+  (typeState) =>
+    serializeValues(typeState as unknown as Record<string, unknown>),
+  (raw) =>
+    deserializeValues(
+      raw as Record<string, unknown>
+    ) as unknown as ExpertTypeState
+);
+
+const expertSearchConfig = {
+  key: "@belis-desktop.expertSearch",
+  storage: localForage,
+  transforms: [expertSearchTransform],
 };
 
 const store = configureStore({
@@ -122,6 +147,10 @@ const store = configureStore({
     ),
     ui: ui.reducer,
     keyTables: keyTables.reducer,
+    print: printSlice.reducer,
+    // Persisted through expertSearchTransform, which serializes the dayjs values
+    // that rule.value can hold (date fields) so they survive a reload.
+    expertSearch: persistReducer(expertSearchConfig, expertSearchSlice.reducer),
     arbeitsauftraege: persistReducer(
       arbeitsauftraegeConfig,
       arbeitsauftraege.reducer
@@ -138,10 +167,11 @@ const store = configureStore({
       creationDefaultsConfig,
       creationDefaultsSlice.reducer
     ),
-    measurements: persistReducer(
-      measurementsConfig,
-      measurementsSlice.reducer
+    repeatableChanges: persistReducer(
+      repeatableChangesConfig,
+      repeatableChangesSlice.reducer
     ),
+    measurements: persistReducer(measurementsConfig, measurementsSlice.reducer),
   },
   devTools: devToolsEnabled === true && inProduction === false,
   middleware,

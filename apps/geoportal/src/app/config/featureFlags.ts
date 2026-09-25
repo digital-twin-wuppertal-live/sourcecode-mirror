@@ -23,6 +23,10 @@ export const featureFlagConfig: FeatureFlagConfig = {
     default: false,
     alias: "ng",
   },
+  featureFlagLeafletMap: {
+    default: false,
+    alias: "leaflet",
+  },
   extendedSharing: {
     default: false,
     alias: "extendedSharing",
@@ -46,6 +50,19 @@ export const featureFlagConfig: FeatureFlagConfig = {
   featureFlagFachzwillinge: {
     default: false,
     alias: "fz",
+  },
+  // makes a checkout with cage behave like one without it, so the open-source
+  // fallbacks can be looked at without unlinking the submodule
+  featureFlagNoCage: {
+    default: false,
+    alias: "nocage",
+  },
+  // tools that are ours rather than the product's: parameter panels, raw
+  // readouts, anything a visitor should never be offered. First user is the
+  // flow field's tuning panel.
+  isAdminMode: {
+    default: false,
+    alias: "admin",
   },
 };
 

@@ -5,6 +5,9 @@ import InfoBoxFotoPreview from "react-cismap/topicmaps/InfoBoxFotoPreview";
 import { TopicMapContext } from "react-cismap/contexts/TopicMapContextProvider";
 import { LightBoxDispatchContext } from "react-cismap/contexts/LightBoxContextProvider";
 
+import { useLibreContext } from "@carma-mapping/contexts";
+import { resolveInfoBoxImageUrl, useAddonState } from "@carma-mapping/addons";
+
 import { additionalInfoFactory } from "@carma-collab/wuppertal/geoportal";
 import { genericSecondaryInfoFooterFactory } from "@carma-collab/wuppertal/commons";
 
@@ -27,6 +30,8 @@ import { truncateString } from "./featureInfoHelper";
 
 import "../infoBox.css";
 import LoadingInfoBox from "./LoadingInfoBox";
+import { useHighlightedFoto } from "./useHighlightedFoto";
+import HighlightFotoOverlayPreview from "./HighlightFotoOverlayPreview";
 
 import versionData from "../../../version.json";
 import {
@@ -80,6 +85,22 @@ const FeatureInfoBox = ({
   const lightBoxDispatchContext = useContext(LightBoxDispatchContext);
 
   const { routedMapRef } = useContext<typeof TopicMapContext>(TopicMapContext);
+  const { map: libreMap } = useLibreContext();
+  // zoom-dependent replacement image, published by the infoBoxZoomImage addon
+  const [infoBoxImage] = useAddonState("infoBoxImage");
+  // the InfoBox mapping can mark a box on the photo (fotoHighlight, pixel
+  // coordinates), e.g. the clicked crack on the crack detection photo. The
+  // preview lays it over the photo as SVG (instant); the lightbox gets a
+  // canvas-rendered copy that is prepared in the background meanwhile.
+  const fotoHighlight = selectedFeature?.properties?.fotoHighlight;
+  const fotoHighlightColor =
+    selectedFeature?.properties?.fotoHighlightColor ??
+    selectedFeature?.properties?.headerColor;
+  const highlightedFotoUrl = useHighlightedFoto(
+    updateUrl(selectedFeature?.properties?.foto),
+    fotoHighlight,
+    fotoHighlightColor
+  );
 
   if (secondaryInfoBoxElements.length > 4) {
     dispatch(setSecondaryInfoBoxElements([]));
@@ -181,6 +202,7 @@ const FeatureInfoBox = ({
         utils.zoomToFeature({
           selectedFeature,
           leafletMap: routedMapRef?.leafletMap?.leafletElement,
+          libreMap: libreMap ?? undefined,
           padding: selectionPadding,
         });
         if (onZoomToFeature) {
@@ -293,16 +315,39 @@ const FeatureInfoBox = ({
     return <></>;
   }
 
+  // a feature without a photo of its own only gets one when the route's
+  // infoBoxZoomImage addon sets showOnFeaturesWithoutPhoto
+  const zoomImageUrl = resolveInfoBoxImageUrl(
+    infoBoxImage,
+    selectedFeature,
+    !!selectedFeature.properties.foto
+  );
+
   const visibleSecondaryInfoBoxElements =
-    selectedFeature.properties.foto || selectedFeature.properties.fotos
+    selectedFeature.properties.foto ||
+    selectedFeature.properties.fotos ||
+    zoomImageUrl
       ? [
           ...additionalSecondaryInfoBoxElements,
           ...featureHeaders,
-          <InfoBoxFotoPreview
-            currentFeature={selectedFeature}
-            lightBoxDispatchContext={lightBoxDispatchContext}
-            urlManipulation={updateUrl}
-          />,
+          fotoHighlight && selectedFeature.properties.foto && !zoomImageUrl ? (
+            <HighlightFotoOverlayPreview
+              key={selectedFeature.properties.foto}
+              currentFeature={selectedFeature}
+              lightBoxDispatchContext={lightBoxDispatchContext}
+              urlManipulation={updateUrl}
+              highlight={fotoHighlight}
+              color={fotoHighlightColor}
+              lightboxPhotoUrl={highlightedFotoUrl}
+            />
+          ) : (
+            <InfoBoxFotoPreview
+              currentFeature={selectedFeature}
+              lightBoxDispatchContext={lightBoxDispatchContext}
+              urlManipulation={updateUrl}
+              {...(zoomImageUrl ? { getPhotoUrl: () => zoomImageUrl } : {})}
+            />
+          ),
         ]
       : [...additionalSecondaryInfoBoxElements, ...featureHeaders];
 

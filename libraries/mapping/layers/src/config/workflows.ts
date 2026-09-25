@@ -1,10 +1,16 @@
 import { faListCheck } from "@fortawesome/free-solid-svg-icons";
 
 import {
+  isAvailable,
+  type Availability,
+  type AvailabilityContext,
+} from "@carma-commons/utils";
+
+import {
   LAYER_ENTITY_TYPES,
-  type GroupToolEntry,
   type Item,
   type LayerGroupInfo,
+  type ToolEntry,
 } from "../lib/contracts/carma-layers.d";
 import type { CategoryDefinition } from "./categoryDefinitions";
 
@@ -15,26 +21,50 @@ import type { CategoryDefinition } from "./categoryDefinitions";
  * Workflows are configured per Fachzwilling, so the "Workflows" category only
  * appears on routes that define perspectives.
  */
-export type WorkflowDefinition = {
+export type WorkflowDefinition<TTool extends ToolEntry = ToolEntry> = {
   /** unique within its perspective; used to build the catalog item id */
   id: string;
   title: string;
+  /** where the card is offered; omitted means everywhere its perspective is */
+  availability?: Availability;
   description?: string;
   thumbnail?: string;
   layers?: string[];
   legend?: string[];
   metaDataText?: string;
   links?: { url: string; text: string }[];
-  tools?: GroupToolEntry[];
+  tools?: TTool[];
 };
 
-export type WorkflowPerspective = {
+export type WorkflowPerspective<TTool extends ToolEntry = ToolEntry> = {
   /** unique perspective id; used to build the subcategory + item ids */
   id: string;
   /** subcategory heading shown in the "Workflows" main category */
   title: string;
-  workflows: WorkflowDefinition[];
+  /** where the perspective is offered; omitted means everywhere its route is */
+  availability?: Availability;
+  workflows: WorkflowDefinition<TTool>[];
 };
+
+/**
+ * The perspectives reachable in the given context: unavailable perspectives
+ * and unavailable workflows are dropped, and so is a perspective that ends up
+ * without any workflow. Nesting is an AND: a workflow's own availability only
+ * counts once its perspective has passed.
+ */
+export const filterPerspectivesByAvailability = <TTool extends ToolEntry>(
+  perspectives: WorkflowPerspective<TTool>[],
+  context: AvailabilityContext
+): WorkflowPerspective<TTool>[] =>
+  perspectives
+    .filter((perspective) => isAvailable(perspective.availability, context))
+    .map((perspective) => ({
+      ...perspective,
+      workflows: perspective.workflows.filter((workflow) =>
+        isAvailable(workflow.availability, context)
+      ),
+    }))
+    .filter((perspective) => perspective.workflows.length > 0);
 
 export const WORKFLOWS_CATEGORY_ID = "workflows";
 export const WORKFLOWS_CATEGORY_LABEL = "Workflows";

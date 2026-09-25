@@ -3,6 +3,7 @@ import type { Dispatch, Store } from "@reduxjs/toolkit";
 import type { LatLng, Map as LeafletMap, Point } from "leaflet";
 import type maplibregl from "maplibre-gl";
 import proj4 from "proj4";
+import envelope from "@turf/envelope";
 
 import { functionToFeature, objectToFeature } from "@carma-mapping/utils";
 import type { Layer } from "@carma-mapping/layers";
@@ -303,8 +304,36 @@ export const getCoordinates = (geometry) => {
   }
 };
 
-const createVectorFeature = async (
-  coordinates,
+export const zoomToFeatureMaplibre = (
+  map: maplibregl.Map,
+  feature: { geometry?: any; properties?: { zoom?: number } }
+) => {
+  if (!feature?.geometry) {
+    return;
+  }
+  const { geometry } = feature;
+  if (geometry.type === "Point") {
+    const coordinates = getCoordinates(geometry);
+    map.flyTo({
+      center: [coordinates[0], coordinates[1]],
+      zoom: feature.properties?.zoom ? feature.properties.zoom - 1 : 19,
+      animate: false,
+    });
+  } else {
+    const bbox = envelope(geometry).bbox;
+    map.fitBounds(
+      [
+        [bbox[0], bbox[1]],
+        [bbox[2], bbox[3]],
+      ],
+      {
+        padding: 60,
+      }
+    );
+  }
+};
+
+export const createVectorFeature = async (
   layer,
   selectedVectorFeature,
   map,
@@ -519,6 +548,40 @@ const createVectorFeature = async (
   return feature;
 };
 
+export const PLACEHOLDER_FEATURE_ID = "information";
+
+export const createPlaceholderVectorFeature = (
+  layer: Layer,
+  selectedVectorFeature: any,
+  id: string = PLACEHOLDER_FEATURE_ID
+) => {
+  const coordinates = getCoordinates(selectedVectorFeature.geometry);
+  let headerColor = "#0078a8";
+  if (layer.layerInfo?.accentColor) {
+    headerColor = layer.layerInfo.accentColor;
+  }
+  let header = layer.title || "Information";
+  if (layer.layerInfo?.header) {
+    header = layer.layerInfo.header;
+  }
+  return {
+    properties: {
+      _header: header,
+      accentColor: headerColor,
+      title: "Zu diesem Objekt sind keine weiteren Sachdaten verfügbar.",
+      additionalInfo: `Position: ${coordinates[1].toFixed(
+        5
+      )}, ${coordinates[0].toFixed(5)}`,
+      subtitle: "(Geogr. Breite und Länge in Dezimalgrad, ETRS89)",
+      sourceProps: selectedVectorFeature.properties,
+    },
+    geometry: selectedVectorFeature.geometry,
+    id,
+    vectorId: selectedVectorFeature.id,
+    sourceFeature: selectedVectorFeature,
+  };
+};
+
 export const resolveHit = (
   hits: any[],
   semanticInfo: Record<string, { layers: string[] }> | undefined,
@@ -581,32 +644,10 @@ export const implicitVectorSelection = async (
       return;
     }
 
-    //make sure to get a point from any geometry type
-    const coordinates = getCoordinates(selectedVectorFeature.geometry);
-    let headerColor = "#0078a8";
-    if (layer.layerInfo?.accentColor) {
-      headerColor = layer.layerInfo.accentColor;
-    }
-    let header = layer.title || "Information";
-    if (layer.layerInfo?.header) {
-      header = layer.layerInfo.header;
-    }
-    const feature = {
-      properties: {
-        _header: header,
-        accentColor: headerColor,
-        title: "Zu diesem Objekt sind keine weiteren Sachdaten verfügbar.",
-        additionalInfo: `Position: ${coordinates[1].toFixed(
-          5
-        )}, ${coordinates[0].toFixed(5)}`,
-        subtitle: "(Geogr. Breite und Länge in Dezimalgrad, ETRS89)",
-        sourceProps: selectedVectorFeature.properties,
-      },
-      geometry: selectedVectorFeature.geometry,
-      id: "information",
-    };
-
-    featureHandler(feature, layer);
+    featureHandler(
+      createPlaceholderVectorFeature(layer, selectedVectorFeature),
+      layer
+    );
   }
 
   if (e.hits && layer.queryable) {
@@ -625,11 +666,8 @@ export const implicitVectorSelection = async (
     }
 
     selectionHandler(e, layer);
-    //make sure to get a point from any geometry type
-    const coordinates = getCoordinates(selectedVectorFeature.geometry);
 
     const feature = await createVectorFeature(
-      coordinates,
       layer,
       selectedVectorFeature,
       leafletMap,
@@ -671,14 +709,7 @@ export const onSelectionChangedVector = async (
     );
 
     for (const vector of uniqueHits) {
-      const coordinates = getCoordinates(vector.geometry);
-      const feature = await createVectorFeature(
-        coordinates,
-        layer,
-        vector,
-        map,
-        e.latlng
-      );
+      const feature = await createVectorFeature(layer, vector, map, e.latlng);
       if (feature) {
         dispatch(addVectorInfo(feature));
         dispatch(removeNothingFoundID(layer.id));
@@ -692,31 +723,7 @@ export const onSelectionChangedVector = async (
       e.hit &&
       e.hit.selectionLayerExists
     ) {
-      const selectedVectorFeature = e.hit;
-
-      const coordinates = getCoordinates(selectedVectorFeature.geometry);
-      let headerColor = "#0078a8";
-      if (layer.layerInfo?.accentColor) {
-        headerColor = layer.layerInfo.accentColor;
-      }
-      let header = layer.title || "Information";
-      if (layer.layerInfo?.header) {
-        header = layer.layerInfo.header;
-      }
-      const feature = {
-        properties: {
-          _header: header,
-          accentColor: headerColor,
-          title: "Zu diesem Objekt sind keine weiteren Sachdaten verfügbar.",
-          additionalInfo: `Position: ${coordinates[1].toFixed(
-            5
-          )}, ${coordinates[0].toFixed(5)}`,
-          subtitle: "(Geogr. Breite und Länge in Dezimalgrad, ETRS89)",
-          sourceProps: selectedVectorFeature.properties,
-        },
-        geometry: selectedVectorFeature.geometry,
-        id: layer.id,
-      };
+      const feature = createPlaceholderVectorFeature(layer, e.hit, layer.id);
 
       dispatch(addVectorInfo(feature));
       dispatch(removeNothingFoundID(layer.id));

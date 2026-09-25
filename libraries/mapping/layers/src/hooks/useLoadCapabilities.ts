@@ -1,31 +1,24 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import { useEffect, useMemo, useRef } from "react";
-import { isEqual } from "lodash";
+import { useEffect, useMemo } from "react";
 import { useQueries } from "@tanstack/react-query";
 import WMSCapabilities from "wms-capabilities";
 import type { WMSCapabilitiesJSON } from "wms-capabilities";
-import type { Layer, LayerConfig } from "../lib/contracts/carma-layers.d";
+import type { LayerConfig } from "../lib/contracts/carma-layers.d";
 
 import { useCatalogData } from "../context/LayerCatalogProvider";
 import { baseConfig as config } from "../helper/config";
-import {
-  getLayerStructure,
-  mergeStructures,
-  normalizeObject,
-} from "../helper/layerHelper";
-import type { ActiveLayers } from "../lib/contracts/carma-layers.d";
-import { parseToMapLayer } from "@carma-mapping/utils";
+import { getLayerStructure, mergeStructures } from "../helper/layerHelper";
 import { FALLBACK_CAPABILITIES_BASE_URL } from "../helper/assetUrls";
 import {
-  CAPABILITIES_MAX_AGE,
   CAPABILITIES_QUERY_KEY,
+  PERSISTED_QUERY_GC_TIME,
 } from "../config/CatalogQueryProvider";
 
 // @ts-expect-error
 const parser = new WMSCapabilities();
 
+// 0: the restored capabilities render immediately and refresh in the background
 const CAPABILITIES_STALE_TIME = 0;
-const CAPABILITIES_GC_TIME = CAPABILITIES_MAX_AGE;
 
 const fetchParsedCapabilities = async (
   url: string
@@ -66,15 +59,11 @@ const fetchCapabilities = async (url: string): Promise<WMSCapabilitiesJSON> => {
 
 interface UseLoadCapabilitiesProps {
   loadingAdditionalConfig: boolean;
-  activeLayers: ActiveLayers;
-  updateActiveLayer?: (layer: Layer) => void;
   services: Record<string, LayerConfig>;
 }
 
 export const useLoadCapabilities = ({
   loadingAdditionalConfig,
-  activeLayers,
-  updateActiveLayer,
   services,
 }: UseLoadCapabilitiesProps) => {
   const { replaceLayers, setCapabilitiesLoading, setServiceCategories } =
@@ -100,7 +89,7 @@ export const useLoadCapabilities = ({
       // keeps active-layer updates based on the replaced definitions
       enabled: !loadingAdditionalConfig,
       staleTime: CAPABILITIES_STALE_TIME,
-      gcTime: CAPABILITIES_GC_TIME,
+      gcTime: PERSISTED_QUERY_GC_TIME,
     })),
     combine: (results) => ({
       data: results.map((result) => result.data),
@@ -108,22 +97,8 @@ export const useLoadCapabilities = ({
         .filter((_, index) => results[index].isFetching && !results[index].data)
         .map((service) => service.name),
       anySettled: results.some((result) => result.isSuccess || result.isError),
-      debugStates: wmsServices.map((service, index) => ({
-        name: service.name,
-        status: results[index].status,
-        isFetching: results[index].isFetching,
-        hasData: results[index].data != null,
-      })),
     }),
   });
-
-  useEffect(() => {
-    console.debug(
-      "[CAP CACHE] live query states",
-      JSON.stringify(capabilities.debugStates)
-    );
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [JSON.stringify(capabilities.debugStates)]);
 
   // feed the loading flags consumed by CategoryTabs / CatalogGrid
   useEffect(() => {
@@ -138,14 +113,6 @@ export const useLoadCapabilities = ({
     setCapabilitiesLoading,
   ]);
 
-  // the active layers are only read when a rebuild runs; going through a ref
-  // avoids re-deriving the whole structure on every active layer change
-  const activeLayersRef = useRef(activeLayers);
-  activeLayersRef.current = activeLayers;
-
-  const syncedCapabilitiesRef = useRef<unknown[]>([]);
-  const syncedReplaceLayersRef = useRef<unknown>(undefined);
-
   // Derive allLayers from all capabilities present so far. Runs again when
   // late replace layers arrive, so the result no longer depends on response
   // order.
@@ -154,58 +121,7 @@ export const useLoadCapabilities = ({
       return;
     }
 
-    const syncActiveLayers = (
-      layerStructure: { Title: string; layers: any[] }[]
-    ) => {
-      layerStructure.forEach((category) => {
-        if (category.layers.length > 0) {
-          activeLayersRef.current.forEach(async (activeLayer) => {
-            const foundLayer = category.layers.find(
-              (layer) => layer.id === activeLayer.id
-            );
-            if (foundLayer) {
-              if (activeLayer.dynamicStyling) {
-                return;
-              }
-
-              const updatedLayer = await parseToMapLayer(
-                foundLayer,
-                false,
-                activeLayer.visible,
-                activeLayer.opacity
-              );
-
-              // carry over app-owned annotations that capabilities cannot
-              // produce (e.g. layer-group membership); otherwise the re-parsed
-              // layer never matches and this sync dispatches updateLayer forever
-              const mergedLayer: Layer = {
-                ...updatedLayer,
-                ...(activeLayer.group ? { group: activeLayer.group } : {}),
-                ...(activeLayer.skipSelection
-                  ? { skipSelection: activeLayer.skipSelection }
-                  : {}),
-              };
-
-              if (
-                !isEqual(
-                  normalizeObject(activeLayer),
-                  normalizeObject(mergedLayer)
-                ) &&
-                updateActiveLayer
-              ) {
-                updateActiveLayer(mergedLayer);
-              }
-            }
-          });
-        }
-      });
-    };
-
     let newLayers: any[] = [];
-
-    const replaceLayersChanged =
-      syncedReplaceLayersRef.current !== replaceLayers;
-    syncedReplaceLayersRef.current = replaceLayers;
 
     wmsServices.forEach((service, index) => {
       const wms = capabilities.data[index];
@@ -219,13 +135,6 @@ export const useLoadCapabilities = ({
         skipTopicMaps: true,
         replaceLayers,
       });
-      if (
-        replaceLayersChanged ||
-        syncedCapabilitiesRef.current[index] !== wms
-      ) {
-        syncedCapabilitiesRef.current[index] = wms;
-        syncActiveLayers(layerStructure);
-      }
       newLayers = mergeStructures(layerStructure, newLayers);
     });
 

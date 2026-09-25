@@ -15,6 +15,7 @@ import type { GeoJSONSource } from "maplibre-gl";
 import type { DrawMode } from "./MeasurementControls";
 import {
   LABEL_LAYER_ID,
+  LABEL_ROTATED_LAYER_ID,
   LABEL_SOURCE_ID,
   buildLabelFeatures,
 } from "./labels";
@@ -27,6 +28,12 @@ import {
   setActiveRemoveFeatures,
   setActiveAddFeatures,
 } from "./measurementHostHandle";
+import { useMeasurementsRegistry } from "./MeasurementsContext";
+import {
+  buildMeasurementStyles,
+  MEASUREMENT_SELECTED_PROPERTY,
+  type MeasurementStyleVariant,
+} from "./measurementStyles";
 
 const DEFAULT_SNAP_RADIUS_PX = 20;
 const SNAP_PREVIEW_SOURCE_ID = "carma-measurements-snap-preview";
@@ -34,20 +41,29 @@ const SNAP_PREVIEW_LAYER_ID = "carma-measurements-snap-preview-circle";
 const SNAP_RADIUS_SOURCE_ID = "carma-measurements-snap-radius";
 const SNAP_RADIUS_LAYER_ID = "carma-measurements-snap-radius-circle";
 
+// Both label layers share LABEL_SOURCE_ID and are always created, shown,
+// re-stacked and torn down together; only their alignment differs.
+const ALL_LABEL_LAYER_IDS = [LABEL_LAYER_ID, LABEL_ROTATED_LAYER_ID];
+
 const EMPTY_FC = { type: "FeatureCollection" as const, features: [] };
 const EMPTY_OPTED_IN: ReadonlySet<string> = new Set();
 
 // terra-draw's select mode injects internal helper Point features into its
 // store so it can render draggable vertex/midpoint handles. They live in the
-// same snapshot as real user features and are flagged with
-// `properties.selectionPoint` (vertex grab) or `properties.midPoint`
-// (midpoint grab). Consumers that route the snapshot into app state (sidebar
-// listing, persistence, etc.) must not see them — otherwise a freshly
-// selected 2-vertex line spawns 3 phantom "Punkt" rows.
-const isUserFeature = (feature: Feature): boolean => {
-  const props = (feature.properties ?? {}) as Record<string, unknown>;
-  return !props.selectionPoint && !props.midPoint;
-};
+// same snapshot as real user features and must not leak to consumers — a
+// freshly selected 2-vertex line would otherwise spawn 3 phantom "Punkt"
+// rows in any sidebar / persistence sink. The property key set below covers
+// every guidance flag terra-draw stamps (vertex grabs, midpoints, the
+// in-progress snap dot, closing-vertex hover, etc.).
+const GUIDANCE_PROPERTY_KEYS = [
+  "midPoint",
+  "selectionPoint",
+  "selectionPointFeatureId",
+  "snappingPoint",
+  "coordinatePoint",
+  "closingPoint",
+  "edited",
+] as const;
 
 // Which snapshot features may act as snap targets for a NEW measurement.
 // We want only committed user geometries: skip terra-draw's render helpers
@@ -68,12 +84,32 @@ const isSnapCandidateFeature = (feature: Feature): boolean => {
   );
 };
 
-type TerraDrawMode =
-  | "select"
-  | "point"
-  | "linestring"
-  | "polygon"
-  | "static";
+type TerraDrawMode = "select" | "point" | "linestring" | "polygon" | "static";
+function isGuidanceFeature(feature: Feature): boolean {
+  const props = feature.properties;
+  if (!props) return false;
+  return GUIDANCE_PROPERTY_KEYS.some((key) => Boolean(props[key]));
+}
+
+function stripGuidanceFeatures<T extends Feature>(features: T[]): T[] {
+  return features.filter((f) => !isGuidanceFeature(f));
+}
+
+function stripPseudoSelection<T extends Feature>(features: T[]): T[] {
+  return features.map((f) => {
+    if (!f.properties || !(MEASUREMENT_SELECTED_PROPERTY in f.properties)) {
+      return f;
+    }
+    const { [MEASUREMENT_SELECTED_PROPERTY]: _dropped, ...rest } = f.properties;
+    return { ...f, properties: rest };
+  });
+}
+
+// Back-compat predicate for callers that .filter(isUserFeature) — keeps the
+// imperative onChange path (forwardRef handle, clearAll/deleteFeature) using
+// the same guidance check as the new context publish path.
+const isUserFeature = (feature: Feature): boolean =>
+  !isGuidanceFeature(feature);
 
 function toTerraDrawMode(mode: DrawMode): TerraDrawMode {
   switch (mode) {
@@ -95,16 +131,10 @@ function toTerraDrawMode(mode: DrawMode): TerraDrawMode {
 
 export interface MeasurementHostProps {
   mode: DrawMode;
-  /** Notified with the current terra-draw snapshot at "stable" moments —
-   * specifically on terra-draw's `finish` event (line completed via
-   * double-click, point dropped, etc.). It does NOT fire on every per-cursor
-   * `change` (those storm at 60+/sec during drawing and would create a
-   * dispatch flood for any redux-backed consumer); it also does not yet
-   * fire on select-mode edits or deletes — see the lib's PLANNING doc for
-   * the follow-up that wires those in.
-   *
-   * Consumers typically dispatch the snapshot into app-level state for
-   * sidebar listing, persistence, or hand-off into another form. */
+  /** Legacy callback fired at stable terra-draw moments (`finish`, plus the
+   * imperative `deleteFeature` / `clearAll` paths) with the current user
+   * features. Prefer the context API (`useMeasurements().features`) for new
+   * consumers — this prop is kept for belis during the migration. */
   onChange?: (features: Feature[]) => void;
   /** When true, line / polygon drawing snaps to nearby vertices (and falls
    * back to the closest point on a segment) of the host map's rendered
@@ -157,6 +187,13 @@ export interface MeasurementHostProps {
    *  is read via a ref, so a late-arriving value (redux rehydration tick)
    *  is picked up as long as it lands before terra-draw's initial attach. */
   initialFeatures?: Feature[];
+  /** Visual language for the drawn geometry and its handles. Defaults to
+   *  `"terra-draw"` (terra-draw's own look with bumped selection sizes) so
+   *  existing hosts are unaffected. The geoportal passes `"carma"` to get
+   *  the leaflet-parity palette plus per-vertex handles while drawing.
+   *  Read at terra-draw construction time — a change applies on the next
+   *  attach (basemap swap / remount), not live. */
+  styleVariant?: MeasurementStyleVariant;
 }
 
 /** Imperative handle returned via ref. Lets the host invoke terra-draw
@@ -181,11 +218,24 @@ export interface MeasurementHostHandle {
 }
 
 // Side-effect-only component. Lives as a sibling of <CarmaMap> inside the
-// same LibreContextProvider; it pulls the maplibre map instance from
-// useLibreContext(), creates a TerraDraw instance once the style is ready,
-// re-creates it after every basemap swap (terra-draw's adapter has no
-// auto-recovery), and renders an in-map label layer with German segment
-// lengths for any drawn LineString.
+// same LibreContextProvider AND inside a <MeasurementsProvider>; it pulls
+// the maplibre map instance from useLibreContext(), creates a TerraDraw
+// instance once the style is ready, re-creates it after every basemap swap
+// (terra-draw's adapter has no auto-recovery), and renders an in-map label
+// layer with German segment lengths for any drawn LineString.
+//
+// Two consumer pathways are supported in parallel during the imperative ->
+// context migration:
+//   1. Legacy imperative API — onChange / onSelectionChange / initialFeatures
+//      props, MeasurementHostHandle ref, removeMeasurements module-level
+//      escape hatch. Still used by belis (FeaturesFormsWrapper, save helpers,
+//      BelisMapWrapper).
+//   2. New context API — every stable snapshot is also pushed into the
+//      surrounding <MeasurementsProvider>, and the host self-registers
+//      clearAll/deleteById commands so descendants can drive terra-draw
+//      via useMeasurements() without prop-drilling a ref.
+// Both paths are fed from the same publishSnapshot / event listeners, so
+// callers can migrate incrementally without divergence.
 export const MeasurementHost = forwardRef<
   MeasurementHostHandle,
   MeasurementHostProps
@@ -203,6 +253,7 @@ export const MeasurementHost = forwardRef<
     radiusDebugVisible = false,
     onSelectionChange,
     initialFeatures,
+    styleVariant = "terra-draw",
   },
   ref
 ) {
@@ -210,8 +261,13 @@ export const MeasurementHost = forwardRef<
   const drawRef = useRef<TerraDraw | null>(null);
   const modeRef = useRef(mode);
   modeRef.current = mode;
-  // Read live so we don't have to rebuild the terra-draw instance every time
-  // the consumer hands in a new closure.
+  // Live registry handle from the surrounding MeasurementsProvider. The
+  // hook throws if no provider is mounted above; held in a ref so the
+  // closures created inside the `[map]` effect (publishSnapshot, command
+  // implementations) see the same object across renders.
+  const registry = useMeasurementsRegistry();
+  const registryRef = useRef(registry);
+  registryRef.current = registry;
   const onChangeRef = useRef(onChange);
   onChangeRef.current = onChange;
   // Snapping state is mirrored into refs so the snap callback baked into
@@ -275,14 +331,75 @@ export const MeasurementHost = forwardRef<
   // mutate the geometry afterwards.
   const lastSnapTargetRef = useRef<[number, number] | null>(null);
   // Monotonic counters used to mint per-feature titles (P1, P2, ... for
-  // points; L1, L2, ... for lines). Titles are assigned once at finish-
-  // time and stored in `feature.properties.title` (terra-draw reserves
-  // `mode`, `id`, etc., so we use `title`) — the symbol layer renders
-  // them and consumers can pick them up via getSnapshot. Counters are
-  // re-seeded from the snapshot whenever terra-draw is rebuilt (basemap
+  // points; L1, L2, ... for lines; F1, F2, ... for areas/Flächen). Titles
+  // are assigned once at finish-time and stored in
+  // `feature.properties.title` (terra-draw reserves `mode`, `id`, etc., so
+  // we use `title`) — the symbol layer renders them, the InfoBox shows the
+  // same string, and consumers can pick them up via getSnapshot. Counters
+  // are re-seeded from the snapshot whenever terra-draw is rebuilt (basemap
   // swap) so numbering doesn't restart.
   const pointCounterRef = useRef(0);
   const lineCounterRef = useRef(0);
+  const polygonCounterRef = useRef(0);
+  const pseudoSelectedIdRef = useRef<string | null>(null);
+  const suspendedPseudoIdRef = useRef<string | null>(null);
+  // Bridge to helpers that live inside the `[map]` effect closure
+  // (setPseudoSelected / clearDraft). Assigned while terra-draw is attached
+  // and nulled on teardown, so the mode-change effect below can reset the
+  // highlight and any in-progress draft without duplicating that logic.
+  const drawOpsRef = useRef<{
+    setPseudoSelected: (id: string | null) => void;
+    clearDraft: () => void;
+  } | null>(null);
+
+  const seedTitleCounters = (
+    features: ReadonlyArray<Feature | GeoJSONStoreFeatures>
+  ) => {
+    for (const feature of features) {
+      const title = feature.properties?.title;
+      if (typeof title !== "string") {
+        continue;
+      }
+      const match = /^([PLF])(\d+)$/.exec(title);
+      if (!match) {
+        continue;
+      }
+      const n = Number(match[2]);
+      if (match[1] === "P") {
+        pointCounterRef.current = Math.max(pointCounterRef.current, n);
+      } else if (match[1] === "L") {
+        lineCounterRef.current = Math.max(lineCounterRef.current, n);
+      } else {
+        polygonCounterRef.current = Math.max(polygonCounterRef.current, n);
+      }
+    }
+  };
+
+  const isVertexOfDrawingFeature = (feature: GeoJSONStoreFeatures): boolean => {
+    const parentId = feature.properties?.coordinatePointFeatureId;
+    if (parentId === undefined || parentId === null) {
+      return false;
+    }
+    const draw = drawRef.current;
+    if (!draw) {
+      return false;
+    }
+    try {
+      const parent = draw.getSnapshotFeature(parentId as string | number);
+      return parent?.properties?.currentlyDrawing === true;
+    } catch {
+      // Parent already gone (deleted / finished mid-frame) — no dot.
+      return false;
+    }
+  };
+
+  const stylesRef = useRef(
+    buildMeasurementStyles(styleVariant, isVertexOfDrawingFeature)
+  );
+  stylesRef.current = buildMeasurementStyles(
+    styleVariant,
+    isVertexOfDrawingFeature
+  );
 
   useEffect(() => {
     if (!map) return;
@@ -403,14 +520,21 @@ export const MeasurementHost = forwardRef<
           id: LABEL_LAYER_ID,
           type: "symbol",
           source: LABEL_SOURCE_ID,
+          // Segment lengths are drawn by LABEL_ROTATED_LAYER_ID instead —
+          // they need map-aligned rotation, which is layout-only and
+          // therefore not expressible per feature (see labels.ts). The line
+          // total stays here: it belongs to the whole line, so it reads
+          // left-to-right like the title and area labels.
+          filter: ["!=", ["get", "kind"], "segment"],
           layout: {
             "text-field": ["get", "label"],
             // Two visual styles in one layer driven by `kind`:
-            //   - "title"   → matches the belis fachobjekte label style
+            //   - "title"          → matches the belis fachobjekte label style
             //                 (Open Sans Bold, zoom-interpolated size, left
             //                 anchor with radial offset).
-            //   - "segment" → stays compact (Noto Sans Regular, 12px,
-            //                 centered above the segment).
+            //   - "area"/"total"   → compact (Noto Sans Regular, 12px,
+            //                 centered on its anchor point), matching the
+            //                 segment labels drawn by LABEL_ROTATED_LAYER_ID.
             // Both fonts must be served by the cismet glyph server, which
             // every CARMA app sets via `overrideGlyphs` at the CarmaMap
             // level.
@@ -426,12 +550,7 @@ export const MeasurementHost = forwardRef<
             // and silently drops the whole layer when that rule is broken,
             // so segment labels disappeared along with title labels in an
             // earlier draft.
-            "text-size": [
-              "case",
-              ["==", ["get", "kind"], "title"],
-              16,
-              12,
-            ],
+            "text-size": ["case", ["==", ["get", "kind"], "title"], 16, 12],
             "text-anchor": [
               "case",
               ["==", ["get", "kind"], "title"],
@@ -446,7 +565,10 @@ export const MeasurementHost = forwardRef<
             // much larger and centered; ours doesn't need it.
             "text-offset": [
               "case",
-              ["==", ["get", "kind"], "segment"],
+              // "total" shares the segment offset on purpose: same lift above
+              // its anchor, so the end-of-line total sits at the same visual
+              // distance from the geometry as every segment length.
+              ["in", ["get", "kind"], ["literal", ["segment", "total"]]],
               ["literal", [0, -0.8]],
               ["==", ["get", "kind"], "title"],
               ["literal", [1.2, -0.6]],
@@ -472,6 +594,31 @@ export const MeasurementHost = forwardRef<
           },
         });
       }
+      if (!map.getLayer(LABEL_ROTATED_LAYER_ID)) {
+        map.addLayer({
+          id: LABEL_ROTATED_LAYER_ID,
+          type: "symbol",
+          source: LABEL_SOURCE_ID,
+          filter: ["==", ["get", "kind"], "segment"],
+          layout: {
+            "text-field": ["get", "label"],
+            "text-font": ["literal", ["Noto Sans Regular"]],
+            "text-size": 12,
+            "text-anchor": "center",
+            "text-rotation-alignment": "map",
+            "text-rotate": ["get", "rotation"],
+            "text-pitch-alignment": "viewport",
+            "text-offset": [0, -0.8],
+            "text-allow-overlap": false,
+            "text-ignore-placement": false,
+          },
+          paint: {
+            "text-color": "#111",
+            "text-halo-color": "#FFFFFF",
+            "text-halo-width": 2,
+          },
+        });
+      }
     };
 
     const refreshLabels = () => {
@@ -482,34 +629,119 @@ export const MeasurementHost = forwardRef<
         | undefined;
       if (!source) return;
       try {
-        source.setData(
-          buildLabelFeatures(draw.getSnapshot() as Feature[])
-        );
+        source.setData(buildLabelFeatures(draw.getSnapshot() as Feature[]));
         // Terra-draw's adapter adds its `td-*` render layers lazily on the
         // first feature in each mode — those land ON TOP of any layer we
         // installed during attach() (where no terra-draw features existed
         // yet), which means line strokes end up obscuring the labels.
         // Re-asserting the label layer to the top on every refresh fixes
         // the order; moveLayer on an already-top layer is a near-no-op.
-        if (map.getLayer(LABEL_LAYER_ID)) {
-          map.moveLayer(LABEL_LAYER_ID);
+        for (const layerId of ALL_LABEL_LAYER_IDS) {
+          if (map.getLayer(layerId)) {
+            map.moveLayer(layerId);
+          }
         }
       } catch (e) {
         console.warn("[carma-measurements] label rebuild failed", e);
       }
     };
 
-    const fireOnChange = () => {
+    const publishSnapshot = () => {
       const draw = drawRef.current;
       if (!draw) return;
-      const cb = onChangeRef.current;
-      if (!cb) return;
+      let snapshot: Feature[];
       try {
-        cb((draw.getSnapshot() as Feature[]).filter(isUserFeature));
+        snapshot = draw.getSnapshot() as Feature[];
       } catch (e) {
-        console.warn("[carma-measurements] onChange callback failed", e);
+        console.warn("[carma-measurements] snapshot for publish failed", e);
+        return;
+      }
+      const userFeatures = stripPseudoSelection(
+        stripGuidanceFeatures(snapshot)
+      );
+      // Legacy onChange callback (belis still consumes it). Wrapped in
+      // try/catch so a host-side throw doesn't skip the registry publish.
+      const cb = onChangeRef.current;
+      if (cb) {
+        try {
+          cb(userFeatures);
+        } catch (e) {
+          console.warn("[carma-measurements] onChange callback failed", e);
+        }
+      }
+      // Push to the surrounding MeasurementsProvider so context consumers
+      // see the new snapshot. The registry is non-null by construction —
+      // useMeasurementsRegistry() throws if no provider is mounted above.
+      registryRef.current.publishFeatures(userFeatures);
+    };
+
+    let draftFrame: number | null = null;
+    let lastDraftId: string | null = null;
+    const publishDraft = () => {
+      if (draftFrame !== null) return;
+      draftFrame = requestAnimationFrame(() => {
+        draftFrame = null;
+        const draw = drawRef.current;
+        if (!draw) return;
+        let snapshot: Feature[];
+        try {
+          snapshot = draw.getSnapshot() as Feature[];
+        } catch {
+          return;
+        }
+        const draft =
+          snapshot.find((f) => f.properties?.currentlyDrawing === true) ?? null;
+
+        if (draft === null && lastDraftId === null) return;
+        lastDraftId = draft?.id != null ? String(draft.id) : null;
+
+        if (draft !== null && pseudoSelectedIdRef.current !== lastDraftId) {
+          if (pseudoSelectedIdRef.current !== null) {
+            suspendedPseudoIdRef.current = pseudoSelectedIdRef.current;
+          }
+          setPseudoSelected(null);
+        }
+        registryRef.current.publishDraft(draft);
+      });
+    };
+
+    const clearDraft = () => {
+      if (draftFrame !== null) {
+        cancelAnimationFrame(draftFrame);
+        draftFrame = null;
+      }
+      if (lastDraftId === null) return;
+      lastDraftId = null;
+      registryRef.current.publishDraft(null);
+    };
+
+    const setPseudoSelected = (id: string | null) => {
+      const draw = drawRef.current;
+      if (!draw) return;
+      const previous = pseudoSelectedIdRef.current;
+      if (previous === id) return;
+      if (previous !== null) {
+        try {
+          draw.updateFeatureProperties(previous, {
+            [MEASUREMENT_SELECTED_PROPERTY]: false,
+          });
+        } catch {
+          // Feature already removed — nothing left to un-highlight.
+        }
+      }
+      pseudoSelectedIdRef.current = id;
+      if (id === null) return;
+      try {
+        draw.updateFeatureProperties(id, {
+          [MEASUREMENT_SELECTED_PROPERTY]: true,
+        });
+      } catch (e) {
+        console.warn("[carma-measurements] pseudo-select failed for id", id, e);
+        pseudoSelectedIdRef.current = null;
       }
     };
+
+    drawOpsRef.current = { setPseudoSelected, clearDraft };
 
     // Lazy cache reader: rebuild only when the styledata listener (or a
     // snap-config prop change) has marked the cache dirty. The walk itself
@@ -575,11 +807,51 @@ export const MeasurementHost = forwardRef<
       return hit?.position;
     };
 
+    // Initial hydrate runs at most once per mount — basemap-swap reattach
+    // is covered separately by the snapshot+addFeatures path inside attach().
+    // The flag is captured by closure, not a ref, because it's local to the
+    // current `[map]` effect run; a fresh effect (e.g. on map remount) starts
+    // a new closure and gets a fresh chance to hydrate. Storage is owned by
+    // the surrounding MeasurementsProvider; we just ask it for whatever was
+    // loaded under its `storageKey` and seed terra-draw with the result.
+    let initialHydrateAttempted = false;
+    const hydrateFromStorage = async () => {
+      if (initialHydrateAttempted) return;
+      initialHydrateAttempted = true;
+      let stored: Feature[];
+      try {
+        stored = await registryRef.current.requestInitialFeatures();
+      } catch (e) {
+        console.warn("[carma-measurements] hydrate request failed", e);
+        return;
+      }
+      // Defend against localforage data written by an earlier build that
+      // persisted terra-draw's selection/midpoint helpers — never re-add
+      // them to the store as if they were user geometry.
+      // Also drop a pseudo-selection flag written by an earlier build (or by
+      // a publish that predates the strip above) so a restored measurement
+      // doesn't come back blue without being selected.
+      stored = stripPseudoSelection(stripGuidanceFeatures(stored));
+      if (stored.length === 0) return;
+      const draw = drawRef.current;
+      if (!draw) return;
+      try {
+        draw.addFeatures(stored as GeoJSONStoreFeatures[]);
+      } catch (e) {
+        console.warn("[carma-measurements] hydrate addFeatures failed", e);
+        return;
+      }
+      seedTitleCounters(stored);
+      refreshLabels();
+      publishSnapshot();
+    };
+
     const createDraw = () => {
+      const styles = stylesRef.current;
       const draw = new TerraDraw({
         adapter: new TerraDrawMapLibreGLAdapter({ map }),
         modes: [
-          new TerraDrawPointMode(),
+          new TerraDrawPointMode({ styles: styles.point }),
           new TerraDrawLineStringMode({
             // Host-tunable click-to-finish tolerance. Omitted entirely when the
             // host doesn't set it, so terra-draw keeps its native default (40);
@@ -588,6 +860,7 @@ export const MeasurementHost = forwardRef<
             ...(closePointerDistancePxRef.current !== undefined && {
               pointerDistance: closePointerDistancePxRef.current,
             }),
+            showCoordinatePoints: styles.showCoordinatePoints,
             // toLine + toCoordinate snap to terra-draw's OWN draft features
             // (e.g. the in-progress line itself); toCustom snaps to layers
             // outside terra-draw's store via `snapToCustom`.
@@ -596,16 +869,19 @@ export const MeasurementHost = forwardRef<
               toCoordinate: true,
               toCustom: snapToCustom,
             },
+            styles: styles.lineString,
           }),
           new TerraDrawPolygonMode({
             ...(closePointerDistancePxRef.current !== undefined && {
               pointerDistance: closePointerDistancePxRef.current,
             }),
+            showCoordinatePoints: styles.showCoordinatePoints,
             snapping: {
               toLine: true,
               toCoordinate: true,
               toCustom: snapToCustom,
             },
+            styles: styles.polygon,
           }),
           new TerraDrawSelectMode({
             // Fully editable: drag features, drag/delete vertices, insert
@@ -633,7 +909,7 @@ export const MeasurementHost = forwardRef<
                   draggable: true,
                   coordinates: {
                     snappable: { toCustom: snapToCustom },
-                    midpoints: true,
+                    midpoints: { draggable: true },
                     draggable: true,
                     deletable: true,
                   },
@@ -644,22 +920,14 @@ export const MeasurementHost = forwardRef<
                   draggable: true,
                   coordinates: {
                     snappable: { toCustom: snapToCustom },
-                    midpoints: true,
+                    midpoints: { draggable: true },
                     draggable: true,
                     deletable: true,
                   },
                 },
               },
             },
-            // Make the selected feature actually pop — defaults are too
-            // subtle to read at a glance. Only the SIZE is bumped (~2×
-            // terra-draw's defaults); colors are left at terra-draw's
-            // own defaults.
-            styles: {
-              selectedLineStringWidth: 8,
-              selectedPointWidth: 12,
-              selectionPointWidth: 12,
-            },
+            styles: styles.select,
           }),
         ],
       });
@@ -667,7 +935,17 @@ export const MeasurementHost = forwardRef<
       draw.setMode(toTerraDrawMode(modeRef.current));
       // `change` runs at cursor speed during drawing — keep it cheap (label
       // FC rebuild + map.setData) and don't dispatch into the consumer.
-      draw.on("change", refreshLabels);
+      // Persistence is driven by the provider on every published snapshot,
+      // so we only publish here for "delete" — a stable, instantaneous
+      // moment that terra-draw doesn't follow up with a `finish`. Vertex
+      // drags coalesce into `finish` at drag-end and are covered there.
+      draw.on("change", (_ids, type) => {
+        refreshLabels();
+        publishDraft();
+        if (type === "delete") {
+          publishSnapshot();
+        }
+      });
       // `finish` is terra-draw's "feature is now committed" event (line
       // double-clicked, point dropped). Stable enough to push into redux /
       // app state. See the prop docstring for the trade-off (edits and
@@ -699,6 +977,9 @@ export const MeasurementHost = forwardRef<
               } else if (snap.geometry.type === "LineString") {
                 lineCounterRef.current += 1;
                 nextTitle = `L${lineCounterRef.current}`;
+              } else if (snap.geometry.type === "Polygon") {
+                polygonCounterRef.current += 1;
+                nextTitle = `F${polygonCounterRef.current}`;
               }
               if (nextTitle) {
                 draw.updateFeatureProperties(id, { title: nextTitle });
@@ -730,7 +1011,7 @@ export const MeasurementHost = forwardRef<
             if (snapshot && snapshot.geometry.type === "Point") {
               const [lng, lat] = snapshot.geometry.coordinates as [
                 number,
-                number,
+                number
               ];
               const screen = map.project([lng, lat]);
               const hit = findSnapTarget(
@@ -760,14 +1041,22 @@ export const MeasurementHost = forwardRef<
               }
             }
           } catch (e) {
-            console.warn(
-              "[carma-measurements] post-hoc point snap failed",
-              e
-            );
+            console.warn("[carma-measurements] post-hoc point snap failed", e);
           }
         }
         refreshLabels();
-        fireOnChange();
+        publishSnapshot();
+
+        const finishedByDrawing =
+          modeRef.current === "point" ||
+          modeRef.current === "line" ||
+          modeRef.current === "polygon";
+        if (finishedByDrawing) {
+          clearDraft();
+          suspendedPseudoIdRef.current = null;
+          registryRef.current.publishSelection(String(id));
+          setPseudoSelected(String(id));
+        }
         // Hide the snap preview dot at the moment of commit so it doesn't
         // sit on top of the just-placed feature (the dot and the new point
         // overlap by design — they share the same coord). The next
@@ -780,9 +1069,13 @@ export const MeasurementHost = forwardRef<
       // from the dot too, not just new-line drawing.
       draw.on("select", (id) => {
         hasSelectionRef.current = true;
-        selectedIdRef.current = id != null ? String(id) : null;
+        suspendedPseudoIdRef.current = null;
+        setPseudoSelected(null);
+        const next = id != null ? String(id) : null;
+        selectedIdRef.current = next;
         if (!suppressSelectionCallbackRef.current) {
-          onSelectionChangeRef.current?.(id != null ? String(id) : null);
+          onSelectionChangeRef.current?.(next);
+          registryRef.current.publishSelection(next);
         }
       });
       draw.on("deselect", () => {
@@ -790,6 +1083,7 @@ export const MeasurementHost = forwardRef<
         selectedIdRef.current = null;
         if (!suppressSelectionCallbackRef.current) {
           onSelectionChangeRef.current?.(null);
+          registryRef.current.publishSelection(null);
         }
         // No selection means no expected vertex drag in the immediate
         // future; clear any stale preview so it doesn't hang at the last
@@ -811,7 +1105,12 @@ export const MeasurementHost = forwardRef<
       if (previousDraw) {
         let snapshot: GeoJSONStoreFeatures[] = [];
         try {
-          snapshot = previousDraw.getSnapshot();
+          // Drop terra-draw's selection/midpoint helpers before carrying
+          // the snapshot across a basemap swap, otherwise they'd be
+          // re-added to the fresh store as standalone point features.
+          snapshot = stripGuidanceFeatures(
+            previousDraw.getSnapshot() as unknown as Feature[]
+          ) as unknown as GeoJSONStoreFeatures[];
         } catch (e) {
           console.warn(
             "[carma-measurements] snapshot before reattach failed",
@@ -841,21 +1140,9 @@ export const MeasurementHost = forwardRef<
               e
             );
           }
-          // Re-seed title counters so the next P/L number continues past
-          // any restored feature's title. Without this, the second run
-          // would emit duplicate "P1" / "L1" after a basemap swap.
-          for (const feature of snapshot) {
-            const title = feature.properties?.title;
-            if (typeof title !== "string") continue;
-            const match = /^([PL])(\d+)$/.exec(title);
-            if (!match) continue;
-            const n = Number(match[2]);
-            if (match[1] === "P") {
-              pointCounterRef.current = Math.max(pointCounterRef.current, n);
-            } else {
-              lineCounterRef.current = Math.max(lineCounterRef.current, n);
-            }
-          }
+          // Without this, the second run would emit duplicate "P1" / "L1" /
+          // "F1" after a basemap swap.
+          seedTitleCounters(snapshot);
         }
       } else {
         drawRef.current = createDraw();
@@ -867,7 +1154,10 @@ export const MeasurementHost = forwardRef<
         // snapshot, see the `if (previousDraw)` branch above).
         if (!initialFeaturesConsumedRef.current) {
           initialFeaturesConsumedRef.current = true;
-          const seed = initialFeaturesRef.current;
+
+          const seed = initialFeaturesRef.current
+            ? stripPseudoSelection(initialFeaturesRef.current)
+            : undefined;
           if (seed && seed.length > 0) {
             try {
               drawRef.current.addFeatures(seed as GeoJSONStoreFeatures[]);
@@ -878,23 +1168,9 @@ export const MeasurementHost = forwardRef<
               );
             }
             // Mirror the title-counter re-seed from the basemap-swap branch
-            // so the next finish-created P/L number continues past the
+            // so the next finish-created P/L/F number continues past the
             // restored set.
-            for (const feature of seed) {
-              const title = feature.properties?.title;
-              if (typeof title !== "string") continue;
-              const match = /^([PL])(\d+)$/.exec(title);
-              if (!match) continue;
-              const n = Number(match[2]);
-              if (match[1] === "P") {
-                pointCounterRef.current = Math.max(
-                  pointCounterRef.current,
-                  n
-                );
-              } else {
-                lineCounterRef.current = Math.max(lineCounterRef.current, n);
-              }
-            }
+            seedTitleCounters(seed);
           }
         }
       }
@@ -905,17 +1181,151 @@ export const MeasurementHost = forwardRef<
       // Apply current label visibility — the layer is created with maplibre's
       // default ("visible"), so this only matters when the host has the
       // labels-off prop set at attach time (initial mount or basemap swap).
-      if (map.getLayer(LABEL_LAYER_ID)) {
-        map.setLayoutProperty(
-          LABEL_LAYER_ID,
-          "visibility",
-          labelsVisible ? "visible" : "none"
-        );
+      for (const layerId of ALL_LABEL_LAYER_IDS) {
+        if (map.getLayer(layerId)) {
+          map.setLayoutProperty(
+            layerId,
+            "visibility",
+            labelsVisible ? "visible" : "none"
+          );
+        }
       }
       // Wipe any stale dot / radius left over from the previous style; the
       // next mousemove will paint them back if appropriate.
       setSnapPreview(null);
       setRadiusCircle(null);
+      // Kick off storage hydration on the first attach. Fires once per
+      // mount; basemap-swap reattach is no-op'd by the flag inside the
+      // function (snapshot+addFeatures already carried features across).
+      // Fire-and-forget; the async addFeatures call will refreshLabels
+      // and publish the snapshot once the store is populated.
+      void hydrateFromStorage();
+      // Self-register imperative commands with the surrounding
+      // MeasurementsProvider. Re-registers on basemap-swap reattach so the
+      // closures always point at the live draw instance.
+      registryRef.current.setCommands({
+        clearAll: () => {
+          const draw = drawRef.current;
+          if (!draw) return;
+          try {
+            draw.clear();
+          } catch (e) {
+            console.warn("[carma-measurements] clearAll failed", e);
+            return;
+          }
+          // Reset title counters so the next P/L/F numbering starts at 1
+          // again. A user "delete all" is the right moment to wipe the
+          // monotonic sequence, otherwise the next point lands as e.g.
+          // P7 with no peers in sight.
+          pointCounterRef.current = 0;
+          lineCounterRef.current = 0;
+          polygonCounterRef.current = 0;
+          pseudoSelectedIdRef.current = null;
+          // Push the empty snapshot to context synchronously. The provider
+          // writes the empty array back to localforage on the resulting
+          // features state change; the `change` event also fires here and
+          // takes care of refreshing labels.
+          publishSnapshot();
+        },
+        deleteById: (id) => {
+          const draw = drawRef.current;
+          if (!draw) return;
+          try {
+            draw.removeFeatures([String(id)]);
+          } catch (e) {
+            console.warn("[carma-measurements] deleteById failed", e);
+            return;
+          }
+          publishSnapshot();
+        },
+        selectFeature: (id) => {
+          const draw = drawRef.current;
+          if (!draw) return;
+          if (selectedIdRef.current === id) return; // idempotent
+          // The provider already set its selectedId state; suppress the
+          // terra-draw select callback so we don't echo back through
+          // publishSelection / onSelectionChange.
+          suppressSelectionCallbackRef.current = true;
+          try {
+            if (selectedIdRef.current && selectedIdRef.current !== id) {
+              try {
+                draw.deselectFeature(selectedIdRef.current);
+              } catch {
+                // stale id or already gone — ignore
+              }
+            }
+            draw.selectFeature(id);
+            selectedIdRef.current = id;
+            hasSelectionRef.current = true;
+          } catch (e) {
+            console.warn(
+              "[carma-measurements] commands.selectFeature failed for id",
+              id,
+              e
+            );
+          } finally {
+            suppressSelectionCallbackRef.current = false;
+          }
+        },
+        deselectAll: () => {
+          const draw = drawRef.current;
+          if (!draw) return;
+          const current = selectedIdRef.current;
+          if (!current) return; // idempotent
+          // See selectFeature above — provider state already updated.
+          suppressSelectionCallbackRef.current = true;
+          try {
+            draw.deselectFeature(current);
+            selectedIdRef.current = null;
+            hasSelectionRef.current = false;
+          } catch (e) {
+            console.warn(
+              "[carma-measurements] commands.deselectAll failed for id",
+              current,
+              e
+            );
+          } finally {
+            suppressSelectionCallbackRef.current = false;
+          }
+        },
+        cancelDraft: () => {
+          const draw = drawRef.current;
+          if (!draw) return;
+          // terra-draw has no explicit "abort drawing" call, but leaving a
+          // mode runs its cleanUp, which drops the in-progress feature (the
+          // same path the Escape key takes). Bouncing through the built-in
+          // `static` mode and straight back leaves the user in the mode they
+          // were drawing in, ready for the next measurement. The resulting
+          // `change("delete")` publishes the (unchanged) feature list.
+          const target = toTerraDrawMode(modeRef.current);
+          try {
+            draw.setMode("static");
+            draw.setMode(target);
+          } catch (e) {
+            console.warn("[carma-measurements] cancelDraft failed", e);
+          }
+          clearDraft();
+          // Give the highlight back to the measurement the aborted draft
+          // displaced — the context never stopped selecting it, so map and
+          // infobox would otherwise disagree.
+          const suspended = suspendedPseudoIdRef.current;
+          suspendedPseudoIdRef.current = null;
+          if (suspended !== null) {
+            setPseudoSelected(suspended);
+          }
+        },
+        updateTitle: (id, customTitle) => {
+          const draw = drawRef.current;
+          if (!draw) return;
+          try {
+            draw.updateFeatureProperties(String(id), { customTitle });
+          } catch (e) {
+            console.warn("[carma-measurements] updateTitle failed", e);
+            return;
+          }
+          publishSnapshot();
+        },
+      });
     };
 
     // rAF-throttled snap-preview mousemove handler. Even at 120-200 Hz the
@@ -1006,29 +1416,55 @@ export const MeasurementHost = forwardRef<
     // canvas: "no measurements can be created" on a raster-only basemap
     // (e.g. belis with rvrLight / Liegenschaftskarte / trueOrtho selected).
     //
-    // We gate the *first* attach on `isStyleLoaded()` and listen on every
-    // event that can mark the style as ready (`style.load`, `load`, `idle`,
-    // `styledata`). Whichever fires first with a loaded style wins.
-    // Subsequent `style.load` events (basemap swap) still trigger a full
-    // re-attach via the same `attach()` path — that's why the gate is
-    // initial-only.
+    // We listen on every event that can mark the style as ready
+    // (`style.load`, `load`, `idle`, `styledata`); whichever fires first with
+    // a parsed style wins. Subsequent `style.load` events (basemap swap)
+    // still trigger a full re-attach via the same `attach()` path.
+    //
+    // CRITICAL: the readiness check is `isStyleParsed()`, NOT
+    // `map.isStyleLoaded()`. The latter additionally requires every source's
+    // tiles to have finished loading, which means it stays false during
+    // ordinary overlay-layer streaming (geoportal adds layers via
+    // styleComposer one-by-one). Gating attach on it caused measurement
+    // clicks to be silently dropped until the entire map went idle — the
+    // user had to wait for all requests to settle before drawing worked.
+    // Terra-draw's adapter only needs the style itself to be parsed
+    // (style._loaded === true) to safely register its sources and layers;
+    // tiles can keep streaming around it.
+    const isStyleParsed = (): boolean => {
+      // Fast path: if isStyleLoaded() is true we're definitely good.
+      if (map.isStyleLoaded()) return true;
+      // Slow path: no public MapLibre API exposes "style is parsed but
+      // tiles still loading", so peek at the internal flag. Stable across
+      // MapLibre 3.x and 4.x. style._loaded flips to true right before
+      // `style.load` fires.
+      const internalStyle = (
+        map as unknown as { style?: { _loaded?: boolean } }
+      ).style;
+      return Boolean(internalStyle?._loaded);
+    };
+
     let initialAttachDone = false;
     const tryInitialAttach = () => {
       if (initialAttachDone) return;
-      if (!map.isStyleLoaded()) return;
+      if (!isStyleParsed()) return;
       initialAttachDone = true;
       attach();
     };
     const onStyleLoad = () => {
-      if (initialAttachDone) attach();
-      else tryInitialAttach();
+      // style.load IS the canonical "style is parsed" signal; no gate
+      // needed. Always attach (initial) or reattach (basemap swap).
+      if (!initialAttachDone) {
+        initialAttachDone = true;
+      }
+      attach();
     };
     const onStyleData = () => {
       invalidateSnappableCache();
       tryInitialAttach();
     };
 
-    if (map.isStyleLoaded()) tryInitialAttach();
+    tryInitialAttach();
     map.on("style.load", onStyleLoad);
     map.on("load", tryInitialAttach);
     map.on("idle", tryInitialAttach);
@@ -1056,14 +1492,101 @@ export const MeasurementHost = forwardRef<
         }
         drawRef.current = null;
       }
+      map.getCanvas()?.style.removeProperty("cursor");
+      clearDraft();
+      drawOpsRef.current = null;
+      // Unregister from the provider so consumers don't invoke callbacks
+      // over a stopped terra-draw instance.
+      registryRef.current.setCommands(null);
+      // Remove the host-owned render layers and their sources. Without
+      // this, conditionally-mounted consumers (geoportal toggles the
+      // host on measurement-mode enter/exit) would leak labels and a
+      // stale snap dot onto the map after every exit — the source's
+      // last data lingers and the layer keeps rendering it. terra-draw
+      // cleans up its own `td-*` layers/sources inside stop() above,
+      // so we only handle our own ids here.
+      for (const layerId of [
+        ...ALL_LABEL_LAYER_IDS,
+        SNAP_PREVIEW_LAYER_ID,
+        SNAP_RADIUS_LAYER_ID,
+      ]) {
+        if (map.getLayer(layerId)) {
+          try {
+            map.removeLayer(layerId);
+          } catch (e) {
+            console.warn(
+              "[carma-measurements] could not remove layer on unmount",
+              layerId,
+              e
+            );
+          }
+        }
+      }
+      for (const sourceId of [
+        LABEL_SOURCE_ID,
+        SNAP_PREVIEW_SOURCE_ID,
+        SNAP_RADIUS_SOURCE_ID,
+      ]) {
+        if (map.getSource(sourceId)) {
+          try {
+            map.removeSource(sourceId);
+          } catch (e) {
+            console.warn(
+              "[carma-measurements] could not remove source on unmount",
+              sourceId,
+              e
+            );
+          }
+        }
+      }
     };
   }, [map]);
 
-  // Forward mode changes to the running terra-draw instance after init.
+  // Forward mode changes to the running terra-draw instance after init,
+  // and mirror the prop into the provider so consumers can `useMeasurements()`
+  // and react to the current draw mode without threading the prop separately.
+  //
+  // A mode switch also RESETS the selection — same behaviour as the cesium
+  // measurement tools: picking a different tool drops whatever was selected
+  // (including the highlight a just-finished draw leaves behind) so the
+  // InfoBox falls back to the new mode's help text instead of still
+  // describing the previous measurement.
+  const previousModeRef = useRef<DrawMode | null>(null);
   useEffect(() => {
+    registryRef.current.publishMode(mode);
+    const modeChanged =
+      previousModeRef.current !== null && previousModeRef.current !== mode;
+    previousModeRef.current = mode;
     const draw = drawRef.current;
     if (!draw) return;
     draw.setMode(toTerraDrawMode(mode));
+    if (!modeChanged) return;
+    // Drop the post-finish highlight and any draft the mode switch aborted.
+    suspendedPseudoIdRef.current = null;
+    drawOpsRef.current?.setPseudoSelected(null);
+    drawOpsRef.current?.clearDraft();
+    // Drop terra-draw's own selection. The callback is suppressed because we
+    // publish the cleared selection ourselves right after — no need for the
+    // `deselect` listener to fire a second, identical update.
+    const selected = selectedIdRef.current;
+    if (selected !== null) {
+      suppressSelectionCallbackRef.current = true;
+      try {
+        draw.deselectFeature(selected);
+      } catch (e) {
+        console.warn(
+          "[carma-measurements] deselect on mode change failed for id",
+          selected,
+          e
+        );
+      } finally {
+        suppressSelectionCallbackRef.current = false;
+      }
+      selectedIdRef.current = null;
+      hasSelectionRef.current = false;
+    }
+    onSelectionChangeRef.current?.(null);
+    registryRef.current.publishSelection(null);
   }, [mode]);
 
   // Clear the snap-preview dot the instant snapping is toggled off OR the
@@ -1090,12 +1613,14 @@ export const MeasurementHost = forwardRef<
   // (refreshLabels still runs); only the symbol layer's visibility flips.
   useEffect(() => {
     if (!map) return;
-    if (!map.getLayer(LABEL_LAYER_ID)) return;
-    map.setLayoutProperty(
-      LABEL_LAYER_ID,
-      "visibility",
-      labelsVisible ? "visible" : "none"
-    );
+    for (const layerId of ALL_LABEL_LAYER_IDS) {
+      if (!map.getLayer(layerId)) continue;
+      map.setLayoutProperty(
+        layerId,
+        "visibility",
+        labelsVisible ? "visible" : "none"
+      );
+    }
   }, [map, labelsVisible]);
 
   // React to the snap-radius slider: update the rendered debug circle's
@@ -1185,12 +1710,17 @@ export const MeasurementHost = forwardRef<
           // terra-draw's `removeFeatures` fires only the `change` event,
           // and the `change` listener above is deliberately lightweight
           // (no consumer dispatch — would fire 60×/s during drawing).
-          // Push the post-delete snapshot to the consumer here so redux /
-          // sidebar / any selection cleanup downstream sees the removal.
+          // Push the post-delete snapshot to BOTH consumer surfaces here so
+          // legacy redux/sidebar (via onChange) AND context consumers (via
+          // useMeasurements()) see the removal. Hand-rolled instead of
+          // calling publishSnapshot — that function lives in the [map]
+          // effect's closure and isn't reachable from this useImperativeHandle.
           try {
-            onChangeRef.current?.(
-              (draw.getSnapshot() as Feature[]).filter(isUserFeature)
+            const userFeatures = stripPseudoSelection(
+              stripGuidanceFeatures(draw.getSnapshot() as Feature[])
             );
+            onChangeRef.current?.(userFeatures);
+            registryRef.current.publishFeatures(userFeatures);
           } catch (e) {
             console.warn(
               "[carma-measurements] onChange after delete failed",
@@ -1275,10 +1805,11 @@ export const MeasurementHost = forwardRef<
         }
         // terra-draw's `clear()` fires only `change`, not `finish`, so the
         // consumer-facing onChange (which is plumbed to `finish` for noise
-        // control) never sees the wipe. Push the post-clear snapshot here
-        // so the host can mirror it into its own state.
+        // control) never sees the wipe. Push the post-clear snapshot to
+        // BOTH legacy onChange and the context registry here.
         try {
           onChangeRef.current?.([]);
+          registryRef.current.publishFeatures([]);
         } catch (e) {
           console.warn(
             "[carma-measurements] onChange after clearAll failed",

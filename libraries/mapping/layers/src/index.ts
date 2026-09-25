@@ -3,11 +3,25 @@ export {
   type LayerCatalogProps,
 } from "./components/LayerCatalog";
 export {
+  type AdditionalEntryLayer,
+  type AdditionalLayer,
+  type AdditionalLayerEntry,
+  type AdditionalStyleLayer,
   type LayerCatalogConfig,
   wuppDiscoverProps,
   wuppLayerCatalogConfig,
 } from "./config/layerCatalogConfig";
+export type { CatalogConfigEntry } from "./helper/buildCatalog";
 export type { DiscoverProps } from "./helper/discover";
+export {
+  buildVectorStyleItem,
+  loadVectorStyle,
+  parseVectorStyle,
+  styleUrlTitle,
+  substituteServerUrl,
+  type CarmaVectorStyle,
+  type VectorStyleItemProps,
+} from "./helper/vectorStyleItem";
 export {
   LayerCatalogConfigProvider,
   useLayerCatalogConfig,
@@ -31,6 +45,7 @@ export {
 export type { CatalogSubCategory } from "./hooks/useCatalogSearch";
 export {
   buildWorkflowsCategoryDefinition,
+  filterPerspectivesByAvailability,
   WORKFLOWS_CATEGORY_ID,
   WORKFLOWS_CATEGORY_LABEL,
   type WorkflowDefinition,
@@ -43,19 +58,30 @@ export {
   getEffectiveLayerType,
   getItemMapModes,
   type CatalogFilter,
+  type CatalogFilterExemptions,
   type CatalogFilterField,
   type CatalogFilterGroup,
   type CatalogFilters,
 } from "./helper/catalogFilter";
 export * from "./lib/contracts/carma-config.d";
 export * from "./lib/contracts/carma-layers.d";
-export * from "./helper/groupTools";
+export {
+  filterCategoriesByDeployment,
+  getRestrictedDeployments,
+  isItemAvailableInDeployment,
+  type RestrictableItem,
+} from "./helper/deploymentRestriction";
+export { ASSET_BASE_URL, ASSET_DATA_BASE_URL } from "./helper/assetUrls";
 export * from "./helper/layerHelper";
 export * from "./helper/layerStack";
 export { default as ImageList } from "./about/pages/ImageList";
 export { default as ServiceList } from "./about/pages/ServiceList";
 export { default as LegendDisplay } from "./components/LegendDisplay";
 export { default as SystemMessageBanner } from "./components/SystemMessageBanner";
+export {
+  CustomLayersWarning,
+  getCustomLayers,
+} from "./components/CustomLayersWarning";
 export { useSystemMessages } from "./hooks/useSystemMessages";
 export type {
   SystemMessage,

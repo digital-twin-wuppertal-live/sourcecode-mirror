@@ -5,6 +5,7 @@ import type {
   LayerStackEntry,
   SavedLayerConfig,
 } from "@carma-mapping/layers";
+import type { Availability } from "@carma-commons/utils";
 import { SELECTED_LAYER_INDEX, SelectionItem } from "../..";
 
 // TODO elevate some of the type here to carma-commons
@@ -26,6 +27,9 @@ export type LayerInfo = {
   description: string;
   inhalt: string;
   eignung: string;
+  layerType?: BackgroundLayer["layerType"];
+  /** where this base map is offered; omitted means everywhere */
+  availability?: Availability;
 };
 
 export type LayerMap = {
@@ -112,8 +116,9 @@ export type Settings = {
 export interface LayerState {
   layers: LayerStackEntry[];
   selectedLayerIndex: SELECTED_LAYER_INDEX | number;
-  selectedMapLayer: BackgroundLayer;
-  selectedLuftbildLayer: BackgroundLayer;
+  /** the base map chosen inside each background category, by category id */
+  selectedByCategory: Record<string, BackgroundLayer>;
+  /** the active category's base map, its `id` being the category id */
   backgroundLayer: BackgroundLayer;
 }
 
@@ -139,7 +144,6 @@ export interface MappingState extends LayerState {
   focusMode: boolean;
   startDrawing: boolean;
   clickFromInfoView: boolean;
-  libreMapRef: any;
   maplibreMaps?: any;
   configSelection?: SelectionItem;
   layersIdle: boolean;

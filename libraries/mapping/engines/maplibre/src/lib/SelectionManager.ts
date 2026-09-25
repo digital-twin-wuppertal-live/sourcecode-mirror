@@ -267,10 +267,7 @@ export class SelectionManager {
       }
 
       // Skip if target is the same as source
-      if (
-        targetSource === id.source &&
-        targetSourceLayer === id.sourceLayer
-      )
+      if (targetSource === id.source && targetSourceLayer === id.sourceLayer)
         continue;
 
       const forwardedId: FeatureIdentifier = {
@@ -342,10 +339,7 @@ export class SelectionManager {
     state: { selected?: boolean; hidden?: boolean }
   ): void {
     try {
-      this.map.setFeatureState(
-        buildFeatureStateTarget(this.map, id),
-        state
-      );
+      this.map.setFeatureState(buildFeatureStateTarget(this.map, id), state);
     } catch (e) {
       // Silently ignore errors (feature may not exist in current view)
     }
@@ -386,6 +380,10 @@ export function getCarmaConf(
     | Record<string, unknown>
     | undefined;
   return metadata?.carmaConf as CarmaConf | undefined;
+}
+
+export function isNonSelectable(feature: MapGeoJSONFeature): boolean {
+  return Boolean(getCarmaConf(feature)?.nonSelectable);
 }
 
 /**
@@ -459,10 +457,9 @@ export function applySelectionForwarding(
     };
 
     try {
-      map.setFeatureState(
-        buildFeatureStateTarget(map, forwardedId),
-        { selected }
-      );
+      map.setFeatureState(buildFeatureStateTarget(map, forwardedId), {
+        selected,
+      });
       forwardedFeatures.push(forwardedId);
     } catch {
       // Feature may not exist in this source-layer
@@ -525,4 +522,34 @@ export function resolvePropertyTarget(
   }
 
   return features[0]?.properties as Record<string, unknown> | undefined;
+}
+
+export function enrichHitsWithCarmaInfo(
+  map: MaplibreMap,
+  hits: MapGeoJSONFeature[]
+): MapGeoJSONFeature[] {
+  for (const hit of hits) {
+    const carmaConf = getCarmaConf(hit);
+    hit.properties = {
+      ...hit.properties,
+      carmaInfo: {
+        ...(carmaConf || {}),
+        sourceLayer: hit.sourceLayer,
+        source: hit.source,
+        layerId: hit.layer?.id,
+      },
+    };
+
+    if (carmaConf?.propertyTarget && hit.id != null) {
+      const targetProps = resolvePropertyTarget(
+        map,
+        hit.id,
+        carmaConf.propertyTarget
+      );
+      if (targetProps) {
+        hit.properties.targetProperties = targetProps;
+      }
+    }
+  }
+  return hits;
 }

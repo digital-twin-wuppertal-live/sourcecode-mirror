@@ -19,6 +19,7 @@ import {
 import {
   COLORS_HEX,
   TAILWIND_CLASSNAMES_FULLSCREEN_FIXED,
+  isHttpCacheForced,
   useDeployment,
 } from "@carma-commons/utils";
 import {
@@ -46,8 +47,9 @@ import {
   MapMeasurementsProvider,
   MEASUREMENT_MODE,
 } from "@carma-commons/measurements";
+import { MeasurementsProvider as LibreMeasurementsProvider } from "@carma-mapping/measurements";
 
-import { AddonHost, type Addon } from "@carma-mapping/addons";
+import { type AddonEntry } from "@carma-mapping/addons";
 
 // Local Modules
 import AppErrorFallback from "./components/AppErrorFallback";
@@ -61,10 +63,14 @@ import { ObliqueProvider } from "./oblique/components/ObliqueProvider";
 import { MatomoTracker } from "./MatomoTracker";
 
 import { useAppConfig } from "./hooks/useAppConfig";
+import { useDefaultLayers } from "./hooks/useDefaultLayers";
 import { useManageLayers } from "./hooks/useManageLayers";
 import { useSyncToken } from "./hooks/useSyncToken";
 import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
+import { useLayerLaunchedAddons } from "./hooks/useLayerLaunchedAddons";
+import { withFlowFieldRasterCache } from "./helper/flow-field-raster-cache";
 import { useMeasurementLayerButton } from "./hooks/useMeasurementLayerButton";
+import { useShadowSimulationLayerButton } from "./hooks/useShadowSimulationLayerButton";
 import { useGeoportalAppSearchParams } from "./hooks/use-geoportal-app-search-params";
 import { useAdhocFeatureRehydrate } from "./hooks/use-adhoc-feature-rehydrate";
 
@@ -78,9 +84,12 @@ import {
   CESIUM_CONFIG,
   CONFIG_BASE_URL,
   DEFAULT_CAMERA_FOV_DEG,
+  withDefaultAddons,
 } from "./config/app.config";
 import store, { geoportalInitialHashState } from "./store";
+import { STORE_APP_KEY } from "./store/app-key";
 import { getFeatureFlagConfig } from "./config/featureFlags";
+import { routeFeatureFlagConfig } from "./config/availability";
 
 import { OBLIQUE_CONFIG, CAMERA_ID_TO_DIRECTION } from "./oblique/config";
 
@@ -159,13 +168,20 @@ function MeasurementsWrapper({
       setModeExternal={setModeExternal}
       config={config}
     >
-      {children}
+      <LibreMeasurementsProvider storageKey="geoportal:libreMeasurements">
+        {children}
+      </LibreMeasurementsProvider>
     </MapMeasurementsProvider>
   );
 }
 
 function MeasurementLayerSyncInner() {
   useMeasurementLayerButton();
+  return null;
+}
+
+function ShadowSimulationLayerSyncInner() {
+  useShadowSimulationLayerButton();
   return null;
 }
 
@@ -179,18 +195,23 @@ function App({
   catalogConfig = layerCatalogConfig,
   categories = geoportalCategoryDefinitions,
   addons,
+  routePath,
 }: {
   published?: boolean;
   /** route-specific catalog config, e.g. the filtered /gesundheit catalog */
   catalogConfig?: LayerCatalogConfig;
   /** route-specific category registry, e.g. with a Fachzwilling's Workflows */
   categories?: CategoryDefinition[];
-  addons?: Addon[];
+  addons?: AddonEntry[];
+  /** the route's path, "/" for the default route; scopes per-route addon state and storage */
+  routePath?: string;
 }) {
   const dispatch = useDispatch();
   const showLoginModal = useSelector(getShowLoginModal);
   const isLoadingConfig = useAppConfig(CONFIG_BASE_URL, layerMap);
-  useManageLayers(layerMap);
+  useManageLayers();
+  // the plain geoportal's own layers, see constants/default-layers
+  useDefaultLayers(routePath);
   const syncToken = useSyncToken();
   useKeyboardShortcuts();
   const customFeatureFlags = useSelector(getCustomFeatureFlags);
@@ -210,15 +231,32 @@ function App({
 
   // Memoize config objects to prevent recreation on every render
   const featureFlagsMergedConfig = useMemo(
-    () => ({ ...getFeatureFlagConfig(deployment), ...customFeatureFlags }),
+    () => ({
+      ...getFeatureFlagConfig(deployment),
+      // flags only referenced by a Fachzwilling route availability
+      ...routeFeatureFlagConfig,
+      ...customFeatureFlags,
+    }),
     [deployment, customFeatureFlags]
   );
 
+  // a layer in the stack may launch an engine of its own, which then takes the
+  // route's and the defaults' place for that kind
+  const routeAddons = useLayerLaunchedAddons(addons);
+  // `cache=forced`, read once like the map reads it when it is created
+  const cacheFlowFieldRasters = useMemo(() => isHttpCacheForced(), []);
+  const mergedAddons = useMemo(() => {
+    const all = withDefaultAddons(routeAddons);
+    return cacheFlowFieldRasters ? withFlowFieldRasterCache(all) : all;
+  }, [routeAddons, cacheFlowFieldRasters]);
+
   const { initialMapFramework } = geoportalInitialHashState;
 
-  if (isLoadingConfig === null) {
-    // wait for the loading state to be determined to prevent re-rendering
-    console.debug("[CONFIG] APP - Waiting for config loading state...");
+  if (isLoadingConfig !== false) {
+    // null: the loading state is not determined yet, waiting prevents a
+    // re-render. true: a ?config= is being fetched, and rendering now would
+    // show the persisted layers first and swap them out once it lands.
+    console.debug("[CONFIG] APP - Waiting for config...", { isLoadingConfig });
     return null;
   }
 
@@ -230,6 +268,7 @@ function App({
           categories={categories}
           appKey={APP_KEY}
           storagePrefix={STORAGE_PREFIX}
+          storageScope={STORE_APP_KEY || APP_KEY}
           legacyFavoritesKey={`persist:@${APP_KEY}.${STORAGE_PREFIX}.app.layers`}
         >
           <MatomoTracker>
@@ -243,13 +282,15 @@ function App({
                 mapStyleConfig={geoportalMapStyleConfig}
                 store={store}
                 defaultRuntimeState={defaultCesiumState}
+                topicMapConfig={{ appKey: APP_KEY }}
+                addons={mergedAddons}
+                addonScope={routePath}
               >
                 <ObliqueProvider
                   config={OBLIQUE_CONFIG}
                   fallbackDirectionConfig={CAMERA_ID_TO_DIRECTION}
                 >
                   <GeoportalAppSearchParamsIntegration />
-                  <AddonHost addons={addons} />
                   <MeasurementsWrapper
                     externalMode={mode}
                     setModeExternal={handleSetMode}
@@ -257,6 +298,7 @@ function App({
                   >
                     <AnnotationProvider>
                       <MeasurementLayerSyncInner />
+                      <ShadowSimulationLayerSyncInner />
                       <ErrorBoundary FallbackComponent={AppErrorFallback}>
                         <AdhocFeatureRehydration />
                         <div className={TAILWIND_CLASSNAMES_FULLSCREEN_FIXED}>

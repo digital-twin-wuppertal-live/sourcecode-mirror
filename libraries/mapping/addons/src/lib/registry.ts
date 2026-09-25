@@ -1,39 +1,579 @@
 import type { ComponentType } from "react";
 import type { Map as LeafletMap } from "leaflet";
+import type maplibregl from "maplibre-gl";
 import type { Store } from "redux";
 
-import type { carma } from "@carma-api";
+import type { IconDefinition } from "@fortawesome/fontawesome-svg-core";
+
+import { carma } from "@carma-api";
+import {
+  isAvailable,
+  type Availability,
+  type AvailabilityContext,
+} from "@carma-commons/utils";
 import type {
   GazDataAdditionalModeConfig,
   GazDataSourceConfig,
 } from "@carma-mapping/fuzzy-search";
+import type { LayerStackEntry } from "@carma-mapping/layers";
 
-import { GazetteerModeAddon } from "./GazetteerModeAddon";
-import { GazetteerSourceAddon } from "./GazetteerSourceAddon";
+import { AddonManager, type AddonManagerConfig } from "../addons/AddonManager";
+import type { AddonOverridesState } from "./addon-overrides";
+import {
+  CameraRestriction,
+  type CameraRestrictionConfig,
+} from "../addons/CameraRestriction";
+import { FreeCamera, type FreeCameraConfig } from "../addons/FreeCamera";
+import {
+  AnnotationControl,
+  AnnotationOverlay,
+  type AnnotationControlConfig,
+  type AnnotationOverlayConfig,
+  type AnnotationState,
+} from "../addons/Annotation";
+import { GazetteerMode } from "../addons/GazetteerMode";
+import { GazetteerSource } from "../addons/GazetteerSource";
+import { HomeOverride, type HomeOverrideConfig } from "../addons/HomeOverride";
+import {
+  InfoBoxZoomImage,
+  type InfoBoxImageState,
+  type InfoBoxZoomImageConfig,
+} from "../addons/InfoBoxZoomImage";
+import {
+  NearestFeature,
+  NearestFeatureApotheken,
+  NearestFeatureBahnhoefe,
+  NearestFeatureKrankenhaeuser,
+  type NearestFeatureApothekenConfig,
+  type NearestFeatureBahnhoefeConfig,
+  type NearestFeatureKrankenhaeuserConfig,
+  type NearestFeatureCategoryState,
+  type NearestFeatureConfig,
+} from "../addons/NearestFeature";
+import {
+  OriginSearch,
+  type OriginLocationState,
+  type OriginSearchConfig,
+} from "../addons/OriginSearch";
+import { OutletAddon, type OutletConfig } from "../addons/outlet/Outlet";
+import { ShowScenes, type ShowScenesConfig } from "../addons/ShowScenes";
+import {
+  VectorHighlight,
+  VectorHighlightControl,
+  VectorHighlightDebugPanel,
+  type HighlightModeState,
+  type VectorHighlightConfig,
+  type VectorHighlightControlConfig,
+  type VectorHighlightDebugPanelConfig,
+} from "../addons/VectorHighlight";
+import { LibreTerrain, type LibreTerrainConfig } from "../addons/LibreTerrain";
+import {
+  ShadowSimulation,
+  type ShadowDateState,
+  type ShadowSimulationConfig,
+  type ShadowSimulationState,
+} from "../addons/ShadowSimulation";
+import {
+  LayerVisibility,
+  layerVisibilityTrigger,
+  type LayerVisibilityConfig,
+} from "../addons/LayerVisibility";
+import {
+  VisibleFeatureStatsPanel,
+  type VisibleFeatureStatsPanelConfig,
+} from "../addons/VisibleFeatureStatsPanel";
+import {
+  VisibleFeatureStatsSource,
+  type VisibleFeatureStatsSourceConfig,
+  type VisibleFeatureStatsState,
+} from "../addons/VisibleFeatureStatsSource";
+import {
+  TimeSlider,
+  type TimeSliderConfig,
+  type TimeSliderState,
+} from "../addons/TimeSlider";
+import {
+  FlowField,
+  type FlowFieldConfig,
+  type FlowFieldState,
+} from "../addons/FlowField";
+import {
+  VehicleAnimation,
+  type VehicleAnimationConfig,
+  type VehicleAnimationState,
+} from "../addons/VehicleAnimation";
+import {
+  FloodSimulation,
+  type FloodSimulationConfig,
+  type FloodState,
+} from "../addons/FloodSimulation";
+import {
+  zoomToExtentTrigger,
+  type ZoomToExtentConfig,
+} from "../addons/ZoomToExtent";
+import type { AlwaysOnTopConfig } from "../addons/AlwaysOnTop";
+import type { SwitchOnConfig } from "../addons/SwitchOn";
+import {
+  CageIndicatorBadge,
+  type CageIndicatorBadgeConfig,
+} from "./caged-addons";
+import {
+  CompareArena,
+  type CompareArenaConfig,
+} from "../addons/comparing/CompareArena";
+import {
+  CompareSpyglass,
+  type CompareSpyglassConfig,
+} from "../addons/comparing/CompareSpyglass";
+import {
+  CompareSwipe,
+  type CompareSwipeConfig,
+} from "../addons/comparing/CompareSwipe";
+import {
+  ComparingControl,
+  type ComparingControlConfig,
+} from "../addons/comparing/ComparingControl";
+import type { CompareState } from "../addons/comparing/comparing-actions";
+import type { CompareLayerEntry } from "../addons/comparing/comparing-layers";
 
 export type AddonConfigMap = {
+  addonManager: AddonManagerConfig;
+  cameraRestriction: CameraRestrictionConfig;
+  freeCamera: FreeCameraConfig;
+  comparingControl: ComparingControlConfig;
+  compareSwipe: CompareSwipeConfig;
+  compareArena: CompareArenaConfig;
+  compareSpyglass: CompareSpyglassConfig;
+  annotationOverlay: AnnotationOverlayConfig;
+  annotationControl: AnnotationControlConfig;
   gazetteerSource: GazDataSourceConfig;
   gazetteerMode: GazDataAdditionalModeConfig;
+  homeOverride: HomeOverrideConfig;
+  nearestFeature: NearestFeatureConfig;
+  nearestFeatureApotheken: NearestFeatureApothekenConfig;
+  nearestFeatureBahnhoefe: NearestFeatureBahnhoefeConfig;
+  nearestFeatureKrankenhaeuser: NearestFeatureKrankenhaeuserConfig;
+  originSearch: OriginSearchConfig;
+  vectorHighlight: VectorHighlightConfig;
+  vectorHighlightControl: VectorHighlightControlConfig;
+  /** dev only; never declare it on a shipped route */
+  vectorHighlightDebug: VectorHighlightDebugPanelConfig;
+  layerVisibility: LayerVisibilityConfig;
+  libreTerrain: LibreTerrainConfig;
+  shadowSimulation: ShadowSimulationConfig;
+  infoBoxZoomImage: InfoBoxZoomImageConfig;
+  outlet: OutletConfig;
+  /**
+   * Saves the map as scenes of a projection mapping show and publishes the
+   * list for the remote on the phone; see `apps/pm-remote`.
+   */
+  showScenes: ShowScenesConfig;
+  visibleFeatureStatsSource: VisibleFeatureStatsSourceConfig;
+  visibleFeatureStatsPanel: VisibleFeatureStatsPanelConfig;
+  /** WMS time-series transport; the interpolation behind it is caged */
+  timeSlider: TimeSliderConfig;
+  /**
+   * Flow-field particle animation over a Starkregen velocity field. Entirely
+   * caged: without cage the addon mounts nothing and there is no fallback.
+   */
+  flowField: FlowFieldConfig;
+  /**
+   * A vehicle running along a route read from GeoJSON. Plain MapLibre: a
+   * rectangle walking an arc-length parameter, with no caged part.
+   */
+  vehicleAnimation: VehicleAnimationConfig;
+  /**
+   * A plane of water at an adjustable level over a raster DEM, drawn with
+   * three.js. Open, no cage involved.
+   */
+  floodSimulation: FloodSimulationConfig;
+  zoomToExtent: ZoomToExtentConfig;
+  /**
+   * Declared on a layer to keep it above the others; the host does the
+   * stacking, so there is nothing to mount.
+   */
+  alwaysOnTop: AlwaysOnTopConfig;
+  /**
+   * Declared on a layer to light its features up one wavefront at a time when
+   * the layer reaches the map. No trigger and no panel: the host runs it, which
+   * is what lets it work on a board with no UI at all.
+   */
+  switchOn: SwitchOnConfig;
+  /** implemented in cage; renders nothing when cage is absent */
+  cageIndicatorBadge: CageIndicatorBadgeConfig;
 };
 
 export type AddonKind = keyof AddonConfigMap;
 
-export type Addon = {
-  [K in AddonKind]: { kind: K; config: AddonConfigMap[K] };
+/**
+ * The channels addons share within one route. A channel is not a kind: several
+ * kinds may read one channel, and the name says what the value *is*, not who
+ * produces it.
+ */
+export type AddonStateMap = {
+  /** what is on screen, grouped and counted; see `VisibleFeatureStatsSource` */
+  visibleFeatureStats: VisibleFeatureStatsState;
+  /**
+   * the categories the "In der Nähe" mode offers, one entry per category addon
+   * the route declared; see `NearestFeature/categoryChannel.ts`. Several addons
+   * write this one channel, each merging its own key in.
+   */
+  nearestFeatureCategories: NearestFeatureCategoryState;
+  /**
+   * where the user starts from, and who currently wants that input on screen;
+   * see `OriginSearch/originChannel.ts`. The "wohin?" of the app's own search
+   * has its counterpart here, so "In der Nähe" and, later, a routing UI read
+   * one starting point rather than each keeping their own.
+   */
+  originLocation: OriginLocationState;
+  /** whether the highlighting mode is running; see `VectorHighlight` */
+  highlightMode: HighlightModeState;
+  /** whether the sketch layer owns the pointer; see `AnnotationOverlay` */
+  annotationMode: AnnotationState;
+  /** whether the comparison is running; see `ComparingControl` */
+  compareState: CompareState;
+  /** the assignable layer blocks, with the titles the layer bar shows */
+  compareLayers: CompareLayerEntry[];
+  /**
+   * the running WMS time series: its steps, the position the slider sits on and
+   * the transport; see `TimeSlider`. Read by the layer-bar row and the ribbon,
+   * which sit in the host's tree rather than in the addon's.
+   */
+  timeSeries: TimeSliderState;
+  /**
+   * the running flow-field animation: which scenario, whether the map is above
+   * its zoom gate, and whether a velocity field is loading; see `FlowField`.
+   * Read by the layer-bar row, which sits in the host's tree rather than in the
+   * addon's.
+   */
+  flowField: FlowFieldState;
+  /**
+   * the running vehicle animation: which route, whether it is still loading
+   * and whether the vehicle is held; see `VehicleAnimation`. Read by the
+   * layer-bar row, which sits in the host's tree rather than in the addon's.
+   */
+  vehicleAnimation: VehicleAnimationState;
+  /**
+   * the flood on the map: its terrain, the water level and the slider's
+   * bounds; see `FloodSimulation`. Read by the layer-bar row and the panel,
+   * which sit in the host's tree rather than in the addon's.
+   */
+  floodSimulation: FloodState;
+  /**
+   * image the info box shows instead of the feature photo at the current zoom;
+   * see `InfoBoxZoomImage`. Consumed by the host app's info box, not by an addon.
+   */
+  infoBoxImage: InfoBoxImageState;
+  /**
+   * which addons the user switched on or off; see `AddonManager`, which also
+   * persists them per route. Read by `AddonHost` rather than by a sibling
+   * addon, which is why it has no consumer among the registry's `requires`.
+   */
+  addonOverrides: AddonOverridesState;
+  /** rendering and animation state shared by the shadow controls */
+  shadowSimulation: ShadowSimulationState;
+  /** selected civil date and time, separate for future shared-time sync */
+  shadowDate: ShadowDateState;
+};
+
+export type AddonStateKey = keyof AddonStateMap;
+
+/**
+ * A full declaration written with the original `kind` key. Kinds whose config
+ * is entirely optional may be declared as `{ kind }` alone, so a route that
+ * just wants the addon's defaults does not have to pass an empty config
+ * object.
+ *
+ * `availability` restricts where the addon is mounted, with the same options
+ * as a route's availability. Only the object forms can carry it: an addon that
+ * is to be gated is written as `{ addon, availability }` even when it needs no
+ * config.
+ */
+export type AddonWithKind = {
+  // `Partial<C> extends C` holds exactly when every field of C is optional
+  [K in AddonKind]: Partial<AddonConfigMap[K]> extends AddonConfigMap[K]
+    ? { kind: K; config?: AddonConfigMap[K]; availability?: Availability }
+    : { kind: K; config: AddonConfigMap[K]; availability?: Availability };
 }[AddonKind];
 
+/**
+ * The same declaration written with `addon` instead of `kind`. Both keys name
+ * the addon and mean exactly the same thing; `addon` says at the call site
+ * what the string is, where `kind` only says that it discriminates. Prefer it
+ * in new declarations.
+ */
+export type AddonWithName = {
+  [K in AddonKind]: Partial<AddonConfigMap[K]> extends AddonConfigMap[K]
+    ? { addon: K; config?: AddonConfigMap[K]; availability?: Availability }
+    : { addon: K; config: AddonConfigMap[K]; availability?: Availability };
+}[AddonKind];
+
+/**
+ * A full declaration: the addon plus its config, named either way. The two
+ * forms are interchangeable, and `normalizeAddonEntries` folds `addon` into
+ * `kind` so everything downstream sees one shape.
+ */
+export type Addon = AddonWithKind | AddonWithName;
+
+/**
+ * Kinds that may be declared as a bare string. Same condition as the optional
+ * `config` in `Addon`: a kind whose config is required still has to be written
+ * as `{ kind, config }`, so the shorthand can never drop a needed config.
+ */
+export type BareAddonKind = {
+  [K in AddonKind]: Partial<AddonConfigMap[K]> extends AddonConfigMap[K]
+    ? K
+    : never;
+}[AddonKind];
+
+/**
+ * How an addon is declared: the bare name (`"cameraRestriction"`) for the
+ * addon's own defaults, or the object form written as `{ addon, config }` or
+ * `{ kind, config }`.
+ */
+export type AddonEntry = BareAddonKind | Addon;
+
+export type ResolvedAddon = {
+  [K in AddonKind]: { kind: K; config?: AddonConfigMap[K] };
+}[AddonKind];
+
+/** whether an object entry names its addon with `addon` rather than `kind` */
+const isNamedAddon = (entry: Addon): entry is AddonWithName => "addon" in entry;
+
+/** the addon an entry names, whichever of the three forms it was written in */
+export const getAddonKind = (entry: AddonEntry): AddonKind =>
+  typeof entry === "string"
+    ? entry
+    : isNamedAddon(entry)
+    ? entry.addon
+    : entry.kind;
+
+/** Every entry as `{ kind, config }`, so no consumer sees the `addon` spelling. */
+export const normalizeAddonEntries = (
+  entries?: readonly AddonEntry[]
+): ResolvedAddon[] =>
+  (entries ?? []).map((entry) => {
+    if (typeof entry === "string") return { kind: entry } as ResolvedAddon;
+    if (isNamedAddon(entry)) {
+      const { addon, ...rest } = entry;
+      return { kind: addon, ...rest } as ResolvedAddon;
+    }
+    return entry;
+  });
+
+/** the entries reachable in the given context; a bare kind is always kept */
+export const filterAddonsByAvailability = (
+  entries: readonly AddonEntry[] | undefined,
+  context: AvailabilityContext
+): AddonEntry[] =>
+  (entries ?? []).filter(
+    (entry) =>
+      typeof entry === "string" || isAvailable(entry.availability, context)
+  );
+
 export type AddonComponentProps<K extends AddonKind = AddonKind> = {
-  config: AddonConfigMap[K];
+  config?: AddonConfigMap[K];
   carma: typeof carma;
   leafletMap: LeafletMap | null;
+  libreMap: maplibregl.Map | null;
   /** the host app's redux store, taken from the surrounding react-redux provider */
   store: Store;
+  target: LayerStackEntry | null;
 };
 
-/** kind -> component lookup used by `AddonHost` */
-export const addonRegistry: {
-  [K in AddonKind]: ComponentType<AddonComponentProps<K>>;
-} = {
-  gazetteerSource: GazetteerSourceAddon,
-  gazetteerMode: GazetteerModeAddon,
+export const ADDON_TARGET_PLACEMENT = {
+  SECONDARY_VIEW: "secondary-view",
+} as const;
+
+export type AddonTargetPlacement =
+  (typeof ADDON_TARGET_PLACEMENT)[keyof typeof ADDON_TARGET_PLACEMENT];
+
+export type AddonContext<K extends AddonKind = AddonKind> = {
+  config?: AddonConfigMap[K];
+  target: LayerStackEntry | null;
 };
+
+/** What a trigger's `onClick` gets, so an action can reach the app. */
+export type AddonActionContext<K extends AddonKind = AddonKind> =
+  AddonContext<K> & { carma: typeof carma };
+
+/**
+ * Opt in to a trigger inside the target's layer button: an icon the layer
+ * button renders next to its title. Declaring this also decides where the
+ * addon is mounted: entries with a `trigger` are rendered into the interaction
+ * view while their trigger is active, entries without one are mounted by
+ * `AddonHost` and render wherever they like, including `<Control>`.
+ */
+export type AddonTrigger<K extends AddonKind = AddonKind> = {
+  icon: IconDefinition;
+  label: (ctx: AddonContext<K>) => string;
+  badge?: (ctx: AddonContext<K>) => number;
+  isApplicable?: (ctx: AddonContext<K>) => boolean;
+  onClick?: (ctx: AddonActionContext<K>) => void;
+};
+
+export type AddonRegistryEntry<K extends AddonKind = AddonKind> = {
+  Component?: ComponentType<AddonComponentProps<K>>;
+  trigger?: AddonTrigger<K>;
+  /**
+   * The kind is declared on a layer rather than on a route, and the host reads
+   * it off the layer instead of mounting anything. Like a trigger, it keeps the
+   * kind out of the route-wide addon switching.
+   */
+  perTarget?: boolean;
+  /** Render this target-bound component inside the host's secondary view. */
+  targetPlacement?: AddonTargetPlacement;
+  /** state channels this addon writes (headless producers declare these) */
+  provides?: readonly AddonStateKey[];
+  /**
+   * state channels this addon reads. `AddonProvider` warns in dev when a
+   * route configures a consumer without any producer covering its channel,
+   * so the mistake surfaces instead of an empty panel.
+   */
+  requires?: readonly AddonStateKey[];
+};
+
+/** kind -> entry lookup used by the hosts */
+export const addonRegistry: {
+  [K in AddonKind]: AddonRegistryEntry<K>;
+} = {
+  addonManager: { Component: AddonManager, provides: ["addonOverrides"] },
+  cameraRestriction: { Component: CameraRestriction },
+  freeCamera: { Component: FreeCamera },
+  comparingControl: {
+    Component: ComparingControl,
+    provides: ["compareState", "compareLayers"],
+  },
+  compareSwipe: { Component: CompareSwipe, requires: ["compareState"] },
+  compareArena: { Component: CompareArena, requires: ["compareState"] },
+  compareSpyglass: { Component: CompareSpyglass, requires: ["compareState"] },
+  annotationOverlay: {
+    Component: AnnotationOverlay,
+    provides: ["annotationMode"],
+  },
+  annotationControl: {
+    Component: AnnotationControl,
+    requires: ["annotationMode"],
+  },
+  gazetteerSource: { Component: GazetteerSource },
+  outlet: { Component: OutletAddon },
+  showScenes: { Component: ShowScenes },
+  gazetteerMode: { Component: GazetteerMode },
+  homeOverride: { Component: HomeOverride },
+  nearestFeature: {
+    // it writes `originLocation` (its request for the input) and reads the
+    // origin from it, but does not require it: without `originSearch` the
+    // channel stays empty and the configured origin is used
+    Component: NearestFeature,
+    requires: ["nearestFeatureCategories"],
+  },
+  nearestFeatureApotheken: {
+    Component: NearestFeatureApotheken,
+    provides: ["nearestFeatureCategories"],
+  },
+  nearestFeatureBahnhoefe: {
+    Component: NearestFeatureBahnhoefe,
+    provides: ["nearestFeatureCategories"],
+  },
+  nearestFeatureKrankenhaeuser: {
+    Component: NearestFeatureKrankenhaeuser,
+    provides: ["nearestFeatureCategories"],
+  },
+  originSearch: {
+    Component: OriginSearch,
+    provides: ["originLocation"],
+  },
+  vectorHighlight: {
+    Component: VectorHighlight,
+    provides: ["highlightMode"],
+  },
+  vectorHighlightControl: {
+    Component: VectorHighlightControl,
+    requires: ["highlightMode"],
+  },
+  vectorHighlightDebug: {
+    Component: VectorHighlightDebugPanel,
+    requires: ["highlightMode"],
+  },
+  layerVisibility: {
+    Component: LayerVisibility,
+    trigger: layerVisibilityTrigger,
+  },
+  libreTerrain: { Component: LibreTerrain },
+  shadowSimulation: {
+    Component: ShadowSimulation,
+    targetPlacement: ADDON_TARGET_PLACEMENT.SECONDARY_VIEW,
+    provides: ["shadowSimulation", "shadowDate"],
+  },
+  infoBoxZoomImage: {
+    Component: InfoBoxZoomImage,
+    provides: ["infoBoxImage"],
+  },
+  visibleFeatureStatsSource: {
+    Component: VisibleFeatureStatsSource,
+    provides: ["visibleFeatureStats"],
+  },
+  visibleFeatureStatsPanel: {
+    Component: VisibleFeatureStatsPanel,
+    requires: ["visibleFeatureStats"],
+  },
+  timeSlider: { Component: TimeSlider, provides: ["timeSeries"] },
+  flowField: { Component: FlowField, provides: ["flowField"] },
+  vehicleAnimation: {
+    Component: VehicleAnimation,
+    provides: ["vehicleAnimation"],
+  },
+  floodSimulation: {
+    Component: FloodSimulation,
+    provides: ["floodSimulation"],
+  },
+  zoomToExtent: { trigger: zoomToExtentTrigger },
+  alwaysOnTop: { perTarget: true },
+  switchOn: { perTarget: true },
+  // Component is undefined when cage is absent; AddonHost renders nothing then.
+  cageIndicatorBadge: { Component: CageIndicatorBadge },
+};
+
+const isKnownKind = (kind: string): kind is AddonKind =>
+  Object.prototype.hasOwnProperty.call(addonRegistry, kind);
+
+/**
+ * Resolve an entry's trigger against its target, or `undefined` when the kind
+ * has no trigger or is not applicable to this target. Keeps the per-kind
+ * generics contained; callers see plain values.
+ */
+export const resolveAddonTrigger = (
+  addon: ResolvedAddon,
+  target: LayerStackEntry | null
+):
+  | {
+      icon: IconDefinition;
+      label: string;
+      badge: number;
+      onClick?: () => void;
+    }
+  | undefined => {
+  const trigger = addonRegistry[addon.kind].trigger as
+    | AddonTrigger<AddonKind>
+    | undefined;
+  if (!trigger) {
+    return undefined;
+  }
+  const ctx: AddonContext<AddonKind> = { config: addon.config, target };
+  if (trigger.isApplicable?.(ctx) === false) {
+    return undefined;
+  }
+  const { onClick } = trigger;
+  return {
+    icon: trigger.icon,
+    label: trigger.label(ctx),
+    badge: trigger.badge?.(ctx) ?? 0,
+    ...(onClick ? { onClick: () => onClick({ ...ctx, carma }) } : {}),
+  };
+};
+
+/** Drop entries whose kind is not registered, so unknown kinds are inert. */
+export const resolveAddonEntries = (
+  entries?: readonly AddonEntry[]
+): ResolvedAddon[] =>
+  normalizeAddonEntries(entries).filter((entry) => isKnownKind(entry.kind));

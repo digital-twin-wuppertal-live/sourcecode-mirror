@@ -1,5 +1,6 @@
 import type { Dispatch } from "redux";
 import { createElement, type ReactNode } from "react";
+import type { Map as MaplibreMap } from "maplibre-gl";
 import type {
   BackgroundLayer,
   Item,
@@ -22,24 +23,33 @@ import {
   setActiveInteractionLayerID,
   setBackgroundLayer,
   setLayers,
-  setSelectedLuftbildLayer,
-  setSelectedMapLayer,
+  setSelectedByCategory,
 } from "../../store/slices/mapping";
 import { removeMeasurement } from "../../store/slices/measurements";
 import { layerMap } from "../../config";
-import { createBackgroundLayerConfig } from "../../helper/layer";
-import { MapStyleKeys } from "../../constants/MapStyleKeys";
-import { zoomToStyleFeatures } from "../../helper/gisHelper";
+import { toBackgroundLayer } from "../../config/backgroundConfig";
+import {
+  zoomToLibreStyleFeatures,
+  zoomToStyleFeatures,
+} from "../../helper/gisHelper";
 import {
   addAdhocFeatureFromLayer,
   type AddFeatureFn,
 } from "../../helper/adhoc-layer-feature";
 import { isAdhocVectorLayer } from "../../helper/adhoc-feature-utils";
 import { AddLayerOptions } from "@carma-mapping/carma-map-api";
+import {
+  resolveAddonEntries,
+  type AddonEntry,
+  type FlowFieldConfig,
+  type FloodSimulationConfig,
+  type TimeSliderConfig,
+  type VehicleAnimationConfig,
+} from "@carma-mapping/addons";
 
 type MessageType = "success" | "error";
 
-type MessageApiLike = {
+export type MessageApiLike = {
   open: (config: { type: MessageType; content: ReactNode }) => void;
   success: (content: string) => void;
   error: (content: string) => void;
@@ -55,7 +65,7 @@ type SetSelectedFeatureByIdFn = (
 type SetShouldFocusSelectedFn = (shouldFocus: boolean) => void;
 type ClearFeatureCollectionsFn = (collectionIds?: string[]) => void;
 type ToggleFrameworkFn = () => Promise<unknown>;
-type SetCurrentStyleFn = (style: MapStyleKeys) => void;
+type SetCurrentStyleFn = (style: string) => void;
 type GetFrameworkModeFn = () => {
   isLeaflet: boolean;
   isCesium: boolean;
@@ -85,6 +95,7 @@ type ResourceLayerUpdaterDeps = {
   toggleFramework: ToggleFrameworkFn;
   getFrameworkMode: GetFrameworkModeFn;
   routedMap: RoutedMapRef;
+  libreMap?: MaplibreMap | null;
   setCurrentStyle: SetCurrentStyleFn;
   messageApi: MessageApiLike;
   maxLayers?: number;
@@ -92,6 +103,28 @@ type ResourceLayerUpdaterDeps = {
     id: string,
     options?: AddLayerOptions
   ) => Promise<Layer | undefined>;
+  /**
+   * Launches (or toggles) the time series a workflow card carries in its
+   * `timeSlider` tool. Supplied by ResourceModal from `useTimeSeriesLauncher`.
+   */
+  startTimeSeries?: (config: TimeSliderConfig) => void;
+  /**
+   * Launches (or toggles) the flow-field animation a workflow card carries in
+   * its `flowField` tool. Supplied by ResourceModal from
+   * `useFlowFieldLauncher`.
+   */
+  startFlowField?: (config: FlowFieldConfig) => void;
+  /**
+   * Launches (or toggles) the animation a workflow card carries in its
+   * `vehicleAnimation` tool. Supplied by ResourceModal from
+   * `useVehicleAnimationLauncher`.
+   */
+  startVehicleAnimation?: (config: VehicleAnimationConfig) => void;
+  /**
+   * Launches (or toggles) the flood a workflow card carries in its
+   * `floodSimulation` tool. Supplied by ResourceModal from `useFloodLauncher`.
+   */
+  startFlood?: (config: FloodSimulationConfig) => void;
 };
 
 const DEFAULT_MAX_LAYERS = 12;
@@ -178,15 +211,13 @@ const applyCollectionLayer = async ({
         (key) => layerMap[key].title === layer.backgroundLayer?.title
       );
       if (layerKey) {
-        if (layer.backgroundLayer.id === "karte") {
-          dispatch(setSelectedMapLayer(createBackgroundLayerConfig(layerKey)));
-          setCurrentStyle(MapStyleKeys.TOPO);
-        } else {
-          dispatch(
-            setSelectedLuftbildLayer(createBackgroundLayerConfig(layerKey))
-          );
-          setCurrentStyle(MapStyleKeys.AERIAL);
-        }
+        dispatch(
+          setSelectedByCategory({
+            categoryId: layer.backgroundLayer.id,
+            layer: toBackgroundLayer(layerKey),
+          })
+        );
+        setCurrentStyle(layer.backgroundLayer.id);
       }
     }
     if (layer.settings) {
@@ -316,6 +347,7 @@ const addAdhocFeatureIfApplicable = async ({
   addFeature,
   getFrameworkMode,
   routedMap,
+  libreMap,
   setSelectedFeatureById,
   setShouldFocusSelected,
   dispatch,
@@ -326,6 +358,7 @@ const addAdhocFeatureIfApplicable = async ({
   addFeature: AddFeatureFn;
   getFrameworkMode: GetFrameworkModeFn;
   routedMap: RoutedMapRef;
+  libreMap?: MaplibreMap | null;
   setSelectedFeatureById: SetSelectedFeatureByIdFn;
   setShouldFocusSelected: SetShouldFocusSelectedFn;
   dispatch: Dispatch;
@@ -375,7 +408,11 @@ const addAdhocFeatureIfApplicable = async ({
     style: addedFeature.styleData,
   };
 
-  await zoomToStyleFeatures(addedFeature.styleData, routedMap);
+  if (libreMap) {
+    zoomToLibreStyleFeatures(addedFeature.styleData, libreMap);
+  } else {
+    await zoomToStyleFeatures(addedFeature.styleData, routedMap);
+  }
 
   const modeAfterAdd = getFrameworkMode();
   const shouldAutoSelectIn3D = shouldSelectIn3D(layer, modeAfterAdd);
@@ -516,10 +553,15 @@ export const createResourceLayerUpdater = ({
   toggleFramework,
   getFrameworkMode,
   routedMap,
+  libreMap,
   setCurrentStyle,
   messageApi,
   maxLayers = DEFAULT_MAX_LAYERS,
   addLayerById,
+  startTimeSeries,
+  startFlowField,
+  startVehicleAnimation,
+  startFlood,
 }: ResourceLayerUpdaterDeps) => {
   return async (
     layer: Item,
@@ -528,6 +570,70 @@ export const createResourceLayerUpdater = ({
     previewLayer: boolean = false,
     updateExisting: boolean = false
   ) => {
+    // A workflow whose tools carry a time series is not a layer group: the
+    // card launches the series into the timeSlider engine its route mounts,
+    // and a second click on the running series switches it off again.
+    if (layer.type === "workflow") {
+      // `Item.tools` is the layer catalog's wider ToolEntry shape;
+      // resolveAddonEntries drops every kind the addon registry does not know
+      const tools = resolveAddonEntries(layer.tools as AddonEntry[] | undefined);
+
+      const timeSeriesTool = tools.find(
+        (entry): entry is { kind: "timeSlider"; config?: TimeSliderConfig } =>
+          entry.kind === "timeSlider"
+      );
+      if (timeSeriesTool && startTimeSeries) {
+        const config = timeSeriesTool.config ?? {};
+        // The card's own texts are what its info view shows, so the series
+        // does not have to repeat them; a series that brings its own wins.
+        startTimeSeries({
+          ...config,
+          description: config.description ?? layer.description,
+          metaDataText: config.metaDataText ?? layer.groupInfo?.metaDataText,
+          links: config.links ?? layer.groupInfo?.links,
+          legend: config.legend ?? layer.groupInfo?.legend,
+        });
+        return;
+      }
+
+      // The animation carries its own backdrop raster in its config rather than
+      // as a layer group, so this card is done here too.
+      const flowFieldTool = tools.find(
+        (entry): entry is { kind: "flowField"; config?: FlowFieldConfig } =>
+          entry.kind === "flowField"
+      );
+      if (flowFieldTool && startFlowField) {
+        startFlowField(flowFieldTool.config ?? {});
+        return;
+      }
+
+      // The flood is a plane of water over the DEM, not a layer group, so this
+      // card is done here too.
+      const floodTool = tools.find(
+        (
+          entry
+        ): entry is { kind: "floodSimulation"; config?: FloodSimulationConfig } =>
+          entry.kind === "floodSimulation"
+      );
+      if (floodTool && startFlood) {
+        startFlood(floodTool.config ?? {});
+        return;
+      }
+    }
+
+    // The same for a card whose tools carry a vehicle animation: the click
+    // launches the route into the vehicleAnimation engine, and a second click
+    // on the running animation switches it off again.
+    if (layer.type === "workflow" && startVehicleAnimation) {
+      const vehicleTool = resolveAddonEntries(
+        layer.tools as AddonEntry[] | undefined
+      ).find((entry) => entry.kind === "vehicleAnimation");
+      if (vehicleTool) {
+        startVehicleAnimation(vehicleTool.config ?? {});
+        return;
+      }
+    }
+
     if (layer.type === "workflow" && (layer.workflowLayers?.length ?? 0) > 0) {
       await applyWorkflowLayerGroup({
         item: layer,
@@ -592,6 +698,7 @@ export const createResourceLayerUpdater = ({
       addFeature,
       getFrameworkMode,
       routedMap,
+      libreMap,
       setSelectedFeatureById,
       setShouldFocusSelected,
       dispatch,

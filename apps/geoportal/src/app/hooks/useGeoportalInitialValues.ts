@@ -4,11 +4,16 @@ import { Cartesian3 } from "@carma-cesium";
 
 import {
   readLeafletHomeViewState,
+  useHomeViewOverride,
   useInitialCesiumCameraView,
+  type ShareableViewState,
 } from "@carma-mapping/engines-interop/view-state";
 
 import { DEFAULT_CAMERA_FOV_DEG } from "../config/app.config";
-import { DEFAULT_HOME_VIEW_REF } from "../config/view.config";
+import {
+  DEFAULT_HOME_VIEW_2D,
+  DEFAULT_HOME_VIEW_REF,
+} from "../config/view.config";
 
 const DEFAULT_HOME_VIEW_STATE = readLeafletHomeViewState(
   DEFAULT_HOME_VIEW_REF,
@@ -29,33 +34,64 @@ export const useGeoportalInitialValues = () => {
 };
 
 export const useGeoportalHomeValues = () => {
+  // someone may take the home position over via `carma.mapping.setHomeOverride`
+  const homeOverride = useHomeViewOverride();
+
+  const homeViewRef = useMemo((): ShareableViewState => {
+    if (!homeOverride) {
+      return DEFAULT_HOME_VIEW_REF;
+    }
+    // the texts and the 2d pose travel with the override but are not part of
+    // the view, which describes the 3d camera
+    const {
+      tooltip: _tooltip,
+      overlayLabel: _overlayLabel,
+      overlayDestination: _overlayDestination,
+      pitch2D: _pitch2D,
+      bearing2D: _bearing2D,
+      ...view
+    } = homeOverride;
+    return { ...DEFAULT_HOME_VIEW_REF, ...view };
+  }, [homeOverride]);
+
   const homeCenter = useMemo(
-    () =>
-      [DEFAULT_HOME_VIEW_REF.lat, DEFAULT_HOME_VIEW_REF.lng] as [
-        number,
-        number
-      ],
-    []
+    () => [homeViewRef.lat, homeViewRef.lng] as [number, number],
+    [homeViewRef]
   );
 
-  const homeLeafletZoom = DEFAULT_HOME_VIEW_REF.zoom ?? 18;
+  const homeLeafletZoom = homeViewRef.zoom ?? 18;
   const homeMaplibreZoom = homeLeafletZoom - 1;
 
   const homeValidationCenter = useMemo(
     () =>
       Cartesian3.fromDegrees(
-        DEFAULT_HOME_VIEW_REF.lng,
-        DEFAULT_HOME_VIEW_REF.lat,
-        DEFAULT_HOME_VIEW_REF.altitude
+        homeViewRef.lng,
+        homeViewRef.lat,
+        homeViewRef.altitude
       ),
-    []
+    [homeViewRef]
+  );
+
+  const homeViewState = useMemo(
+    () =>
+      homeViewRef === DEFAULT_HOME_VIEW_REF
+        ? DEFAULT_HOME_VIEW_STATE
+        : readLeafletHomeViewState(homeViewRef, {
+            sourceId: "geoportal/home-override",
+            defaultFovDeg: DEFAULT_CAMERA_FOV_DEG,
+          }),
+    [homeViewRef]
   );
 
   return {
-    defaultHomeViewState: DEFAULT_HOME_VIEW_STATE,
+    defaultHomeViewState: homeViewState,
     homeCenter,
     homeLeafletZoom,
     homeMaplibreZoom,
+    homeMaplibrePitch: homeOverride?.pitch2D ?? DEFAULT_HOME_VIEW_2D.pitch,
+    homeMaplibreBearing: homeOverride?.bearing2D ?? DEFAULT_HOME_VIEW_2D.bearing,
+    /** an override's tooltip, undefined while the app's own home applies */
+    homeTooltip: homeOverride?.tooltip,
     homeValidationCenter,
   };
 };

@@ -1,14 +1,17 @@
+import { radToDegNumeric } from "@carma-units";
 import { useContext, useLayoutEffect } from "react";
 import { TopicMapContext } from "react-cismap/contexts/TopicMapContextProvider";
 import { useCesiumContext } from "@carma-mapping/engines/cesium/react/runtime";
 import { useMapFrameworkSwitcherContext } from "@carma-mapping/components";
+import { useLibreContext } from "@carma-mapping/contexts";
 import { Cartesian3 } from "@carma-cesium";
 import { parseToMapLayer } from "@carma-mapping/utils";
 import {
   useCatalogDataOptional,
-  type CatalogServiceCategory,
+  type CatalogDataContextValue,
   type Item,
 } from "@carma-mapping/layers";
+import { setHomeViewOverride } from "@carma-mapping/engines-interop/view-state";
 import { registerMapping, type MapAdapter } from "@carma-api";
 
 import { useMapStyle } from "../../contexts/MapStyleProvider";
@@ -16,12 +19,10 @@ import type { BackgroundLayerCatalogEntry } from "../../types";
 
 import type { Store } from "redux";
 
-const RAD_TO_DEG = 180 / Math.PI;
-
 export interface MappingPortalState {
   /** The layers currently on the map. */
   mapping?: {
-    layers?: Array<{ id: string }>;
+    layers?: Array<{ id: string; visible?: boolean }>;
     backgroundLayers?: BackgroundLayerCatalogEntry[];
   };
   [key: string]: unknown;
@@ -31,18 +32,37 @@ export interface MappingPortalState {
 export const hasLayerById = (state: MappingPortalState, id: string): boolean =>
   state.mapping?.layers?.some((layer) => layer.id === id) ?? false;
 
+export const selectLayerVisibility = (
+  state: MappingPortalState,
+  id: string
+): boolean | null => {
+  const layer = state.mapping?.layers?.find((candidate) => candidate.id === id);
+  return layer ? layer.visible !== false : null;
+};
+
 /** IDs of the layers currently on the map, in order. */
 export const selectLayerIDs = (state: MappingPortalState): string[] =>
   state.mapping?.layers?.map((layer) => layer.id) ?? [];
 
-/** Look a layer up in the catalog's service categories by id, or `undefined`. */
+/**
+ * Look a layer up in the catalog by id, or `undefined`. The assembled catalog
+ * comes first: only it knows the layers the additional config adds on their
+ * own. The service structure covers the time before a catalog was derived.
+ */
 export const findCatalogItemById = (
-  categories: CatalogServiceCategory[],
-  id: string
+  id: string,
+  catalogItems: CatalogDataContextValue["catalogItems"] | undefined,
+  serviceCategories: CatalogDataContextValue["serviceCategories"] | undefined
 ): Item | undefined => {
-  for (const category of categories) {
+  const item = catalogItems?.get(id);
+  if (item) {
+    return item;
+  }
+  for (const category of serviceCategories ?? []) {
     const found = category.layers.find((layer) => layer.id === id);
-    if (found) return found;
+    if (found) {
+      return found;
+    }
   }
   return undefined;
 };
@@ -61,12 +81,15 @@ export const useMappingAdapter = (store?: Store<MappingPortalState>): void => {
   const topicMap = useContext<typeof TopicMapContext>(TopicMapContext);
   const { withCamera } = useCesiumContext();
   const { setCurrentStyle } = useMapStyle();
-  const serviceCategories = useCatalogDataOptional()?.serviceCategories;
+  const catalogData = useCatalogDataOptional();
+  const catalogItems = catalogData?.catalogItems;
+  const serviceCategories = catalogData?.serviceCategories;
   const {
     activeFramework,
     requestTransitionToCesium,
     requestTransitionToLeaflet,
   } = useMapFrameworkSwitcherContext();
+  const { map: libreMap } = useLibreContext();
 
   useLayoutEffect(() => {
     // Live engine handles, resolved per call so they track mount/unmount.
@@ -84,6 +107,9 @@ export const useMappingAdapter = (store?: Store<MappingPortalState>): void => {
         if (mode === "3d") void requestTransitionToCesium();
         else void requestTransitionToLeaflet();
       },
+      // the app's home button reads this override with `useHomeViewOverride`
+      // and merges it over its own home view
+      setHomeOverride: (view) => setHomeViewOverride(view),
 
       // 2d (leaflet) ---------------------------------------------------------
       getPosition2D: () => {
@@ -99,9 +125,38 @@ export const useMappingAdapter = (store?: Store<MappingPortalState>): void => {
         getLeafletMap()?.zoomOut();
       },
       flyTo2D: (lat, lng, zoom) => {
+        // `zoom` is on the Leaflet scale, which MapLibre trails by one
+        if (libreMap) {
+          libreMap.flyTo({ center: [lng, lat], zoom: (zoom ?? 18) - 1 });
+          return;
+        }
         const map = getLeafletMap();
         if (!map) return;
         map.flyTo([lat, lng], zoom ?? 18);
+      },
+      fitBounds2D: (minLng, minLat, maxLng, maxLat, padding) => {
+        if (libreMap) {
+          libreMap.fitBounds(
+            [
+              [minLng, minLat],
+              [maxLng, maxLat],
+            ],
+            { padding: padding ?? 40 }
+          );
+          return true;
+        }
+        const map = getLeafletMap();
+        if (!map) {
+          return false;
+        }
+        map.fitBounds(
+          [
+            [minLat, minLng],
+            [maxLat, maxLng],
+          ],
+          padding === undefined ? undefined : { padding: [padding, padding] }
+        );
+        return true;
       },
 
       // 3d (cesium) ----------------------------------------------------------
@@ -109,12 +164,12 @@ export const useMappingAdapter = (store?: Store<MappingPortalState>): void => {
         withCamera((camera) => {
           const p = camera.positionCartographic;
           return {
-            lon: p.longitude * RAD_TO_DEG,
-            lat: p.latitude * RAD_TO_DEG,
+            lon: radToDegNumeric(p.longitude),
+            lat: radToDegNumeric(p.latitude),
             height: p.height,
-            heading: camera.heading * RAD_TO_DEG,
-            pitch: camera.pitch * RAD_TO_DEG,
-            roll: camera.roll * RAD_TO_DEG,
+            heading: radToDegNumeric(camera.heading),
+            pitch: radToDegNumeric(camera.pitch),
+            roll: radToDegNumeric(camera.roll),
           };
         }) ?? null,
       zoomIn3D: () => {
@@ -140,6 +195,8 @@ export const useMappingAdapter = (store?: Store<MappingPortalState>): void => {
       ...(store && {
         hasLayer: (id: string): boolean => hasLayerById(store.getState(), id),
         getLayerIDs: (): string[] => selectLayerIDs(store.getState()),
+        getLayerVisibility: (id: string): boolean | null =>
+          selectLayerVisibility(store.getState(), id),
         removeLayer: (id: string): boolean => {
           if (!hasLayerById(store.getState(), id)) {
             return false;
@@ -147,11 +204,22 @@ export const useMappingAdapter = (store?: Store<MappingPortalState>): void => {
           store.dispatch({ type: "mapping/removeLayer", payload: id });
           return true;
         },
+        setLayerVisibility: (id: string, visible: boolean): boolean => {
+          store.dispatch({
+            type: "mapping/changeVisibility",
+            payload: { id, visible },
+          });
+          return true;
+        },
         addLayer: async (id: string): Promise<boolean> => {
           if (hasLayerById(store.getState(), id)) {
             return false; // already on the map
           }
-          const item = findCatalogItemById(serviceCategories ?? [], id);
+          const item = findCatalogItemById(
+            id,
+            catalogItems,
+            serviceCategories
+          );
           if (!item) {
             return false; // unknown id, or no LayerCatalogProvider mounted
           }
@@ -170,15 +238,12 @@ export const useMappingAdapter = (store?: Store<MappingPortalState>): void => {
           if (!entry) {
             return false;
           }
-          // Mirror BaseLayerSelection/AerialLayerSelection: remember the chosen
-          // variant for its group, set it as the active background (id is the
-          // group key), then flip the map style.
+          // Mirror the app's applyBackgroundLayer: remember the chosen variant
+          // for its category, set it as the active background (id is the
+          // category id), then flip the map style.
           store.dispatch({
-            type:
-              entry.group === "luftbild"
-                ? "mapping/setSelectedLuftbildLayer"
-                : "mapping/setSelectedMapLayer",
-            payload: entry.config,
+            type: "mapping/setSelectedByCategory",
+            payload: { categoryId: entry.group, layer: entry.config },
           });
           store.dispatch({
             type: "mapping/setBackgroundLayer",
@@ -199,6 +264,8 @@ export const useMappingAdapter = (store?: Store<MappingPortalState>): void => {
     requestTransitionToLeaflet,
     setCurrentStyle,
     store,
+    catalogItems,
     serviceCategories,
+    libreMap,
   ]);
 };

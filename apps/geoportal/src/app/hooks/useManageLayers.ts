@@ -1,53 +1,63 @@
-import { LayerMap } from "@carma-appframeworks/portals";
+import type { BackgroundLayer } from "@carma-mapping/layers";
 import { useEffect } from "react";
 import { useDispatch, useSelector } from "react-redux";
+
+import {
+  backgroundConfig,
+  toBackgroundLayer,
+} from "../config/backgroundConfig";
 import {
   getBackgroundLayer,
-  getSelectedMapLayer,
+  getSelectedByCategory,
   setBackgroundLayer,
-  setSelectedMapLayer,
+  setSelectedByCategory,
 } from "../store/slices/mapping";
 
-export const useManageLayers = (layerMap: LayerMap) => {
+/**
+ * Refreshes the restored background selection against the current background
+ * config on boot: the persisted entries carry the texts and layer strings of
+ * the release that wrote them. A stored choice the config no longer knows, or
+ * a category the store has no choice for yet, falls back to the category
+ * default; a stored category the config no longer has falls back to the
+ * default category.
+ */
+export const useManageLayers = () => {
   const dispatch = useDispatch();
   const backgroundLayer = useSelector(getBackgroundLayer);
-  const selectedMapLayer = useSelector(getSelectedMapLayer);
+  const selectedByCategory = useSelector(getSelectedByCategory);
 
   useEffect(() => {
-    const backgroundLayerId = backgroundLayer.id;
-    const selectedMapLayerId = selectedMapLayer.id;
+    const refreshed: Record<string, BackgroundLayer> = {};
 
-    const getId = () => {
-      return backgroundLayerId === "luftbild"
-        ? backgroundLayerId
-        : selectedMapLayerId;
-    };
+    for (const category of backgroundConfig.categories) {
+      const stored = selectedByCategory[category.id];
+      const id =
+        stored && category.entries.includes(stored.id)
+          ? stored.id
+          : category.defaultEntry ?? category.entries[0];
+      const layer = toBackgroundLayer(id, {
+        opacity: stored?.opacity,
+        visible: stored?.visible,
+      });
+      refreshed[category.id] = layer;
+      dispatch(setSelectedByCategory({ categoryId: category.id, layer }));
+    }
+
+    const active =
+      refreshed[backgroundLayer.id] ??
+      refreshed[backgroundConfig.defaultCategory];
     dispatch(
       setBackgroundLayer({
         ...backgroundLayer,
-        title: layerMap[getId()].title,
-        id: backgroundLayerId,
+        ...active,
+        id: refreshed[backgroundLayer.id]
+          ? backgroundLayer.id
+          : backgroundConfig.defaultCategory,
         opacity: backgroundLayer.opacity,
-        description: layerMap[getId()].description,
-        inhalt: layerMap[getId()].inhalt,
-        eignung: layerMap[getId()].eignung,
-        layerType: "wmts",
-        layers: layerMap[getId()].layers,
+        visible: backgroundLayer.visible,
       })
     );
-
-    dispatch(
-      setSelectedMapLayer({
-        title: layerMap[selectedMapLayerId].title,
-        id: selectedMapLayerId,
-        opacity: selectedMapLayer.opacity,
-        description: ``,
-        inhalt: layerMap[selectedMapLayerId].inhalt,
-        eignung: layerMap[selectedMapLayerId].eignung,
-        visible: selectedMapLayer.visible,
-        layerType: "wmts",
-        layers: layerMap[selectedMapLayerId].layers,
-      })
-    );
-  }, [dispatch, layerMap]);
+    // boot only: the config is fixed for the page's lifetime
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dispatch]);
 };

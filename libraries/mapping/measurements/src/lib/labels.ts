@@ -1,9 +1,17 @@
+import {
+  WEB_MERCATOR_MAX_LATITUDE_DEG,
+  WGS84_ELLIPSOID,
+  getWebMercatorFromWgs84Deg,
+} from "@carma-geo/proj";
+import { degToRadNumeric, radToDegNumeric } from "@carma-units";
+import type { Degrees } from "@carma-units";
 import area from "@turf/area";
 import centroid from "@turf/centroid";
 import length from "@turf/length";
 import type {
   Feature,
   FeatureCollection,
+  LineString,
   Point,
   Polygon,
   Position,
@@ -11,15 +19,23 @@ import type {
 
 export const LABEL_SOURCE_ID = "carma-measurements-labels";
 export const LABEL_LAYER_ID = "carma-measurements-labels-symbols";
+export const LABEL_ROTATED_LAYER_ID =
+  "carma-measurements-labels-rotated-symbols";
 
 const numberFormatInteger = new Intl.NumberFormat("de-DE", {
   maximumFractionDigits: 0,
+});
+const numberFormatOneDecimal = new Intl.NumberFormat("de-DE", {
+  maximumFractionDigits: 1,
 });
 const numberFormatTwoDecimals = new Intl.NumberFormat("de-DE", {
   maximumFractionDigits: 2,
 });
 
 export function formatMeters(meters: number): string {
+  if (meters < 100) {
+    return `${numberFormatOneDecimal.format(meters)} m`;
+  }
   if (meters < 1000) {
     return `${numberFormatInteger.format(Math.round(meters))} m`;
   }
@@ -37,6 +53,36 @@ function midpoint([ax, ay]: Position, [bx, by]: Position): Position {
   return [(ax + bx) / 2, (ay + by) / 2];
 }
 
+/** Web Mercator northing in Earth radii, the unit `dx` in radians uses. */
+function mercatorY(lat: number): number {
+  const clamped = Math.max(
+    -WEB_MERCATOR_MAX_LATITUDE_DEG,
+    Math.min(WEB_MERCATOR_MAX_LATITUDE_DEG, lat)
+  );
+  return (
+    getWebMercatorFromWgs84Deg(0 as Degrees, clamped as Degrees)[1] /
+    WGS84_ELLIPSOID.semiMajorAxis
+  );
+}
+
+function segmentRotationDegrees(a: Position, b: Position): number {
+  const dx = degToRadNumeric(b[0] - a[0]);
+  const dy = mercatorY(b[1]) - mercatorY(a[1]);
+  if (dx === 0 && dy === 0) {
+    return 0;
+  }
+  // atan2 is counter-clockwise from east and mercator y grows northwards,
+  // while text-rotate turns clockwise on screen — hence the sign flip.
+  let degrees = -radToDegNumeric(Math.atan2(dy, dx));
+  while (degrees > 90) {
+    degrees -= 180;
+  }
+  while (degrees <= -90) {
+    degrees += 180;
+  }
+  return Math.round(degrees * 10) / 10;
+}
+
 function segmentLengthMeters(a: Position, b: Position): number {
   return length(
     {
@@ -50,15 +96,17 @@ function segmentLengthMeters(a: Position, b: Position): number {
 
 // Derive label points for every drawn feature. Three kinds emitted:
 //
-// - kind: "title"   — per-feature P1/L1 markers for points + lines (anchored
-//                     near the geometric middle of a line, on a real vertex).
+// - kind: "title"   — per-feature P1/L1/F1 markers (anchored near the
+//                     geometric middle of a line and on the first vertex of a
+//                     polygon's outer ring, always on a real vertex).
 // - kind: "segment" — segment-midpoint length labels for line segments and
 //                     polygon outer-ring edges.
+// - kind: "total"   — total line length, anchored on the last vertex. Same
+//                     number the InfoBox shows as "Strecke".
 // - kind: "area"    — centroid-anchored area label for each polygon.
 //
-// Polygons get segment + area labels but no title (matches the playground's
-// historical behaviour). MultiPolygon and polygon holes are out of scope —
-// no consumer draws them today.
+// MultiPolygon and polygon holes are out of scope — no consumer draws them
+// today.
 export function buildLabelFeatures(
   drawnFeatures: ReadonlyArray<Feature>
 ): FeatureCollection<Point> {
@@ -97,7 +145,11 @@ export function buildLabelFeatures(
               type: "Point",
               coordinates: midpoint(ring[i], ring[i + 1]),
             },
-            properties: { kind: "segment", label: formatMeters(meters) },
+            properties: {
+              kind: "segment",
+              label: formatMeters(meters),
+              rotation: segmentRotationDegrees(ring[i], ring[i + 1]),
+            },
           });
         }
       }
@@ -118,6 +170,18 @@ export function buildLabelFeatures(
           });
         }
       }
+      // Anchor the title on the ring's FIRST vertex (the one the user clicked
+      // first), not on the centroid: the centroid already carries the area
+      // label, and with `text-allow-overlap: false` the two would compete for
+      // the same spot and one would silently drop out. A real vertex also
+      // keeps the label attached while the polygon is edited.
+      if (title && ring && ring.length > 0) {
+        labelFeatures.push({
+          type: "Feature",
+          geometry: { type: "Point", coordinates: ring[0] },
+          properties: { kind: "title", label: title },
+        });
+      }
       continue;
     }
 
@@ -135,8 +199,28 @@ export function buildLabelFeatures(
         properties: {
           kind: "segment",
           label: formatMeters(meters),
+          rotation: segmentRotationDegrees(coords[i], coords[i + 1]),
         },
       });
+    }
+
+    if (coords.length >= 3 && feature.properties?.currentlyDrawing !== true) {
+      const totalMeters = length(feature as Feature<LineString>, {
+        units: "meters",
+      });
+      if (totalMeters > 0) {
+        labelFeatures.push({
+          type: "Feature",
+          geometry: {
+            type: "Point",
+            coordinates: coords[coords.length - 1],
+          },
+          properties: {
+            kind: "total",
+            label: formatMeters(totalMeters),
+          },
+        });
+      }
     }
     if (title && coords.length > 0) {
       // Anchor the title at a "middle-ish" vertex: floor(N/2) - 1, clamped

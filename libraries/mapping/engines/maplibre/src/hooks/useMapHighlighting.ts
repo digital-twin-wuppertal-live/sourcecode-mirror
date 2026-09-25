@@ -20,6 +20,7 @@ import type {
 import { useMapHighlight } from "../contexts/MapHighlightContext";
 import type { HighlightCriteria } from "../contexts/MapHighlightContext";
 import { buildFeatureStateTarget } from "../utils/featureStateTarget";
+import type { FeatureStateRef } from "../utils/featureStateTarget";
 
 /**
  * Pre-built index for O(1) queryId lookups.
@@ -45,6 +46,26 @@ function buildQueryIdLookup(criteria: HighlightCriteria): QueryIdLookup {
 type MapWithGlobalState = MaplibreMap & {
   setGlobalStateProperty(key: string, value: unknown): void;
 };
+
+/** Does `source` promote `property` to feature.id for `sourceLayer`?
+ *  Only then is a queryId value usable as a setFeatureState id: without
+ *  promoteId, feature.id is the tile-local MVT id, so a DB id would key an
+ *  unrelated feature (or none). Handles both promoteId spec forms — a bare
+ *  string, or a per-source-layer record. */
+function promotesProperty(
+  map: MaplibreMap,
+  source: string,
+  sourceLayer: string,
+  property: string
+): boolean {
+  const promoteId = (map.getSource(source) as { promoteId?: unknown } | undefined)
+    ?.promoteId;
+  if (typeof promoteId === "string") return promoteId === property;
+  if (promoteId && typeof promoteId === "object") {
+    return (promoteId as Record<string, unknown>)[sourceLayer] === property;
+  }
+  return false;
+}
 
 export interface UseMapHighlightingOptions {
   map: MaplibreMap | null;
@@ -100,6 +121,10 @@ function matchesCriteria(
   source: string
 ): boolean {
   const toggleKey = `${source}::${sourceLayer}::${featureId}`;
+  // Dismiss wins over every other match — unified un-highlight regardless of
+  // which store originally selected the feature (toggledFeatures / queryIds /
+  // propertyMatchers). Cleared by re-adding the feature or clearHighlights.
+  if (criteria.suppressedFeatures.has(toggleKey)) return false;
   const isToggled = criteria.toggledFeatures.has(toggleKey);
 
   // Check property matchers
@@ -157,6 +182,25 @@ export const useMapHighlighting = ({
   const sourceDataCleanupRef = useRef<(() => void) | null>(null);
   const prevVersionRef = useRef(-1);
   const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Targets we've currently marked as highlighted (key -> target), so we can
+  // clear exactly those when criteria change. We deliberately never write
+  // `false` to the (many) non-matching features: MapLibre treats every
+  // setFeatureState call as a change and re-evaluates + re-uploads those
+  // features at render even when the value is unchanged, which stalls for
+  // seconds when the whole dataset is loaded (city-level zoom). The style
+  // reads `["boolean", ["feature-state", "highlighted"], false]`, so an unset
+  // feature already renders as not-highlighted.
+  const markedRef = useRef<Map<string, FeatureStateRef>>(new Map());
+
+  // A clear-of-the-previous-set can be requested (criteria change or
+  // deactivation) at a moment when the style isn't loaded — e.g. a concurrent
+  // source setData (the brandnew FC poll fires every 1s in localhost / 15s in
+  // prod) momentarily flips isStyleLoaded() to false. When that happens we
+  // can't touch feature-state, so we remember the owed clear here and honor it
+  // on the next style-loaded apply. Without this, the recovery re-apply runs
+  // with clearPrevious=false and UNIONS the stale old highlights with the new
+  // ones (old + new both shown after a "clean" + new lasso/search).
+  const pendingClearRef = useRef(false);
 
   // Stable ref so applyHighlights doesn't need onHighlightsApplied as a dependency
   const onHighlightsAppliedRef = useRef<
@@ -164,11 +208,31 @@ export const useMapHighlighting = ({
   >(onHighlightsApplied);
   onHighlightsAppliedRef.current = onHighlightsApplied;
 
-  // Apply highlight feature state to all currently loaded features
-  const applyHighlights = useCallback(
+  // Clear only the currently-marked highlights. Cheap: proportional to the
+  // number of highlighted features, not to the number of loaded features.
+  const clearMarked = useCallback(
     (mapInst: MaplibreMap) => {
-      // Guard: style must be loaded before we can query sources/features
-      if (!mapInst.isStyleLoaded()) return;
+      for (const target of markedRef.current.values()) {
+        mapInst.setFeatureState(target, { [stateKey]: false });
+      }
+      markedRef.current.clear();
+    },
+    [stateKey]
+  );
+
+  // Apply highlight feature state to currently loaded features.
+  // `clearPrevious` = true on a genuine criteria change (clear the old
+  // highlight set first); false on a same-criteria re-apply for newly loaded
+  // tiles (keep existing marks, only add newly-visible matches).
+  const applyHighlights = useCallback(
+    (mapInst: MaplibreMap, clearPrevious: boolean) => {
+      // Guard: style must be loaded before we can query sources/features.
+      // If a clear was owed, remember it so the next (style-loaded) apply
+      // clears the old set first instead of unioning it with the new one.
+      if (!mapInst.isStyleLoaded()) {
+        if (clearPrevious) pendingClearRef.current = true;
+        return;
+      }
 
       // Ensure global state is in sync: the style uses ["global-state",
       // "highlightingEnabled"] to dim non-highlighted features. Setting it
@@ -179,10 +243,59 @@ export const useMapHighlighting = ({
         mGlobal.setGlobalStateProperty("highlightingEnabled", true);
       }
 
+      if (clearPrevious || pendingClearRef.current) clearMarked(mapInst);
+      pendingClearRef.current = false;
+
       const srcs = explicitSources ?? discoverSources(mapInst);
       const queryIdLookup = buildQueryIdLookup(criteria);
       const matched: GeoJSONFeature[] = [];
       const seen = new Set<string>();
+      const marked = markedRef.current;
+
+      // Mark exact-id hits without waiting for their tiles. MapLibre keeps
+      // feature-state in a plain sourceLayer -> id -> state map that never
+      // checks whether the feature exists, and stamps the accumulated state
+      // onto every tile as it loads (SourceFeatureState.initializeTileState,
+      // called from the tile manager's _tileLoaded). So a hit that is still
+      // off-screen or in an unloaded tile can be marked right now and renders
+      // highlighted on its very first frame.
+      //
+      // Without this, the scan below only sees features in already-loaded
+      // tiles: zooming into unloaded tiles drew the search hits dimmed (the
+      // style dims everything not `highlighted` while `highlightingEnabled`)
+      // until the debounced sourcedata re-apply caught up.
+      //
+      // Only exact ids on a promoting source qualify. propertyMatchers and
+      // wildcard ("*") sourceLayers need the feature's properties, and geojson
+      // sources have no source-layer to key by, so those stay on the scan path.
+      const sourcesBySourceLayer = new Map<string, string[]>();
+      for (const { source, sourceLayers } of srcs) {
+        for (const sl of sourceLayers) {
+          const existing = sourcesBySourceLayer.get(sl);
+          if (existing) existing.push(source);
+          else sourcesBySourceLayer.set(sl, [source]);
+        }
+      }
+      for (const qid of criteria.queryIds) {
+        if (qid.sourceLayer === "*") continue;
+        for (const source of sourcesBySourceLayer.get(qid.sourceLayer) ?? []) {
+          if (!promotesProperty(mapInst, source, qid.sourceLayer, qid.property))
+            continue;
+          const key = `${source}::${qid.sourceLayer}::${qid.value}`;
+          // Mirror matchesCriteria: a dismiss wins outright, and a toggle on an
+          // already-matching feature is an XOR flip that turns it back off.
+          if (criteria.suppressedFeatures.has(key)) continue;
+          if (criteria.toggledFeatures.has(key)) continue;
+          if (marked.has(key)) continue;
+          const target = buildFeatureStateTarget(mapInst, {
+            source,
+            sourceLayer: qid.sourceLayer,
+            id: qid.value,
+          });
+          mapInst.setFeatureState(target, { [stateKey]: true });
+          marked.set(key, target);
+        }
+      }
 
       for (const { source, sourceLayers } of srcs) {
         // Geojson sources: querySourceFeatures ignores sourceLayer; iterate
@@ -212,26 +325,30 @@ export const useMapHighlighting = ({
               effectiveSL,
               source
             );
-            mapInst.setFeatureState(
-              buildFeatureStateTarget(mapInst, {
+            // Only touch feature-state for actual matches; non-matches are
+            // left unset (== false in the style). Skip matches already marked
+            // (feature can recur across tiles / sourcedata re-applies).
+            if (!shouldHighlight) continue;
+            const stateId = `${source}::${effectiveSL}::${String(f.id)}`;
+            if (!marked.has(stateId)) {
+              const target = buildFeatureStateTarget(mapInst, {
                 source,
                 sourceLayer: effectiveSL,
                 id: f.id,
-              }),
-              { [stateKey]: shouldHighlight }
-            );
-            if (shouldHighlight) {
-              const key = `${effectiveSL}::${String(props.id ?? f.id)}`;
-              if (!seen.has(key)) {
-                seen.add(key);
-                const fAny = f as GeoJSONFeature & {
-                  source?: string;
-                  sourceLayer?: string;
-                };
-                fAny.source = source;
-                fAny.sourceLayer = effectiveSL;
-                matched.push(f);
-              }
+              });
+              mapInst.setFeatureState(target, { [stateKey]: true });
+              marked.set(stateId, target);
+            }
+            const dedupKey = `${effectiveSL}::${String(props.id ?? f.id)}`;
+            if (!seen.has(dedupKey)) {
+              seen.add(dedupKey);
+              const fAny = f as GeoJSONFeature & {
+                source?: string;
+                sourceLayer?: string;
+              };
+              fAny.source = source;
+              fAny.sourceLayer = effectiveSL;
+              matched.push(f);
             }
           }
         }
@@ -239,41 +356,25 @@ export const useMapHighlighting = ({
 
       onHighlightsAppliedRef.current?.(matched);
     },
-    [criteria, explicitSources, stateKey]
+    [criteria, explicitSources, stateKey, clearMarked]
   );
 
-  // Clear all highlight state from loaded features
+  // Clear all highlight state we've applied. Only the features we marked need
+  // clearing; unset features already render as not-highlighted.
   const clearAllState = useCallback(
     (mapInst: MaplibreMap) => {
-      // Guard: style must be loaded before we can query sources/features
-      if (!mapInst.isStyleLoaded()) return;
-
-      const srcs = explicitSources ?? discoverSources(mapInst);
-      for (const { source, sourceLayers } of srcs) {
-        const isGeojson = mapInst.getSource(source)?.type === "geojson";
-        const iterLayers: (string | undefined)[] = isGeojson
-          ? [undefined]
-          : [...sourceLayers];
-        for (const iterSL of iterLayers) {
-          const features =
-            iterSL === undefined
-              ? mapInst.querySourceFeatures(source)
-              : mapInst.querySourceFeatures(source, { sourceLayer: iterSL });
-          for (const f of features) {
-            if (f.id == null) continue;
-            mapInst.setFeatureState(
-              buildFeatureStateTarget(mapInst, {
-                source,
-                sourceLayer: iterSL,
-                id: f.id,
-              }),
-              { [stateKey]: false }
-            );
-          }
-        }
+      // Guard: style must be loaded before we can touch feature state. If it
+      // isn't (e.g. a concurrent source setData), remember the owed clear so
+      // the next apply still wipes the stale set first — otherwise a "clean"
+      // that lands during a style reload leaves the old highlights set (only
+      // hidden by dimming) and they resurface on the next selection.
+      if (!mapInst.isStyleLoaded()) {
+        pendingClearRef.current = true;
+        return;
       }
+      clearMarked(mapInst);
     },
-    [explicitSources, stateKey]
+    [clearMarked]
   );
 
   // Sync highlightingActive to map global state. The style dims
@@ -310,13 +411,16 @@ export const useMapHighlighting = ({
     if (prevVersionRef.current === highlightVersion) return;
     prevVersionRef.current = highlightVersion;
 
-    applyHighlights(map);
+    applyHighlights(map, true);
 
     // Start debounced sourcedata listener for new tiles
     sourceDataCleanupRef.current?.();
     const handler = () => {
       if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
-      debounceTimerRef.current = setTimeout(() => applyHighlights(map), 100);
+      debounceTimerRef.current = setTimeout(
+        () => applyHighlights(map, false),
+        100
+      );
     };
     map.on("sourcedata", handler);
     sourceDataCleanupRef.current = () => {

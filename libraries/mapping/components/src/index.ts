@@ -1,6 +1,7 @@
 export {
   DynamicStylingControl,
   applyDynamicStyling,
+  applyDynamicStylingToStylesheet,
   extractCarmaConf,
   extractLayerInfo,
   getDynamicStylingOptionsConfigs,
@@ -23,19 +24,6 @@ export {
   type GenericFilterButtonsProps,
 } from "./lib/components/GenericFilterButtonsFactory.tsx";
 export {
-  GroupLayerVisibilityButtons,
-  type GroupLayerVisibilityButtonsProps,
-  type GroupLayerVisibilityEntry,
-} from "./lib/components/GroupLayerVisibilityButtons.tsx";
-export {
-  GroupTools,
-  getRenderableGroupTools,
-  hasRenderableGroupTools,
-  type GroupToolHostApi,
-  type GroupToolsProps,
-} from "./lib/components/GroupTools.tsx";
-
-export {
   FullscreenControl,
   SimpleFullscreenControl,
   NewWindowControl,
@@ -53,6 +41,10 @@ export {
   AnnotationsToolbarSeparator,
 } from "./lib/components/AnnotationsToolbar";
 export { LibrePitchingCompass } from "./lib/components/PitchingControl/LibrePitchingCompass";
+export {
+  LibreTerrainControl,
+  type LibreTerrainControlProps,
+} from "./lib/components/LibreTerrainControl";
 export { CompassNeedleSVG } from "./lib/components/PitchingControl/CompassNeedleSVG";
 export {
   SceneNavigationControls,
@@ -74,10 +66,7 @@ export {
 
 export { RoutedMapLocateControl } from "./lib/components/RoutedMapLocateControl/RoutedMapLocateControl";
 
-export {
-  LibreMapLocateControl,
-  useLibreMapLocateControl,
-} from "./lib/components/LibreMapLocateControl";
+export { LibreMapLocateControl } from "./lib/components/LibreMapLocateControl";
 
 export { ZoomControl } from "./lib/components/ZoomControl";
 export {

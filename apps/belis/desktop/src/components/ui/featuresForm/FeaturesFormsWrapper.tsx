@@ -30,6 +30,8 @@ import {
   clearDraftGeometry,
   setOriginalValues,
   getOriginalValues,
+  discardDraft,
+  getDiscardVersion,
   hasDraftChanges,
   getGlobalEditMode,
   isCreationDraftKey,
@@ -262,6 +264,13 @@ const FeaturesFormsWrapper = ({
   const originalValues = useSelector((state: RootState) =>
     getOriginalValues(state, featureId)
   );
+  // Remount key for the form below. `FormComponent` is deliberately NOT keyed
+  // on featureId — switching features reuses the instance and the *FormFields
+  // init effect re-runs off its own `appliedForFeatureRef` guard. A discard
+  // changes neither the featureId nor the fetched record, so that effect never
+  // fires and the thrown-away values stay in the DOM; bumping this key is what
+  // forces the re-initialisation.
+  const discardVersion = useSelector(getDiscardVersion);
   const removedDocKeys = useSelector((state: RootState) =>
     getRemovedDocumentKeys(state, featureId)
   );
@@ -596,7 +605,10 @@ const FeaturesFormsWrapper = ({
       // draft goes away — discarding the draft must not silently destroy
       // the user's measurement work.
       restoreAttachedMeasurement(draft?.geometryKey);
-      dispatch(removeDraft(featureId));
+      // `discardDraft`, not `removeDraft`: this is the user throwing the edit
+      // away, so the form must remount and re-read the server values instead
+      // of leaving the discarded ones on screen.
+      dispatch(discardDraft(featureId));
       onSelectNextDraft?.(featureId);
     }
     setIsEditing(false);
@@ -645,19 +657,11 @@ const FeaturesFormsWrapper = ({
       setSaving(true);
       const hide = message.loading(`${className} #${dbPK} wird gelöscht …`, 0);
       const deletePayload = { id: Number(dbPK), is_deleted: true };
-      console.log(
-        "xxx [DELETE] soft-delete start:",
-        JSON.stringify({ featureId, className, payload: deletePayload }, null, 2)
-      );
       try {
-        const deleteResult = await updateDataByClassName(
+        await updateDataByClassName(
           jwt,
           className,
           deletePayload
-        );
-        console.log(
-          "xxx [DELETE] soft-delete result:",
-          JSON.stringify({ featureId, className, result: deleteResult }, null, 2)
         );
         // Keep the soft-deleted row hidden on both maps: the vector tiles and
         // the brandnew FC still carry it until they are regenerated server-side.
@@ -747,19 +751,6 @@ const FeaturesFormsWrapper = ({
         setIsEditing(false);
         onSelectNextDraft?.(featureId);
       } catch (err) {
-        console.log(
-          "xxx [DELETE] soft-delete failed:",
-          JSON.stringify(
-            {
-              featureId,
-              className,
-              id: dbPK,
-              error: err instanceof Error ? err.message : String(err),
-            },
-            null,
-            2
-          )
-        );
         console.error("[DELETE] fehlgeschlagen", { className, id: dbPK, err });
         void message.error(
           `Löschen fehlgeschlagen: ${
@@ -1295,14 +1286,6 @@ const FeaturesFormsWrapper = ({
   // handleServerSave; zurücksetzen drops the draft via handleCancel.
   const handleMarkForDeletion = useCallback(() => {
     if (!featureId || !formKey) return;
-    console.log(
-      "xxx [DELETE] mark for deletion:",
-      JSON.stringify(
-        { featureId, formKey, featureDbId: dbPK != null ? Number(dbPK) : null },
-        null,
-        2
-      )
-    );
     // Deleting a Standort cascades to its Leuchten: capture them from the
     // fetched mast (`leuchtenArray`) so the sidebar can show them as red
     // "wird gelöscht" rows and handleServerSave can soft-delete each on commit.
@@ -1366,6 +1349,7 @@ const FeaturesFormsWrapper = ({
         >
           <div className="h-full">
             <FormComponent
+              key={discardVersion}
               data={data}
               rawFeature={rawFeature}
               readOnly={effectiveReadOnly}

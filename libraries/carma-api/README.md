@@ -13,6 +13,8 @@ the facades delegate every call into the registered adapter.
 import { carma } from "@carma-api";
 
 carma.mapping.getMode();                     // "2d" | "3d" | null
+carma.mapping.setHomeOverride({ lat, lng, zoom, tooltip, overlayLabel, overlayDestination }); // move the home button's target and its texts
+carma.mapping.setHomeOverride(null);         // hand the home position back to the app
 
 // 2D (leaflet)
 carma.mapping2D.activate();
@@ -24,6 +26,7 @@ carma.mapping2D.hasLayer(id);
 carma.mapping2D.addLayer(id);                // Promise<boolean>
 carma.mapping2D.removeLayer(id);
 carma.mapping2D.getLayerIDs();
+carma.mapping2D.getLayerVisibility(id);      // boolean | null (null = not on the map)
 carma.mapping2D.getBackgroundLayers();        // [{ id, title, group }] — possible base maps
 carma.mapping2D.setBackgroundLayer(id);      // switch base map, e.g. "stadtplan"
 
@@ -45,6 +48,20 @@ const removeMode = carma.gazetteer.addMode({
 });                                          // extra mode in the search dropdown
 carma.gazetteer.addSource({ topic, url, crs }); // extra source in the default search
 removeMode();                                // contributions return their remover
+
+// nuke persisted browser state (dev: "something is wrong, reset it")
+await carma.nuke.list();                     // { localStorage, sessionStorage, localforage, catalogCache, indexedDB }
+await carma.nuke.all();                      // wipe everything of this origin, then reload
+await carma.nuke.all({ reload: false });     // same, but stay on the page
+await carma.nuke.persistedState();           // redux-persist records (persist:*)
+await carma.nuke.layers();                   // only redux mapping.layers (in memory + persisted), saved maps stay
+await carma.nuke.catalogCache();             // WMS capabilities / catalog query cache
+await carma.nuke.favorites();
+await carma.nuke.measurements();
+await carma.nuke.addonOverrides();
+await carma.nuke.auth();                     // jwt, user, user groups
+await carma.nuke.localStorage();
+// targeted commands take { reload: true } too; each resolves with the removed keys
 ```
 
 In dev, the same object is attached to `window.carma` so you can poke at it
@@ -52,7 +69,7 @@ from the browser console.
 
 ## Namespaces
 
-Currently shipped: `mapping`, `ui`, `gazetteer`.
+Currently shipped: `mapping`, `ui`, `gazetteer`, `nuke`.
 
 Planned (not yet implemented): `auth`, `print`, ...
 

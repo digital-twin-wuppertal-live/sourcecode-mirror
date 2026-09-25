@@ -11,6 +11,7 @@ import {
   materialMauerlascheQuery,
   querschnittQuery,
   rundsteuerempfaengerQuery,
+  sensorbetreiberQuery,
   SAVE_ENDPOINT,
   DELETE_ENDPOINT,
   UPLOAD_DOCUMENT_ENDPOINT,
@@ -72,7 +73,7 @@ export const savebauart = async (jwt: string) => {
       "taskparams"
     );
 
-    const response = await fetch(SAVE_ENDPOINT, {
+    await fetch(SAVE_ENDPOINT, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${jwt}`,
@@ -80,7 +81,6 @@ export const savebauart = async (jwt: string) => {
       body: formData,
     });
 
-    console.log(response);
   } catch (error) {
     console.log(error);
   }
@@ -1009,6 +1009,39 @@ export const fetchAllRundsteuerempfaenger = async (jwt: string) => {
   return json.data?.rundsteuerempfaenger ?? [];
 };
 
+export const fetchAllSensorbetreiber = async (jwt: string) => {
+  const response = await fetch(ENDPOINT, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${jwt}`,
+    },
+    body: JSON.stringify({
+      query: sensorbetreiberQuery,
+    }),
+  });
+
+  const text = await response.text();
+  if (!response.ok) {
+    throw new Error(
+      `fetchAllSensorbetreiber failed: ${response.status} ${text}`
+    );
+  }
+
+  const json = JSON.parse(text) as {
+    data?: { sensorbetreiber?: unknown[] };
+    errors?: unknown;
+  };
+
+  if (json.errors) {
+    throw new Error(
+      `fetchAllSensorbetreiber GraphQL errors: ${JSON.stringify(json.errors)}`
+    );
+  }
+
+  return json.data?.sensorbetreiber ?? [];
+};
+
 export const fetchAllInfobausteinTemplate = async (jwt: string) => {
   const response = await fetch(ENDPOINT, {
     method: "POST",
@@ -1112,6 +1145,7 @@ export const keyTableFetchers: Record<
   masttyp: fetchAllMasttyp,
   leuchtentyp: fetchAllLeuchtentyp,
   rundsteuerempfänger: fetchAllRundsteuerempfaenger,
+  sensorbetreiber: fetchAllSensorbetreiber,
   infobausteinTemplate: fetchAllInfobausteinTemplate,
 };
 
@@ -1216,6 +1250,7 @@ export const fetchAllKeyTables = async (jwt: string) => {
     { key: "masttyp", fetch: fetchAllMasttyp },
     { key: "leuchtentyp", fetch: fetchAllLeuchtentyp },
     { key: "rundsteuerempfänger", fetch: fetchAllRundsteuerempfaenger },
+    { key: "sensorbetreiber", fetch: fetchAllSensorbetreiber },
     { key: "infobausteinTemplate", fetch: fetchAllInfobausteinTemplate },
   ] as const;
 

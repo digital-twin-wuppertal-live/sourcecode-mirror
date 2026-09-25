@@ -10,6 +10,10 @@ export {
 
 export type { LibreContextType, GeoJsonMetadata } from "./LibreContext";
 
+export { LocateContext, LocateProvider, useLocate } from "./LocateContext";
+
+export type { LocateContextType, LocateProblem } from "./LocateContext";
+
 export {
   MapSelectionContext,
   MapSelectionProvider,
@@ -42,3 +46,14 @@ export type {
   QueryId,
   ToggledFeature,
 } from "./MapHighlightContext";
+
+export {
+  AddonListContext,
+  AddonProvider,
+  AddonScopeContext,
+  AddonStateSetterContext,
+  AddonStateValueContext,
+  EMPTY_ADDON_STATE,
+} from "./AddonStateContext";
+
+export type { AddonStateRecord, AddonStateSet } from "./AddonStateContext";

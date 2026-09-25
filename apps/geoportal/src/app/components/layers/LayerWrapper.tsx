@@ -38,6 +38,7 @@ import { AppDispatch } from "../../store";
 import {
   getBackgroundLayer,
   getLayerStack,
+  getPinning,
   getSelectedLayerIndex,
   getSelectedStackEntry,
   getSelectionShowsNoInfoView,
@@ -59,6 +60,15 @@ import { useMapFrameworkSwitcherContext } from "@carma-mapping/components";
 import InteractionView from "./InteractionView";
 import { shouldShowAdhocLayerInLayerList } from "../../helper/adhoc-feature-utils";
 import { useDynamicStylingSync } from "../../hooks/useDynamicStylingSync";
+import { useHighlightLayerButton } from "../../hooks/useHighlightLayerButton";
+import { useAnnotationLayerButton } from "../../hooks/useAnnotationLayerButton";
+import { useComparingLayerButton } from "../../hooks/useComparingLayerButton";
+import { useTimeSliderLayerButton } from "../../hooks/useTimeSliderLayerButton";
+import { useFlowFieldLayerButton } from "../../hooks/useFlowFieldLayerButton";
+import { useVehicleAnimationLayerButton } from "../../hooks/useVehicleAnimationLayerButton";
+import { useVehicleAnimationInfoBox } from "../../hooks/useVehicleAnimationInfoBox";
+import { useFloodLayerButton } from "../../hooks/useFloodLayerButton";
+import { useComparingSelectionReset } from "../../hooks/useComparingSelectionReset";
 
 const scrollLayerBarBy = (left: number) => {
   document.getElementById("scrollWrapper")?.scrollBy({
@@ -70,6 +80,16 @@ const scrollLayerBarBy = (left: number) => {
 const LayerWrapper = () => {
   const dispatch: AppDispatch = useDispatch();
   useDynamicStylingSync();
+  useHighlightLayerButton();
+  useAnnotationLayerButton();
+  useComparingLayerButton();
+  useTimeSliderLayerButton();
+  useFlowFieldLayerButton();
+  useVehicleAnimationLayerButton();
+  // a clicked vehicle shows up in the feature info box
+  useVehicleAnimationInfoBox();
+  useFloodLayerButton();
+  useComparingSelectionReset();
   const { routedMapRef } = useContext<typeof TopicMapContext>(TopicMapContext);
   const size = useWindowSize();
 
@@ -95,18 +115,21 @@ const LayerWrapper = () => {
     color: isOver ? "green" : undefined,
   };
 
+  // a permanent row belongs to the app, not to the visitor: it stays in the
+  // stack and in the layer list of the info view, but it gets no button here
   const listedEntries = layerStack.filter(
     (entry) =>
-      isLayerGroup(entry) || shouldShowAdhocLayerInLayerList(entry, isCesium)
+      isLayerGroup(entry) ||
+      (!entry.permanent && shouldShowAdhocLayerInLayerList(entry, isCesium))
   );
+  // pinning as the store applies it, so a layer pinned by its "alwaysOnTop"
+  // tool sits in the same block here as it does in the stack
   const pinnedFirstEntries = listedEntries.filter(
-    (entry) => !isLayerGroup(entry) && entry.pinned === "first"
+    (entry) => getPinning(entry) === "first"
   );
-  const sortableEntries = listedEntries.filter(
-    (entry) => isLayerGroup(entry) || !entry.pinned
-  );
+  const sortableEntries = listedEntries.filter((entry) => !getPinning(entry));
   const pinnedLastEntries = listedEntries.filter(
-    (entry) => !isLayerGroup(entry) && entry.pinned === "last"
+    (entry) => getPinning(entry) === "last"
   );
   const sortableItemIds = sortableEntries.map((entry) => entry.id);
 

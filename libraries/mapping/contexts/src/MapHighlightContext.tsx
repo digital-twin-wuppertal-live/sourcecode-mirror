@@ -45,6 +45,11 @@ export interface HighlightCriteria {
   queryIds: QueryId[];
   /** Individually toggled feature identifiers (from modifier+click) */
   toggledFeatures: Map<string, ToggledFeature>;
+  /** Features the user explicitly dismissed. Wins over every other match so the
+   *  sidebar ✕ works uniformly regardless of how a feature became highlighted
+   *  (lasso → toggledFeatures, modal search → queryIds, street search →
+   *  propertyMatchers). Cleared by adding the feature back or clearHighlights. */
+  suppressedFeatures: Map<string, ToggledFeature>;
 }
 
 export interface MapHighlightContextType {
@@ -63,16 +68,28 @@ export interface MapHighlightContextType {
   toggleFeatureHighlight: (id: ToggledFeature) => void;
   /** Idempotently ensure features are toggled on or off */
   ensureToggledFeatures: (ids: ToggledFeature[], toggled: boolean) => void;
+  /** Idempotently mark features as suppressed (dismissed) or unsuppress them.
+   *  Suppressed features render as un-highlighted even if a matcher/query/toggle
+   *  would otherwise select them. Adding via ensureToggledFeatures(_, true) or
+   *  toggleFeatureHighlight (when adding) implicitly unsuppresses. */
+  ensureSuppressedFeatures: (
+    ids: ToggledFeature[],
+    suppressed: boolean
+  ) => void;
   /** Clear everything */
   clearHighlights: () => void;
   /** Version counter bumped on every mutation */
   highlightVersion: number;
+  /** Bumped by `clearHighlights` only, so a consumer diffing the criteria can
+   *  tell a full reset from removed keys. */
+  clearVersion: number;
 }
 
 const EMPTY_CRITERIA: HighlightCriteria = {
   propertyMatchers: [],
   queryIds: [],
   toggledFeatures: new Map(),
+  suppressedFeatures: new Map(),
 };
 
 const defaultContext: MapHighlightContextType = {
@@ -83,8 +100,10 @@ const defaultContext: MapHighlightContextType = {
   highlightByIds: () => {},
   toggleFeatureHighlight: () => {},
   ensureToggledFeatures: () => {},
+  ensureSuppressedFeatures: () => {},
   clearHighlights: () => {},
   highlightVersion: 0,
+  clearVersion: 0,
 };
 
 export const MapHighlightContext =
@@ -101,6 +120,7 @@ export const MapHighlightProvider = ({
 }: MapHighlightProviderProps) => {
   const [highlightingActive, setHighlightingActive] = useState(false);
   const [highlightVersion, setHighlightVersion] = useState(0);
+  const [clearVersion, setClearVersion] = useState(0);
 
   // Use ref + state bump pattern: criteria is mutable (avoids re-creating objects),
   // and highlightVersion triggers consumers to re-read.
@@ -108,6 +128,7 @@ export const MapHighlightProvider = ({
     propertyMatchers: [],
     queryIds: [],
     toggledFeatures: new Map(),
+    suppressedFeatures: new Map(),
   });
 
   const bump = useCallback(() => setHighlightVersion((v) => v + 1), []);
@@ -163,6 +184,22 @@ export const MapHighlightProvider = ({
     (id: ToggledFeature) => {
       const key = `${id.source}::${id.sourceLayer}::${id.id}`;
       const toggled = criteriaRef.current.toggledFeatures;
+      const suppressed = criteriaRef.current.suppressedFeatures;
+      // Feature is currently DISMISSED (suppression wins over every match in
+      // matchesCriteria, so it renders un-highlighted). A click means "bring it
+      // back" — undo the dismiss and let the base criteria decide. Crucially do
+      // NOT also add it to toggledFeatures: for a feature that matches the
+      // active criteria (e.g. an expert-search hit) the toggle is an XOR flip
+      // that would turn the match straight back off, so it would re-appear in
+      // the sidebar list but stay dimmed on the map. Dropping any stale toggle
+      // too restores the pure criteria state.
+      if (suppressed.has(key)) {
+        suppressed.delete(key);
+        toggled.delete(key);
+        if (debug) console.log("[MapHighlight] un-dismissed feature", key);
+        bump();
+        return;
+      }
       if (toggled.has(key)) {
         toggled.delete(key);
         if (debug) console.log("[MapHighlight] un-toggled feature", key);
@@ -178,6 +215,7 @@ export const MapHighlightProvider = ({
   const ensureToggledFeatures = useCallback(
     (ids: ToggledFeature[], toggled: boolean) => {
       const map = criteriaRef.current.toggledFeatures;
+      const suppressed = criteriaRef.current.suppressedFeatures;
       let changed = false;
       for (const id of ids) {
         const key = `${id.source}::${id.sourceLayer}::${id.id}`;
@@ -186,6 +224,8 @@ export const MapHighlightProvider = ({
             map.set(key, id);
             changed = true;
           }
+          // Adding is an explicit "show this" — clear any prior dismiss.
+          if (suppressed.delete(key)) changed = true;
         } else {
           if (map.has(key)) {
             map.delete(key);
@@ -205,13 +245,45 @@ export const MapHighlightProvider = ({
     [debug, bump]
   );
 
+  const ensureSuppressedFeatures = useCallback(
+    (ids: ToggledFeature[], suppressed: boolean) => {
+      const map = criteriaRef.current.suppressedFeatures;
+      let changed = false;
+      for (const id of ids) {
+        const key = `${id.source}::${id.sourceLayer}::${id.id}`;
+        if (suppressed) {
+          if (!map.has(key)) {
+            map.set(key, id);
+            changed = true;
+          }
+        } else {
+          if (map.has(key)) {
+            map.delete(key);
+            changed = true;
+          }
+        }
+      }
+      if (changed) {
+        if (debug)
+          console.log("[MapHighlight] ensureSuppressedFeatures", {
+            count: ids.length,
+            suppressed,
+          });
+        bump();
+      }
+    },
+    [debug, bump]
+  );
+
   const clearHighlights = useCallback(() => {
     if (debug) console.log("[MapHighlight] clearHighlights");
     criteriaRef.current = {
       propertyMatchers: [],
       queryIds: [],
       toggledFeatures: new Map(),
+      suppressedFeatures: new Map(),
     };
+    setClearVersion((v) => v + 1);
     bump();
   }, [debug, bump]);
 
@@ -224,8 +296,10 @@ export const MapHighlightProvider = ({
       highlightByIds,
       toggleFeatureHighlight,
       ensureToggledFeatures,
+      ensureSuppressedFeatures,
       clearHighlights,
       highlightVersion,
+      clearVersion,
     }),
     [
       highlightingActive,
@@ -233,8 +307,10 @@ export const MapHighlightProvider = ({
       highlightByIds,
       toggleFeatureHighlight,
       ensureToggledFeatures,
+      ensureSuppressedFeatures,
       clearHighlights,
       highlightVersion,
+      clearVersion,
     ]
   );
 

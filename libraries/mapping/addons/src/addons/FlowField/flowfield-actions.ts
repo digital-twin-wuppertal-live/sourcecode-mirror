@@ -1,0 +1,434 @@
+import { useCallback, useMemo } from "react";
+
+import { useAddonState, useRouteAddons } from "../../lib/AddonStateContext";
+import {
+  useIsCagedAvailable,
+  FLOW_FIELD_OPTION_DEFAULTS,
+  type FlowFieldParams,
+  type UvCorrection,
+} from "../../lib/caged-addons";
+import {
+  flowFieldStateStorageKey,
+  loadFlowFieldState,
+  saveFlowFieldState,
+} from "./flowfield-storage";
+
+/**
+ * Everything about the running flow-field animation, in one channel.
+ *
+ * Two places read it and neither owns it: the layer-bar row draws the title and
+ * switches it off, and the addon itself keeps the map layer in step with it.
+ * Local state in either would be invisible to the other.
+ */
+
+/**
+ * An optional WMS layer painted under the particles.
+ *
+ * Declared in full rather than referenced by catalog id, because the Starkregen
+ * geoserver is not in the geoportal's catalog: `starkregenwms-wuppertal` occurs
+ * nowhere else in this repo except the workflow that names it. Same reasoning
+ * as the time series, which also spells its WMS out where it is used.
+ */
+export type FlowFieldBackdrop = {
+  /** base url, everything up to and including `?SERVICE=WMS` */
+  wmsUrl: string;
+  /** one layer name, the scenario's maximum-values raster */
+  layers: string;
+  styles?: string;
+  /** 0..1. Default: 0.85 */
+  opacity?: number;
+};
+
+/**
+ * What a route or a workflow declares to run an animation: the data and
+ * nothing derived.
+ */
+/** the two prepared GeoTIFFs of a preloaded scenario, see `preload` */
+export type FlowFieldPreload = { u: string; v: string };
+
+export type FlowFieldDefinition = {
+  /** what the layer-bar row calls the animation */
+  title: string;
+  /** rasterfari base, e.g. `https://rain-rasterfari-wuppertal.cismet.de` */
+  service: string;
+  /**
+   * Scenario folder, the rain hazard map config's `animation` value, e.g.
+   * `"T50/"`. The `84` in the `u84.tif` behind it is WGS84 and not a time step,
+   * so a scenario has exactly one velocity field and no time dimension.
+   */
+  scenario: string;
+  layerPostfix?: string;
+  /**
+   * How this model's u and v map onto east and north. Depends on the result
+   * file, so it belongs to the delivery. Left out, cage uses `{ u: -1, v: -1 }`,
+   * which is what the Leaflet rain hazard map defaults to.
+   */
+  uvCorrection?: UvCorrection;
+  /**
+   * MapLibre zoom at or above which the animation runs. Default 16, the same
+   * ground scale as the Leaflet app's `minAnimationZoom` of 17.
+   */
+  minZoom?: number;
+  /**
+   * Whether the particles keep running while the map pans, zooms or tilts.
+   * Default true. False clears them the moment a move starts and brings them
+   * back once the map has settled, the way the Leaflet rain hazard map did.
+   */
+  animateWhileMoving?: boolean;
+  /** 0..1. Default: 1 */
+  opacity?: number;
+  /**
+   * Linear factor by which the fetched velocity field exceeds the viewport, so
+   * a pan inside the margin needs no request. Default 1.3.
+   */
+  viewportBuffer?: number;
+  /** quiet time after a map move before a request goes out. Default 250 */
+  debounceMs?: number;
+  /**
+   * Whether 3D objects on the map hide the particles behind them. Default
+   * true; needs WebGL2, without which it is off whatever this says.
+   */
+  occlusion?: boolean;
+  /**
+   * Ceiling on how often the map is redrawn for the particles. They are drawn
+   * as a layer of the map, so every particle frame redraws the whole map; on a
+   * machine that cannot keep up this trades smoothness for load. The motion
+   * itself is frame-rate independent, so speed and trail length stay the
+   * same. Left out, the particles run at the display's rate.
+   */
+  maxFps?: number;
+  params?: FlowFieldParams;
+  backdrop?: FlowFieldBackdrop;
+  /**
+   * What stands in for the animation when cage is not in the build: a plain
+   * WMS, the scenario's direction arrows in the rain hazard map's case. Drawn
+   * only then; with cage present it is never mounted.
+   */
+  fallback?: FlowFieldBackdrop;
+  /**
+   * A fixed u/v pair for the scenario's area, loaded once instead of a request
+   * per view: two EPSG:4326 GeoTIFFs as rasterfari's `gdalProcessor` returns
+   * them, prepared for the whole area and served statically. Views inside
+   * their extent need no further request; outside it the animation fetches
+   * per view from `service` as without it. Ignored by a cage without preload.
+   */
+  preload?: FlowFieldPreload;
+  /**
+   * The animation belongs to a layer of the stack, typically a style that
+   * declares it in its `metadata.carmaConf.tools`: the host shows its controls
+   * on that layer's button rather than in a row of their own, and the layer's
+   * eye and ✕ are the animation's. Set by `getLayerLaunchedAddons`.
+   */
+  permanent?: boolean;
+  /**
+   * The stack layer that launched the animation. Its style's `flowField`
+   * placeholder is where the particles go, and no other style's.
+   */
+  anchorLayerId?: string;
+};
+
+export type FlowFieldState = {
+  /** whether the animation is on the map; the row exists exactly while it is */
+  isOn: boolean;
+  title: string;
+  service: string;
+  scenario: string;
+  layerPostfix: string;
+  uvCorrection?: UvCorrection;
+  minZoom: number;
+  animateWhileMoving: boolean;
+  opacity: number;
+  viewportBuffer: number;
+  debounceMs: number;
+  occlusion: boolean;
+  maxFps?: number;
+  params: FlowFieldParams;
+  backdrop: FlowFieldBackdrop | null;
+  fallback: FlowFieldBackdrop | null;
+  /** see `preload` on the definition */
+  preload: FlowFieldPreload | null;
+  /** see `permanent` on the definition */
+  permanent: boolean;
+  anchorLayerId?: string;
+  /**
+   * Whether the host has the animation hidden, i.e. the eye of the layer that
+   * launched it is off. The animation stays launched and only stops drawing.
+   */
+  isHidden: boolean;
+  /**
+   * Whether the map is at or above the zoom gate. Written by the addon from
+   * the caged layer, read by the row so it can say why nothing is moving.
+   */
+  isActive: boolean;
+  /** a velocity field is being fetched */
+  isLoading: boolean;
+  /**
+   * Whether the caged implementation is in this build. Unlike the crossfade
+   * there is no fallback, so a false here means the row has nothing to show.
+   */
+  isCaged: boolean;
+};
+
+/**
+ * The part of the channel a tuning panel may write: everything that shapes the
+ * animation, and nothing that says which scenario it is.
+ *
+ * Split out so the panel cannot rewrite the service, and so the exported
+ * config has an exact shape to be built from.
+ */
+export type FlowFieldTuning = Pick<
+  FlowFieldState,
+  | "uvCorrection"
+  | "minZoom"
+  | "animateWhileMoving"
+  | "opacity"
+  | "viewportBuffer"
+  | "debounceMs"
+  | "occlusion"
+  | "params"
+>;
+
+export const FLOW_FIELD_STATE_DEFAULT: FlowFieldState = {
+  isOn: false,
+  title: "Fließwege",
+  service: "",
+  scenario: "",
+  layerPostfix: "",
+  minZoom: FLOW_FIELD_OPTION_DEFAULTS.minZoom,
+  animateWhileMoving: FLOW_FIELD_OPTION_DEFAULTS.animateWhileMoving,
+  opacity: FLOW_FIELD_OPTION_DEFAULTS.opacity,
+  viewportBuffer: FLOW_FIELD_OPTION_DEFAULTS.viewportBuffer,
+  debounceMs: FLOW_FIELD_OPTION_DEFAULTS.debounceMs,
+  occlusion: FLOW_FIELD_OPTION_DEFAULTS.occlusion,
+  params: {},
+  backdrop: null,
+  fallback: null,
+  preload: null,
+  permanent: false,
+  isHidden: false,
+  isActive: false,
+  isLoading: false,
+  isCaged: false,
+};
+
+const sameDefinition = (
+  state: FlowFieldState,
+  def: FlowFieldDefinition
+): boolean =>
+  state.title === def.title &&
+  state.service === def.service &&
+  state.scenario === def.scenario &&
+  state.layerPostfix === (def.layerPostfix ?? "") &&
+  state.animateWhileMoving === (def.animateWhileMoving ?? true);
+
+/**
+ * The channel with its `localStorage` mirror in front of it: the stored launch
+ * stands in for the session state until something is written in this
+ * session, and every write goes to the store as well. That is what brings a
+ * workflow the user launched back after a reload (README, "Workflow tools").
+ * Read synchronously rather than hydrated in an effect, so the engine never
+ * sees a render in which the animation is off and then on.
+ */
+const useStoredFlowFieldState = () => {
+  const [sessionState, setSessionState] = useAddonState("flowField");
+  const addons = useRouteAddons();
+  const isCaged = useIsCagedAvailable();
+  const storageKey = useMemo(() => flowFieldStateStorageKey(addons), [addons]);
+  const storedState = useMemo(
+    () => loadFlowFieldState(storageKey, isCaged),
+    [storageKey, isCaged]
+  );
+  const state = sessionState ?? storedState ?? FLOW_FIELD_STATE_DEFAULT;
+
+  const setState = useCallback(
+    (updater: (previous: FlowFieldState) => FlowFieldState) =>
+      setSessionState((previous) => {
+        const next = updater(
+          previous ??
+            loadFlowFieldState(storageKey, isCaged) ??
+            FLOW_FIELD_STATE_DEFAULT
+        );
+        saveFlowFieldState(storageKey, next);
+        return next;
+      }),
+    [setSessionState, storageKey, isCaged]
+  );
+
+  return { state, setState, isCaged };
+};
+
+/**
+ * One entry point for both writers, so the row and the map layer cannot drift.
+ */
+export const useFlowFieldActions = () => {
+  const { state, setState } = useStoredFlowFieldState();
+
+  const setOn = useCallback(
+    (next: boolean) =>
+      setState((previous) =>
+        previous.isOn === next ? previous : { ...previous, isOn: next }
+      ),
+    [setState]
+  );
+
+  const toggle = useCallback(
+    () => setState((previous) => ({ ...previous, isOn: !previous.isOn })),
+    [setState]
+  );
+
+  const setOpacity = useCallback(
+    (next: number) =>
+      setState((previous) => {
+        const opacity = Math.max(0, Math.min(1, next));
+        return previous.opacity === opacity
+          ? previous
+          : { ...previous, opacity };
+      }),
+    [setState]
+  );
+
+  /**
+   * Replaces the given tuning keys. The engine pushes `params` and `opacity`
+   * into the running layer and rebuilds it for anything else, so a knob that
+   * costs a request is one the panel commits on release rather than on drag.
+   */
+  const setTuning = useCallback(
+    (patch: Partial<FlowFieldTuning>) =>
+      setState((previous) => ({ ...previous, ...patch })),
+    [setState]
+  );
+
+  const setActive = useCallback(
+    (next: boolean) =>
+      setState((previous) =>
+        previous.isActive === next ? previous : { ...previous, isActive: next }
+      ),
+    [setState]
+  );
+
+  const setHidden = useCallback(
+    (next: boolean) =>
+      setState((previous) =>
+        previous.isHidden === next ? previous : { ...previous, isHidden: next }
+      ),
+    [setState]
+  );
+
+  const setLoading = useCallback(
+    (next: boolean) =>
+      setState((previous) =>
+        previous.isLoading === next
+          ? previous
+          : { ...previous, isLoading: next }
+      ),
+    [setState]
+  );
+
+  return {
+    ...state,
+    setOn,
+    toggle,
+    setOpacity,
+    setTuning,
+    setActive,
+    setHidden,
+    setLoading,
+  };
+};
+
+/**
+ * Launches a `FlowFieldDefinition` into the `flowField` channel.
+ *
+ * The engine (`FlowField`) runs whatever the channel holds, and this hook is
+ * its only writer. A route with a full config uses `startField` at mount; a
+ * workflow card uses `toggleField` on click, so the same card switches the
+ * animation on and off.
+ */
+export const useFlowFieldLauncher = () => {
+  const { state, setState, isCaged } = useStoredFlowFieldState();
+
+  const launchedState = useCallback(
+    (previous: FlowFieldState, def: FlowFieldDefinition): FlowFieldState => {
+      if (sameDefinition(previous, def)) {
+        // The same scenario launched again. What the card declares may have
+        // changed since the state was stored (a backdrop or a fallback added,
+        // a parameter tuned), so those come fresh from the definition; what
+        // the user set on the row, the opacity, stays.
+        return {
+          ...previous,
+          uvCorrection: def.uvCorrection,
+          minZoom: def.minZoom ?? FLOW_FIELD_STATE_DEFAULT.minZoom,
+          viewportBuffer:
+            def.viewportBuffer ?? FLOW_FIELD_STATE_DEFAULT.viewportBuffer,
+          debounceMs: def.debounceMs ?? FLOW_FIELD_STATE_DEFAULT.debounceMs,
+          occlusion: def.occlusion ?? FLOW_FIELD_STATE_DEFAULT.occlusion,
+          maxFps: def.maxFps,
+          params: def.params ?? {},
+          backdrop: def.backdrop ?? null,
+          fallback: def.fallback ?? null,
+          preload: def.preload ?? null,
+          permanent: def.permanent ?? false,
+          anchorLayerId: def.anchorLayerId,
+          isCaged,
+          isOn: true,
+        };
+      }
+      return {
+        ...FLOW_FIELD_STATE_DEFAULT,
+        title: def.title,
+        service: def.service,
+        scenario: def.scenario,
+        layerPostfix: def.layerPostfix ?? "",
+        uvCorrection: def.uvCorrection,
+        minZoom: def.minZoom ?? FLOW_FIELD_STATE_DEFAULT.minZoom,
+        animateWhileMoving: def.animateWhileMoving ?? true,
+        opacity: def.opacity ?? 1,
+        viewportBuffer:
+          def.viewportBuffer ?? FLOW_FIELD_STATE_DEFAULT.viewportBuffer,
+        debounceMs: def.debounceMs ?? FLOW_FIELD_STATE_DEFAULT.debounceMs,
+        occlusion: def.occlusion ?? FLOW_FIELD_STATE_DEFAULT.occlusion,
+        maxFps: def.maxFps,
+        params: def.params ?? {},
+        backdrop: def.backdrop ?? null,
+        fallback: def.fallback ?? null,
+        preload: def.preload ?? null,
+        permanent: def.permanent ?? false,
+        anchorLayerId: def.anchorLayerId,
+        // the host's eye, which a new scenario from the same layer keeps
+        isHidden: previous.isHidden,
+        isCaged,
+        isOn: true,
+      };
+    },
+    [isCaged]
+  );
+
+  const startField = useCallback(
+    (def: FlowFieldDefinition) =>
+      setState((previous) => launchedState(previous, def)),
+    [setState, launchedState]
+  );
+
+  /** the same, but a second launch of the running animation switches it off */
+  const toggleField = useCallback(
+    (def: FlowFieldDefinition) =>
+      setState((previous) =>
+        sameDefinition(previous, def) && previous.isOn
+          ? { ...previous, isOn: false }
+          : launchedState(previous, def)
+      ),
+    [setState, launchedState]
+  );
+
+  /**
+   * Whether this animation is the one the channel currently runs. What the
+   * workflow card that launched it shows on its button, so a card that is on
+   * the map offers to remove it rather than to add it again.
+   */
+  const isFieldRunning = useCallback(
+    (def: FlowFieldDefinition): boolean => state.isOn && sameDefinition(state, def),
+    [state]
+  );
+
+  return { startField, toggleField, isFieldRunning };
+};

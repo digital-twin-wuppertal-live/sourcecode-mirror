@@ -10,6 +10,11 @@ export default defineConfig({
   root: __dirname,
   cacheDir: "../../node_modules/.vite/apps/geoportal",
 
+  // @excalidraw/excalidraw's entry reads process.env, which the browser has not
+  define: {
+    "process.env.IS_PREACT": JSON.stringify("true"),
+  },
+
   server: {
     port: 4200,
     host: true,
@@ -40,7 +45,31 @@ export default defineConfig({
   ],
 
   worker: {
+    // Module workers need ES output for their dynamically imported chunks.
+    format: "es",
     plugins: () => [nxViteTsPaths()],
+  },
+
+  // Terra-draw (used by @carma-mapping/measurements) ships class field
+  // declarations. Without telling esbuild they're natively supported, esbuild
+  // rewrites them through a `__publicField` helper that isn't reliably bundled
+  // here — which surfaces at runtime as "__publicField is not defined". The
+  // measurements-playground sets the same supported flags for the same reason.
+  optimizeDeps: {
+    esbuildOptions: {
+      target: "es2022",
+      supported: {
+        "class-field": true,
+        "class-static-field": true,
+      },
+    },
+  },
+
+  esbuild: {
+    supported: {
+      "class-field": true,
+      "class-static-field": true,
+    },
   },
 
   build: {

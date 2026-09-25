@@ -11,6 +11,11 @@ import type { CesiumConfig } from "@carma-mapping/engines/cesium/react/runtime";
 import type { CesiumModelConfig } from "@carma-mapping/engines/cesium/core";
 import type { LeafletConfig } from "@carma-mapping/engines/leaflet";
 import {
+  filterAddonsByAvailability,
+  getAddonKind,
+  type AddonEntry,
+} from "@carma-mapping/addons";
+import {
   ANNOTATION_SELECT_TOOL_ID,
   ANNOTATION_TYPES,
 } from "@carma-mapping/annotations/core";
@@ -26,6 +31,9 @@ import {
 } from "@carma-mapping/annotations/ui";
 import { Rectangle } from "cesium";
 
+import { availabilityContext } from "./availability";
+import { defaultWorkflowAddons } from "../constants/default-workflows";
+
 export const APP_BASE_PATH = import.meta.env.BASE_URL;
 export const ICON_PREFIX =
   "https://www.wuppertal.de/geoportal/geoportal_icon_legends/";
@@ -35,6 +43,56 @@ export const CONFIG_BASE_URL =
 
 export const MIN_MOBILE_WIDTH = 600;
 export const DEFAULT_CAMERA_FOV_DEG = 60;
+
+/**
+ * Addons every route gets. A route declaring the same addon replaces the entry
+ * here, see `withDefaultAddons`.
+ *
+ * `cameraRestriction` keeps the MapLibre camera north-up and flat everywhere,
+ * which is the app's long-standing behaviour, except while a 3D layer is on the
+ * map: buildings, trees and tilesets only show up in a tilted view. The mode
+ * asks the map what it is drawing rather than matching layer names, so a new 3D
+ * style is covered the day it is published. A route that wants different rules
+ * declares the addon itself with a config of its own.
+ *
+ * `libreTerrain` follows the restriction the engine ends up with rather than
+ * the layers: whenever the camera is free the terrain is on, and it goes off
+ * again the moment the camera locks. There is no button to it; the app
+ * switches CarmaMap's own terrain button off as well (`terrainControl={false}`),
+ * so relief is never a choice the user has to make.
+ */
+export const DEFAULT_ADDONS: AddonEntry[] = [
+  {
+    addon: "cameraRestriction",
+    config: { mode: "unless3dLayersActive" },
+  },
+  {
+    addon: "libreTerrain",
+    config: { appKey: "geoportal", mode: "whileCameraFree" },
+  },
+];
+
+/**
+ * The app's defaults, with the route's own declarations taking precedence.
+ * A default addon may carry an `availability` like a route addon; a feature
+ * flag used there must be in the base feature flag config (featureFlags.ts).
+ * The route's addons arrive already filtered, see constants/fachzwillinge.
+ *
+ * The default workflows join the defaults as ordinary addon entries, each
+ * carrying the definition it launches at mount, see constants/default-workflows.
+ * They follow the same precedence rule, so a route that declares the same kind
+ * takes the engine over and the default workflow does not run there.
+ */
+export const withDefaultAddons = (addons?: AddonEntry[]): AddonEntry[] => {
+  const declared = new Set((addons ?? []).map(getAddonKind));
+  return [
+    ...[
+      ...filterAddonsByAvailability(DEFAULT_ADDONS, availabilityContext),
+      ...defaultWorkflowAddons(),
+    ].filter((addon) => !declared.has(getAddonKind(addon))),
+    ...(addons ?? []),
+  ];
+};
 
 const CESIUM_PATHNAME = "__cesium__";
 const METROPOLE_RUHR_GRAUBLAU_RECTANGLE = Rectangle.fromDegrees(4, 48, 10, 52);
@@ -206,4 +264,5 @@ export const LEAFLET_CONFIG: LeafletConfig = {
 export const URL_PARAM_KEYS = {
   mapStyle: "m",
   measurements: "mm",
+  shadowSimulation: "shadow",
 } as const;

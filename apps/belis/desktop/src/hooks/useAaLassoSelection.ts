@@ -1,9 +1,13 @@
 import { useEffect, useRef, useCallback } from "react";
-import { LassoDrawingManager } from "@carma-mapping/engines/maplibre";
-import type { Map as MaplibreMap } from "maplibre-gl";
-import type { Polygon } from "geojson";
 import {
-  polygon as turfPolygon,
+  LassoDrawingManager,
+  shapePositions,
+  toTurfShape,
+} from "@carma-mapping/engines/maplibre";
+import type { DrawnShape } from "@carma-mapping/engines/maplibre";
+import type { Map as MaplibreMap } from "maplibre-gl";
+import type { Feature, MultiPolygon, Point, Polygon } from "geojson";
+import {
   booleanPointInPolygon,
   booleanIntersects,
   lineString as turfLineString,
@@ -30,16 +34,15 @@ export function useAaLassoSelection({
   onFeaturesSelectedRef.current = onFeaturesSelected;
 
   const handleDrawComplete = useCallback(
-    (lassoPolygon: Polygon) => {
+    (drawnShape: DrawnShape) => {
       if (!map) return;
 
-      // 1. Compute pixel bounding box from polygon vertices
-      const ring = lassoPolygon.coordinates[0];
+      // 1. Compute pixel bounding box from the shape's vertices
       let minX = Infinity,
         minY = Infinity,
         maxX = -Infinity,
         maxY = -Infinity;
-      for (const coord of ring) {
+      for (const coord of shapePositions(drawnShape)) {
         const px = map.project([coord[0], coord[1]]);
         if (px.x < minX) minX = px.x;
         if (px.y < minY) minY = px.y;
@@ -52,8 +55,8 @@ export function useAaLassoSelection({
       // 2. Query rendered features in bounding box
       const candidates = map.queryRenderedFeatures([bboxSW, bboxNE]);
 
-      // 3. Build turf polygon for spatial test
-      const turfLasso = turfPolygon(lassoPolygon.coordinates);
+      // 3. Build the turf geometry for the spatial test
+      const turfLasso = toTurfShape(drawnShape);
 
       // 4. Spatial test – keep every feature whose geometry falls inside the lasso
       const seen = new Set<string | number>();
@@ -65,8 +68,18 @@ export function useAaLassoSelection({
 
         let inside = false;
         try {
-          if (f.geometry.type === "Point") {
-            inside = booleanPointInPolygon(f.geometry, turfLasso);
+          if (
+            f.geometry.type === "Point" &&
+            turfLasso.geometry.type !== "LineString"
+          ) {
+            inside = booleanPointInPolygon(
+              f.geometry as Point,
+              turfLasso as Feature<Polygon | MultiPolygon>
+            );
+          } else if (f.geometry.type === "Point") {
+            // a point against a bare line practically never matches — that is
+            // what the corridor width is for
+            inside = booleanIntersects(f.geometry, turfLasso);
           } else if (f.geometry.type === "LineString") {
             const line = turfLineString(f.geometry.coordinates);
             inside = booleanIntersects(line, turfLasso);
@@ -90,12 +103,7 @@ export function useAaLassoSelection({
       }));
 
       if (serialized.length > 0) {
-        console.log(
-          `[AA Lasso] ${serialized.length} feature(s) selected:`,
-          serialized
-        );
       } else {
-        console.log("[AA Lasso] No features found in selection.");
       }
 
       onFeaturesSelectedRef.current?.(serialized);

@@ -1,6 +1,5 @@
 import React, { useState, useEffect } from "react";
 import type { ChartOptions } from "chart.js";
-import { Line } from "react-chartjs-2";
 import "chart.js/auto";
 import { Modal, Accordion } from "react-bootstrap";
 import Panel from "react-cismap/commons/Panel";
@@ -9,6 +8,14 @@ import { faInfoCircle } from "@fortawesome/free-solid-svg-icons";
 import { genericSecondaryInfoFooterFactory } from "../commons";
 import sensorAqmeshImage from "./sensor_aqmesh.png";
 import texts from "./_data/uvmSensorenTexts";
+import {
+  ChartWithZoom,
+  ZOOM_HINT,
+  ZOOM_PLUGIN_OPTIONS,
+} from "./helper/chartWithZoom";
+import { ChartLoadingPlaceholder } from "./helper/chartLoading";
+import { valueRange, withYScale } from "./helper/chartAxis";
+import { useProgressiveCharts } from "./helper/useProgressiveCharts";
 
 const fmtValue = (v: unknown, decimals: number, unit: string): string => {
   if (typeof v !== "number") return "–";
@@ -165,25 +172,46 @@ const CHART_PANELS: ChartPanel[] = [
   },
 ];
 
+// Einmal angelegt und wiederverwendet. Ueber toLocaleDateString mit
+// Optionsobjekt kostet dieselbe Beschriftung in einer Schleife ueber mehrere
+// tausend Messpunkte ein Vielfaches.
+// Mit Jahr, weil die Messreihen ueber den Jahreswechsel laufen und 01.08.
+// allein nicht sagt, aus welchem Jahr der Wert stammt.
+const dfDayShort = new Intl.DateTimeFormat("de-DE", {
+  day: "2-digit",
+  month: "2-digit",
+  year: "2-digit",
+});
+
+const dfTooltip = new Intl.DateTimeFormat("de-DE", {
+  day: "2-digit",
+  month: "2-digit",
+  year: "numeric",
+  hour: "2-digit",
+  minute: "2-digit",
+});
+
 function buildLineChartData(data: HistoricalData, series: SeriesConfig) {
   const entries = getAttrValues(data[series.attr]);
   if (entries.length === 0) return null;
 
   const sorted = [...entries].sort((a, b) =>
-    a.observedAt.localeCompare(b.observedAt),
+    a.observedAt.localeCompare(b.observedAt)
   );
-  const labels = sorted.map((e) =>
-    new Date(e.observedAt).toLocaleDateString("de-DE", {
-      day: "2-digit",
-      month: "2-digit",
-    }),
-  );
+  // Beschriftungen bleiben die rohen Zeitstempel. Ein Sensor liefert rund
+  // 24.000 Messpunkte je Reihe, formatiert wird ueber die Callbacks von Achse
+  // und Tooltip nur, was tatsaechlich angezeigt wird.
+  const labels = sorted.map((e) => e.observedAt);
   const scale = series.scale ?? 1;
   const values = sorted.map((e) =>
-    typeof e.value === "number" ? e.value * scale : null,
+    typeof e.value === "number" ? e.value * scale : null
   );
 
+  const range = valueRange(values);
+  if (!range) return null;
+
   return {
+    ...range,
     labels,
     datasets: [
       {
@@ -200,23 +228,89 @@ function buildLineChartData(data: HistoricalData, series: SeriesConfig) {
   };
 }
 
-const lineChartOptions: ChartOptions<"line"> = {
+// Bewusst als "line" | "bar" typisiert: so passt das Objekt in ChartWithZoom,
+// das beide Diagrammarten bedient.
+const lineChartOptions: ChartOptions<"line" | "bar"> = {
   maintainAspectRatio: false,
+  // Bei 24.000 Messpunkten je Reihe kostet die Einblendanimation Sekunden, in
+  // denen die Zeichenflaeche leer bleibt.
+  animation: false,
   plugins: {
     legend: { display: false },
-    tooltip: { mode: "index", intersect: false },
+    tooltip: {
+      mode: "index",
+      intersect: false,
+      callbacks: {
+        title: (items) =>
+          items.length ? dfTooltip.format(new Date(items[0].label)) : "",
+      },
+    },
+    zoom: ZOOM_PLUGIN_OPTIONS,
   },
   scales: {
     x: {
-      ticks: { maxTicksLimit: 8, font: { size: 10 } },
+      ticks: {
+        maxTicksLimit: 8,
+        font: { size: 10 },
+        callback: function (value) {
+          const raw = this.getLabelForValue(Number(value));
+          return dfDayShort.format(new Date(raw));
+        },
+      },
       grid: { display: false },
     },
+    // Grenzen und Striche kommen je Diagramm aus withYScale.
     y: {
       ticks: { maxTicksLimit: 6 },
       beginAtZero: false,
     },
   },
 };
+
+interface PreparedCharts {
+  panels: {
+    panel: ChartPanel;
+    data: NonNullable<ReturnType<typeof buildLineChartData>>;
+    options: ChartOptions<"line" | "bar">;
+  }[];
+  pointCount: number;
+}
+
+/**
+ * Baut Diagrammdaten und Datenpunktzahl in einem Durchgang. Laeuft bewusst
+ * nicht in einem useMemo waehrend des Renderns, sondern erst nachdem der
+ * Ladekringel gezeichnet ist: bei rund 6 MB Rohdaten blockiert dieser Schritt
+ * den Hauptthread, der Ladezustand waere sonst nicht zu sehen.
+ */
+function prepareCharts(data: HistoricalData): PreparedCharts {
+  const ts = new Set<string>();
+  for (const [key, val] of Object.entries(data)) {
+    if (SKIP_HISTORICAL_KEYS.has(key)) continue;
+    for (const e of getAttrValues(val)) {
+      ts.add(e.observedAt);
+    }
+  }
+
+  // Die Optionen entstehen hier mit, damit jedes Diagramm ueber Rerender
+  // hinweg dasselbe Optionsobjekt behaelt. ChartWithZoom setzt sonst die
+  // Skalen neu und ein gerade gesetzter Zoom waere verloren.
+  const panels: PreparedCharts["panels"] = [];
+  for (const panel of CHART_PANELS) {
+    const chartData = buildLineChartData(data, panel.series);
+    if (!chartData) continue;
+    panels.push({
+      panel,
+      data: chartData,
+      options: withYScale(lineChartOptions, chartData.min, chartData.max, {
+        // Negative Konzentrationen sind Rauschen der Sensoren um den
+        // Nullpunkt, keine echten Werte.
+        zeroFloorLabels: true,
+      }),
+    });
+  }
+
+  return { panels, pointCount: ts.size };
+}
 
 const headerBg = "#00acc1";
 const meteoBg = "#b2ebf2";
@@ -348,7 +442,7 @@ const SecondaryInfoModal = ({
   const entityId = (sensor?.id as string) ?? "";
 
   const [historicalData, setHistoricalData] = useState<HistoricalData | null>(
-    null,
+    null
   );
   const [historyLoading, setHistoryLoading] = useState(false);
 
@@ -372,6 +466,20 @@ const SecondaryInfoModal = ({
     };
   }, [entityId]);
 
+  const { prepared, mountedCharts } = useProgressiveCharts(
+    historicalData,
+    prepareCharts
+  );
+
+  const historicalDataPointCount = prepared?.pointCount ?? 0;
+  // Solange nichts aufbereitet ist, stehen die Kopfzeilen aller Diagramme
+  // schon da. Der Platz stimmt damit von Anfang an.
+  const renderedPanels = prepared
+    ? prepared.panels.map((entry) => entry.panel)
+    : historyLoading || historicalData
+    ? CHART_PANELS
+    : [];
+
   if (sensor === undefined) return null;
 
   const stationNr = getStationNumber(entityId);
@@ -383,27 +491,6 @@ const SecondaryInfoModal = ({
   const formattedDate = dateObserved
     ? new Date(dateObserved).toLocaleString("de-DE")
     : "–";
-
-  const historicalDataPointCount = historicalData
-    ? (() => {
-        const ts = new Set<string>();
-        for (const [key, val] of Object.entries(historicalData)) {
-          if (SKIP_HISTORICAL_KEYS.has(key)) continue;
-          for (const e of getAttrValues(val)) {
-            ts.add(e.observedAt);
-          }
-        }
-        return ts.size;
-      })()
-    : 0;
-
-  const chartPanelData =
-    historicalData && historicalDataPointCount > 0
-      ? CHART_PANELS.map((p) => ({
-          panel: p,
-          data: buildLineChartData(historicalData, p.series),
-        })).filter((entry) => entry.data !== null)
-      : [];
 
   return (
     <Modal
@@ -463,44 +550,44 @@ const SecondaryInfoModal = ({
           </div>
         </div>
 
-        {chartPanelData.map((entry, idx) => (
+        {prepared && prepared.panels.length > 0 && (
+          <div
+            style={{
+              fontSize: "85%",
+              color: "#888",
+              padding: "0 10px 10px 10px",
+            }}
+          >
+            {ZOOM_HINT}
+          </div>
+        )}
+
+        {renderedPanels.map((panel, idx) => (
           <Accordion
-            key={entry.panel.key}
+            key={panel.key}
             style={{ marginBottom: 6 }}
             defaultActiveKey={String(idx)}
           >
             <Panel
-              header={entry.panel.header}
+              header={panel.header}
               eventKey={String(idx)}
               bsStyle="success"
             >
               <div style={{ padding: "10px", paddingTop: 0 }}>
-                <div style={{ height: 260, width: "100%" }}>
-                  <Line
-                    data={entry.data as NonNullable<typeof entry.data>}
-                    options={lineChartOptions}
+                {prepared && idx < mountedCharts ? (
+                  <ChartWithZoom
+                    data={prepared.panels[idx].data}
+                    options={prepared.panels[idx].options}
                   />
-                </div>
+                ) : (
+                  <ChartLoadingPlaceholder
+                    label={idx === 0 ? "Messreihen werden geladen…" : "\u00a0"}
+                  />
+                )}
               </div>
             </Panel>
           </Accordion>
         ))}
-
-        {historyLoading && (
-          <Accordion style={{ marginBottom: 6 }} defaultActiveKey="loading">
-            <Panel header="Diagramme" eventKey="loading" bsStyle="success">
-              <div
-                style={{
-                  fontSize: "115%",
-                  padding: "10px",
-                  paddingTop: "0px",
-                }}
-              >
-                <p>Daten werden geladen…</p>
-              </div>
-            </Panel>
-          </Accordion>
-        )}
 
         {historicalDataPointCount > 0 && (
           <Accordion style={{ marginBottom: 6 }} defaultActiveKey="download">
@@ -511,7 +598,7 @@ const SecondaryInfoModal = ({
                 <button
                   type="button"
                   className="btn btn-primary btn-sm"
-                  disabled={historyLoading}
+                  disabled={!prepared}
                   onClick={() => {
                     if (!historicalData) return;
                     const csv = historicalDataToCsv(historicalData);

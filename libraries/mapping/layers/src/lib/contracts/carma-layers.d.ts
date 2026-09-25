@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import type { DeploymentTarget } from "@carma-commons/utils";
 import type { CarmaConfig } from "./carma-config";
 
 export type LayerFilterInfo = {
@@ -42,21 +43,6 @@ export type DynamicStylingOptionsConfig =
   | DynamicStylingListConfig
   | DynamicStylingToggleConfig;
 
-export type DynamicStylingVisibilityConfig = {
-  type: "visibility";
-  label: string;
-  default: "visible" | "hidden";
-  layers: string[];
-  showIcon?: boolean;
-  iconVisible?: string;
-  iconHidden?: string;
-};
-
-export type DynamicStylingConfig =
-  | DynamicStylingListConfig
-  | DynamicStylingToggleConfig
-  | DynamicStylingVisibilityConfig;
-
 export type BackgroundLayer = BaseLayer & {
   layers: string;
   layerType:
@@ -86,25 +72,17 @@ export const FILTER_TYPES = {
 } as const;
 export type FilterType = (typeof FILTER_TYPES)[keyof typeof FILTER_TYPES];
 
-export const GROUP_TOOL_TYPES = {
-  LAYER_VISIBILITY: "layerVisibility",
-} as const;
-export type GroupToolType =
-  (typeof GROUP_TOOL_TYPES)[keyof typeof GROUP_TOOL_TYPES];
-
-export type LayerVisibilityToolConfig = {
-  labels?: { hide: string; show: string };
-};
-
-export type GroupToolConfigMap = {
-  [GROUP_TOOL_TYPES.LAYER_VISIBILITY]: LayerVisibilityToolConfig;
-};
-
-export type GroupToolDefinition = {
-  [K in GroupToolType]: { type: K; config?: GroupToolConfigMap[K] };
-}[GroupToolType];
-
-export type GroupToolEntry = GroupToolType | GroupToolDefinition;
+/**
+ * A tool declared on a stack entry, as a bare kind or a kind with its config.
+ * Deliberately structural: nothing here reads the kind, entries are only
+ * carried through to the addon registry (`@carma-mapping/addons`), which owns
+ * the typed kinds and their configs. Typing it against that registry would
+ * make the two libraries circular.
+ */
+export type ToolEntry =
+  | string
+  | { kind: string; config?: unknown }
+  | { addon: string; config?: unknown };
 
 export const LAYER_ENTITY_TYPES = {
   LAYER: "layer",
@@ -188,13 +166,33 @@ type BaseLayer = {
   title: string;
   id: string;
   opacity?: number;
+  /**
+   * Animate opacity changes on this layer, in milliseconds or as MapLibre's
+   * own `{duration, delay}`. Left out, MapLibre's default applies.
+   *
+   * For layers whose opacity is driven from outside the app, where a change is
+   * a deliberate visual step. Note it also applies when a person changes that
+   * same layer's opacity by hand afterwards.
+   */
+  opacityTransition?: number | { duration: number; delay?: number };
   description?: string;
   visible: boolean;
   queryable?: boolean;
   useInFeatureInfo?: boolean;
   conf?: CarmaConfig;
   icon?: string;
+  /** Colour of the row icon; overrides the entry in `iconColorMap`. */
+  iconColor?: string;
+  /** Size of the row icon as a CSS length, e.g. "1.25rem". Default: 1rem */
+  iconSize?: string;
   pinned?: "first" | "last";
+  /**
+   * A row the app owns rather than the visitor: it gets no button in the layer
+   * bar and no removal from any path, only its visibility is theirs. The same
+   * contract the background layer has, for a row the app puts on every map,
+   * e.g. a default workflow. Groups cannot be permanent.
+   */
+  permanent?: boolean;
   group?: {
     id: string;
     title: string;
@@ -202,12 +200,22 @@ type BaseLayer = {
     icon?: string;
   };
   skipSelection?: boolean;
+  /**
+   * Show the info view for this entry even though `skipSelection` keeps it out
+   * of the normal layer handling. For an addon row that has something to say
+   * about its data, e.g. a time series with a legend; see `entryHasInfoView`.
+   */
+  hasInfoView?: boolean;
+  /** Clicking the row toggles the panel registered under this interaction id. */
+  rowClickInteractionId?: string;
   interactionButtons?: InteractionButton | InteractionButton[];
+  tools?: ToolEntry[];
+  featureBounds?: [number, number, number, number];
   other?: OtherLayerProps;
   filterConfig?: FilterConfig;
   filterInfo?: LayerFilterInfo;
   filterState?: Record<string, boolean>;
-  dynamicStyling?: DynamicStylingConfig | DynamicStylingConfig[];
+  dynamicStyling?: DynamicStylingOptionsConfig | DynamicStylingOptionsConfig[];
   dynamicStylingSelection?: string | Record<number, string>;
   layerInfo?: {
     accentColor?: string;
@@ -220,12 +228,20 @@ type BaseLayer = {
     thumbnail?: string;
     vectorStyle?: string;
     vectorLegend?: string;
+    /**
+     * Legend images for an entry that has no `props`, i.e. one that is not a
+     * map layer of its own. A row with `props` would enter the map render
+     * paths (`useCreateCismapLayer`, `geoportalLayersToLibreLayers`), so an
+     * addon row carries its legend here instead.
+     */
+    legend?: { OnlineResource: string }[];
     metaDataText?: string;
     vectorLegendTitle?: string;
     vectorTitle?: string;
     vectorDescription?: string;
     source?: string;
     mapMode?: "2d" | "3d";
+    links?: { url: string; text: string }[];
     [key: string]: unknown;
   };
 };
@@ -255,7 +271,7 @@ export type LayerGroup = {
   visible: boolean;
   opacity?: number;
   groupInfo?: LayerGroupInfo;
-  tools?: GroupToolEntry[];
+  tools?: ToolEntry[];
   layers: Layer[];
 };
 
@@ -394,6 +410,7 @@ export type Item = {
   vectorTitle?: string;
   vectorDescription?: string;
   ff?: string;
+  restrict?: DeploymentTarget | DeploymentTarget[];
   replaceId?: string;
   mergeId?: string;
   createdAt?: string;
@@ -403,7 +420,8 @@ export type Item = {
   workflowLayers?: string[];
   workflowLayerItems?: Item[];
   groupInfo?: LayerGroupInfo;
-  tools?: GroupToolEntry[];
+  links?: { url: string; text: string }[];
+  tools?: ToolEntry[];
 } & (TmpLayer | Link | Feature | Collection | Workflow);
 
 export interface WMSLatLonBoundingBox {

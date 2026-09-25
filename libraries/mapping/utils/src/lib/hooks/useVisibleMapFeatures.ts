@@ -5,6 +5,24 @@ import { stampSourceLayerFromProperty } from "../sourceLayerStamp";
 
 const DEFAULT_MAX_FEATURES = 2000;
 const DEFAULT_DEBOUNCE_MS = 300;
+const DEFAULT_SIDEBAR_WIDTH = 300;
+
+/** The yellow rectangle drawn while `showDebugBounds` is on. Exported so hosts
+ *  can recognise it; the hook keeps it out of its own results. */
+export const DEBUG_BBOX_SOURCE_ID = "debug-bbox-source";
+export const DEBUG_BBOX_LAYER_ID = "debug-bbox-layer";
+
+/** Scratch sources CARMA tools draw themselves with. Never map objects. */
+const INTERNAL_SOURCE_PREFIX = "__carma-";
+
+/** Pixels per side, so an asymmetric overlay can be described exactly. */
+export interface MapQueryInsetPx {
+  top?: number;
+  right?: number;
+  bottom?: number;
+  left?: number;
+}
+
 export interface UseVisibleMapFeaturesOptions {
   maplibreMap: MaplibreMap | null;
   visibleMapWidth: number;
@@ -21,6 +39,15 @@ export interface UseVisibleMapFeaturesOptions {
   highlightedOnly?: boolean;
   /** External trigger to force re-query (e.g. highlightVersion from context) */
   refreshTrigger?: number;
+  /** Pixels the query rectangle is pulled inside the visible map area, per side.
+   *  For chrome drawn over the map — navbar, side panels — whose features are
+   *  rendered on the canvas but hidden from the user. Unlike `visibleMapWidth`
+   *  and `visibleMapHeight`, which are sizes and trim both opposite sides
+   *  equally, this describes each side on its own. Default: 0 */
+  insetPx?: MapQueryInsetPx;
+  /** Width of the host layout's sidebar, which the canvas is not centered on.
+   *  Only used when the canvas is oversized. Default: 300 */
+  sidebarWidth?: number;
 }
 
 export interface MapGeoJSONFeatureWithOriginal extends MapGeoJSONFeature {
@@ -98,6 +125,8 @@ export const useVisibleMapFeatures = ({
   filter,
   highlightedOnly = false,
   refreshTrigger,
+  insetPx,
+  sidebarWidth = DEFAULT_SIDEBAR_WIDTH,
 }: UseVisibleMapFeaturesOptions): UseVisibleMapFeaturesResult => {
   const [features, setFeatures] = useState<MapGeoJSONFeatureWithOriginal[]>([]);
   const [totalCount, setTotalCount] = useState(0);
@@ -112,6 +141,10 @@ export const useVisibleMapFeatures = ({
   filterRef.current = filter;
   const highlightedOnlyRef = useRef(highlightedOnly);
   highlightedOnlyRef.current = highlightedOnly;
+  // Ref, like filter: callers build the inset inline, so a fresh object every
+  // render must not rebuild updateFeatures and re-bind the map listeners.
+  const insetPxRef = useRef(insetPx);
+  insetPxRef.current = insetPx;
   // Cached resolved layer IDs from layerFilterExpressions
   const resolvedLayerIdsRef = useRef<string[] | undefined>(undefined);
   const layerFilterExpressionsRef = useRef(layerFilterExpressions);
@@ -120,6 +153,7 @@ export const useVisibleMapFeatures = ({
   const lastDebugBoundsRef = useRef<string | null>(null);
   // Track whether previous query used the source fallback
   const wasUsingFallbackRef = useRef(false);
+  const lastResultKeyRef = useRef<string | null>(null);
 
   // Resolve layerFilterExpressions to MapLibre layer IDs once on style load.
   // In imperative mode, actual layer IDs are namespaced (e.g. "slug::leitungen-base")
@@ -219,27 +253,37 @@ export const useVisibleMapFeatures = ({
         let verticalOffset = 0;
 
         if (isOversized) {
-          const sidebarWidth = 300;
           const fullWindowWidth = visibleMapWidth + sidebarWidth;
           horizontalOffset = (canvasWidth - fullWindowWidth) / 2;
           verticalOffset = (canvasHeight - visibleMapHeight) / 2;
         }
 
-        // Visible bounds with offset
-        const visibleWest =
-          fullWest + lngRange * (horizontalOffset / canvasWidth);
-        const visibleEast =
-          fullWest +
-          lngRange * ((horizontalOffset + visibleMapWidth) / canvasWidth);
-        const visibleNorth =
-          fullNorth - latRange * (verticalOffset / canvasHeight);
-        const visibleSouth =
-          fullNorth -
-          latRange * ((verticalOffset + visibleMapHeight) / canvasHeight);
+        // Chrome drawn over the map (navbar, side panels) hides features that
+        // are still rendered on the canvas underneath it. The offsets above are
+        // centered and cannot express that: they always trim both opposite
+        // sides by the same amount. The inset trims each side on its own.
+        const {
+          top: insetTop = 0,
+          right: insetRight = 0,
+          bottom: insetBottom = 0,
+          left: insetLeft = 0,
+        } = insetPxRef.current ?? {};
+
+        // The queried rectangle in canvas pixels
+        const rectLeft = horizontalOffset + insetLeft;
+        const rectTop = verticalOffset + insetTop;
+        const rectRight = horizontalOffset + visibleMapWidth - insetRight;
+        const rectBottom = verticalOffset + visibleMapHeight - insetBottom;
+
+        // Visible bounds with offset and inset
+        const visibleWest = fullWest + lngRange * (rectLeft / canvasWidth);
+        const visibleEast = fullWest + lngRange * (rectRight / canvasWidth);
+        const visibleNorth = fullNorth - latRange * (rectTop / canvasHeight);
+        const visibleSouth = fullNorth - latRange * (rectBottom / canvasHeight);
 
         // Draw debug bbox using the VISIBLE bounds (if enabled)
-        const debugSourceId = "debug-bbox-source";
-        const debugLayerId = "debug-bbox-layer";
+        const debugSourceId = DEBUG_BBOX_SOURCE_ID;
+        const debugLayerId = DEBUG_BBOX_LAYER_ID;
 
         if (showDebugBounds) {
           // Create a key to track if bounds have changed (avoid infinite loop from setData triggering idle)
@@ -389,6 +433,7 @@ export const useVisibleMapFeatures = ({
 
         const seen = new Set<string>();
         const uniqueFeatures: MapGeoJSONFeatureWithOriginal[] = [];
+        const resultKeys: string[] = [];
         let count = 0;
         const layerCounts: Record<string, number> = {};
         const checkHighlight = highlightedOnlyRef.current && maplibreMap;
@@ -399,6 +444,19 @@ export const useVisibleMapFeatures = ({
         const boundsToUse = visibleBounds;
 
         for (const f of renderedFeatures) {
+          // The debug rectangle is drawn above, before the query runs, so it is
+          // a rendered feature like any other and would count itself. The hook
+          // owns that layer, so it drops it here rather than leaving every
+          // caller to remember a filter. The same goes for the scratch
+          // layers other CARMA tools draw themselves with.
+          if (
+            f.source === DEBUG_BBOX_SOURCE_ID ||
+            f.layer?.id === DEBUG_BBOX_LAYER_ID ||
+            f.source?.startsWith(INTERNAL_SOURCE_PREFIX) ||
+            f.layer?.id?.startsWith(INTERNAL_SOURCE_PREFIX)
+          ) {
+            continue;
+          }
           if (filterRef.current && !filterRef.current(f)) continue;
           stampSourceLayerFromProperty(f);
           const key = `${f.source}-${f.sourceLayer}-${f.id}`;
@@ -420,6 +478,9 @@ export const useVisibleMapFeatures = ({
             }
 
             count++;
+            // features without an id share a key, so the count is part of the
+            // signature below
+            resultKeys.push(key);
             const layerKey = f.sourceLayer || f.source || "other";
             layerCounts[layerKey] = (layerCounts[layerKey] || 0) + 1;
             if (uniqueFeatures.length < maxFeatures) {
@@ -432,6 +493,17 @@ export const useVisibleMapFeatures = ({
 
         // Overview mode: feature count exceeds the sidebar limit
         const inOverviewMode = count > maxFeatures;
+
+        // Same features as last time: keep the published arrays, so consumers
+        // keyed on them do not re-run. Order matters, since the feature list
+        // is handed out in query order.
+        const resultKey = `${count}|${inOverviewMode ? 1 : 0}|${resultKeys.join(
+          ","
+        )}`;
+        if (resultKey === lastResultKeyRef.current) {
+          return;
+        }
+        lastResultKeyRef.current = resultKey;
 
         setFeatures(inOverviewMode ? [] : uniqueFeatures);
         setTotalCount(count);
@@ -455,6 +527,7 @@ export const useVisibleMapFeatures = ({
     maxFeatures,
     debounceMs,
     refreshTrigger,
+    sidebarWidth,
   ]);
 
   useEffect(() => {
@@ -464,6 +537,8 @@ export const useVisibleMapFeatures = ({
     const onMoveStart = () => setIsLoading(true);
     maplibreMap.on("movestart", onMoveStart);
 
+    // a new map or query configuration always publishes its first result
+    lastResultKeyRef.current = null;
     setIsLoading(true);
     updateFeatures();
 

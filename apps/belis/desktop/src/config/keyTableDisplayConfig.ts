@@ -51,6 +51,7 @@ export const apiClassNameToTableName: Record<string, string> = {
   arbeitsprotokollstatus: "arbeitsprotokollstatus",
   veranlassungsart: "veranlassungsart",
   leitungstyp: "leitungstyp",
+  sensorbetreiber: "sensorbetreiber",
 };
 
 export const keyTableDisplayConfig: KeyTableDisplayConfig = {
@@ -235,6 +236,16 @@ export const keyTableDisplayConfig: KeyTableDisplayConfig = {
     sortMode: "alphabetical",
     apiClassName: "material_mauerlasche",
     displayName: "Material - Mauerlasche",
+  },
+  sensorbetreiber: {
+    template: "{name}",
+    sortMode: "alphabetical",
+    displayName: "Sensorbetreiber",
+    fieldOrder: ["name", "key", "beschreibung", "url"],
+    fieldLabels: {
+      key: "Schlüssel",
+      url: "URL",
+    },
   },
   // straßenschlüssel: {
   //   template: "{pk} - {strasse}",
