@@ -1,3 +1,4 @@
+import { MapStyleKeys } from "../MapStyleKeys";
 import {
   schwebebahn2dWorkflowsWithoutStations,
   starkregenFlowWorkflows,
@@ -9,19 +10,42 @@ import type { FachzwillingRoute } from ".";
 const PROJECTION_MAPPING_STYLES = "https://tiles.cismet.de/projection_mapping";
 
 /**
+ * The outline of the projection area ("Projektionsbereich"). It darkens
+ * everything outside the area the projector covers, which helps while the
+ * show is put together and has nothing to do on the model itself.
+ */
+const PROJECTION_AREA_STYLE = `${PROJECTION_MAPPING_STYLES}/umriss.style.json`;
+
+/**
+ * Styles this app serves itself (`public/assets/dz-b-prm/styles`) until the
+ * pipeline publishes them next to the others. Absolute, because a style url
+ * is also the layer's id in a saved scene, and the display reads it back.
+ */
+const LOCAL_STYLES = new URL(
+  `${import.meta.env.BASE_URL}assets/dz-b-prm/styles`,
+  window.location.origin
+).href;
+
+/**
  * Zoom gate of the flow field cards. The projection area is about 3.6 by 2 km,
  * which a projector 1920 pixels wide shows at zoom 14.7; the cards' own gate of
  * 16 would keep the animation still on the whole model.
  */
 const MODEL_FLOW_MIN_ZOOM = 14;
+const DZ_B_PRM_ASSET_BASE_URL =
+  import.meta.env.VITE_DZ_B_PRM_GLB_BASE_URL ||
+  "https://wupp-3d-data.cismet.de/dz-b-prm/derived";
 
 /**
  * The remote the published show opens on the phone (`apps/pm-remote`). The
  * local dev server has its own port; a deployment may name another host.
+ * A geoportal opened on localhost links to the local remote even when its dev
+ * server runs with NODE_ENV=production, where `DEV` is false.
  */
 const PM_REMOTE_URL =
   import.meta.env.VITE_PM_REMOTE_URL ||
-  (import.meta.env.DEV
+  (import.meta.env.DEV ||
+  ["localhost", "127.0.0.1"].includes(window.location.hostname)
     ? "http://localhost:4210/"
     : "https://carma-dev-deployments.github.io/pm-remote/");
 
@@ -31,6 +55,9 @@ const PM_REMOTE_URL =
  */
 const SHOW_STORE_URL: string | undefined =
   import.meta.env.VITE_SHOW_STORE_URL || undefined;
+/** where "Show öffnen" reads a show; set it together with the store url */
+const SHOW_READ_URL: string | undefined =
+  import.meta.env.VITE_SHOW_READ_URL || undefined;
 
 /**
  * The collection point for the projection mapping show: the layers that are
@@ -56,7 +83,63 @@ export const projectionMappingFachzwilling: FachzwillingRoute = {
   availability: {
     deployments: ["localDev", "dev", "pr"],
   },
+  /**
+   * One base map per category. Labels would be projected onto the model, so
+   * "Karte" is the Stadtplan without them; "Luftbild" is the plain true
+   * orthofoto, not the geoportal's Luftbildkarte with the RVR Grundriss and
+   * Schrift on top.
+   */
+  background: {
+    layerMap: {
+      stadtplanOhneSchrift: {
+        title: "Stadtplan (ohne Schrift)",
+        layers: "stadtplan_ohne_schrift@100",
+        description: `Stadtplan (ohne Schrift) © basemap.de / BKG, Stadt Wuppertal, OpenStreetMap-Mitwirkende`,
+        inhalt: `<span>Stadtplan ohne Schrift und Symbole, als Hintergrund für die Projektion auf ein 3D-Modell.</span>`,
+      },
+      trueOrtho2024: {
+        title: "True Orthofoto 03/24",
+        layers: "trueOrtho2024@100",
+        description: `True Orthofoto 03/24 © Stadt Wuppertal`,
+        inhalt: `<span>Kartendienst (WMS) der Stadt Wuppertal. Datengrundlage:
+              True Orthofoto aus Bildflügen vom 14.03. und 17.03.2024, hergestellt durch Aerowest
+              GmbH/Dortmund, Bodenauflösung 3 cm.
+              (True Orthofoto: Aus Luftbildern mit hoher Längs- und Querüberdeckung
+              in einem automatisierten Bildverarbeitungsprozess
+              berechnetes Bild in Parallelprojektion, also ohne Gebäudeverkippung und sichttote Bereiche.) © Stadt Wuppertal (</span>
+              <a class="remove-margins" href="https://www.wuppertal.de/geoportal/Nutzungsbedingungen/NB-GDIKOM-C_Geodaten.pdf">NB-GDIKOM C</a>
+              <span>).</span>`,
+      },
+    },
+    namedLayers: {
+      stadtplan_ohne_schrift: {
+        type: "vector",
+        style: "https://tiles.cismet.de/stadtplan/ohne_schrift.style.json",
+      },
+    },
+    categories: [
+      {
+        id: MapStyleKeys.TOPO,
+        title: "Karte",
+        entries: ["stadtplanOhneSchrift"],
+      },
+      {
+        id: MapStyleKeys.AERIAL,
+        title: "Luftbild",
+        entries: ["trueOrtho2024"],
+      },
+    ],
+  },
   addons: [
+    {
+      addon: "shadowTexture",
+      config: {
+        manifestUrl: `${
+          import.meta.env.BASE_URL
+        }assets/dz-b-prm/collection.json`,
+        assetBaseUrl: DZ_B_PRM_ASSET_BASE_URL,
+      },
+    },
     // the engine the Schwebebahn cards launch into; idle until one is clicked
     "vehicleAnimation",
     // the same for the Starkregen cards. Its own storage key, so tuning it for
@@ -71,6 +154,9 @@ export const projectionMappingFachzwilling: FachzwillingRoute = {
       config: {
         remoteUrl: PM_REMOTE_URL,
         ...(SHOW_STORE_URL ? { storeUrl: SHOW_STORE_URL } : {}),
+        ...(SHOW_READ_URL ? { readUrl: SHOW_READ_URL } : {}),
+        // pre-ticked in the panel's "Nicht in der Show" list
+        excludeLayers: [PROJECTION_AREA_STYLE],
       },
     },
   ],
@@ -86,7 +172,7 @@ export const projectionMappingFachzwilling: FachzwillingRoute = {
       Title: "Projection Mapping",
       layers: [
         {
-          styleUrl: `${PROJECTION_MAPPING_STYLES}/umriss.style.json`,
+          styleUrl: PROJECTION_AREA_STYLE,
           // everything outside the projection area is darkened by this layer,
           // so it has to stay above whatever is added after it
           tools: ["alwaysOnTop"],
@@ -110,6 +196,50 @@ export const projectionMappingFachzwilling: FachzwillingRoute = {
         "https://tiles.cismet.de/pm_naturdenkmale/style.json",
         "https://tiles.cismet.de/pm_poi/style.json",
         "https://tiles.cismet.de/pm_belis_leuchten/style.json",
+      ],
+    },
+    {
+      Title: "Bewegung",
+      layers: [
+        // every cab on the model in its own spot of light, the rest dimmed
+        `${LOCAL_STYLES}/schwebebahn_fahrplan_kabinenlicht.style.json`,
+        // cars, buses and trucks on the roads, day and night; invented
+        // traffic values until the sensors are connected
+        `${LOCAL_STYLES}/verkehr.style.json`,
+      ],
+    },
+    {
+      Title: "Starkregen",
+      // each style launches its time series itself, see its carmaConf.tools;
+      // the `_autostart` copy plays as soon as it is on the map, the plain one
+      // waits for the remote or the play button
+      layers: [
+        `${PROJECTION_MAPPING_STYLES}/starkregen_t50_zeitreihe.style.json`,
+        `${PROJECTION_MAPPING_STYLES}/starkregen_t50_zeitreihe_autostart.style.json`,
+        `${PROJECTION_MAPPING_STYLES}/starkregen_t100_zeitreihe.style.json`,
+        `${PROJECTION_MAPPING_STYLES}/starkregen_t100_zeitreihe_autostart.style.json`,
+        `${PROJECTION_MAPPING_STYLES}/starkregen_90mm_zeitreihe.style.json`,
+        `${PROJECTION_MAPPING_STYLES}/starkregen_90mm_zeitreihe_autostart.style.json`,
+        `${PROJECTION_MAPPING_STYLES}/starkregen_extrem2018_zeitreihe.style.json`,
+        `${PROJECTION_MAPPING_STYLES}/starkregen_extrem2018_zeitreihe_autostart.style.json`,
+      ],
+    },
+    {
+      Title: "Schatten",
+      // each style switches the BuGa model's shadows on for its bridge, see its
+      // carmaConf.tools; date, time and playback sit on the style's button
+      layers: [
+        `${PROJECTION_MAPPING_STYLES}/schatten_bestand.style.json`,
+        `${PROJECTION_MAPPING_STYLES}/schatten_buga_entwurf.style.json`,
+      ],
+    },
+    {
+      Title: "Hochwasser",
+      // one scenario of the Hochwassergefahrenkarte each; no time steps
+      layers: [
+        `${PROJECTION_MAPPING_STYLES}/hochwasser_hq_haeufig.style.json`,
+        `${PROJECTION_MAPPING_STYLES}/hochwasser_hq100.style.json`,
+        `${PROJECTION_MAPPING_STYLES}/hochwasser_hq_extrem.style.json`,
       ],
     },
     {
@@ -151,6 +281,40 @@ export const projectionMappingFachzwilling: FachzwillingRoute = {
    * meant to be shown as one step of the show.
    */
   perspectives: [
+    {
+      id: "schatten",
+      title: "Schatten",
+      workflows: [
+        {
+          id: "ohne-karte",
+          title: "Schatten ohne Karte",
+          description: "Nur die vom BuGa-Modell berechneten Schatten anzeigen.",
+          tools: [
+            {
+              addon: "shadowTexture",
+              config: {
+                assetBaseUrl: DZ_B_PRM_ASSET_BASE_URL,
+                workflowBackgroundVisible: false,
+              },
+            },
+          ],
+        },
+        {
+          id: "mit-karte",
+          title: "Schatten mit Karte",
+          description: "Die Schatten über der gewählten Basiskarte anzeigen.",
+          tools: [
+            {
+              addon: "shadowTexture",
+              config: {
+                assetBaseUrl: DZ_B_PRM_ASSET_BASE_URL,
+                workflowBackgroundVisible: true,
+              },
+            },
+          ],
+        },
+      ],
+    },
     {
       id: "mobilitaet",
       title: "Mobilität",

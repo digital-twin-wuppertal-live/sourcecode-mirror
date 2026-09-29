@@ -9,6 +9,7 @@ Der Inhalt wird automatisch aus carma erzeugt. Entwickelt wird in carma; Änderu
 - `stadtplan` (`apps/topicmaps/stadtplan`)
 - `legals` (`apps/legals`)
 - `kulturstadtplan` (`apps/topicmaps/kulturstadtplan`)
+- `tz-leerstandsmanagement` (`apps/topicmaps/tz-leerstandsmanagement`)
 - `x-and-ride` (`apps/topicmaps/x-and-ride`)
 - `bplan-auskunft` (`apps/topicmaps/bplan-auskunft`)
 - `e-bikes` (`apps/topicmaps/e-bikes`)
@@ -32,7 +33,7 @@ Zu jeder Anwendung gehören die Bibliotheken, von denen sie abhängt, und die Ko
 
 ## Stand
 
-- carma: `6f8d74cc583fc3a89d0e02f8d532d30975e135ee`
+- carma: `252f8b3dcfa1fe03115ab07cc04c29677b9ed040`
 - carma-wuppertal-collab: `f197f6da532071e322372a34ca057139448dcbb6`
 
 Jede Live-Auslieferung einer der Anwendungen legt hier einen Commit mit dem gesamten Code an und setzt ein Tag `<anwendung>/v<version>`. Wird dieselbe Version noch einmal ausgeliefert, bekommt das neue Tag einen Zusatz wie `-2`. Werden alle Anwendungen auf einmal ausgeliefert, gibt es einen gemeinsamen Commit mit dem Tag `allProjects/v<datum>-<uhrzeit>` (UTC), auf das dann jede Anwendung in `LIVE.json` verweist. `main` zeigt den Stand der letzten Auslieferung, gleich welcher Anwendung. Für eine Anwendung, die länger nicht ausgeliefert wurde, kann der Code auf `main` deshalb neuer sein als das, was live läuft; den ausgelieferten Stand enthält ihr Tag. Welche Version welcher Anwendung live ist, steht in `LIVE.json`.

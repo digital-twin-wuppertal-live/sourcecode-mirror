@@ -74,6 +74,16 @@ import {
   type ShadowSimulationState,
 } from "../addons/ShadowSimulation";
 import {
+  ShadowTexture,
+  type ShadowTextureConfig,
+  type ShadowTextureState,
+} from "../addons/ShadowTexture";
+import {
+  ModelCollection,
+  type ModelCollectionConfig,
+  type ModelCollectionState,
+} from "../addons/ModelCollection";
+import {
   LayerVisibility,
   layerVisibilityTrigger,
   type LayerVisibilityConfig,
@@ -107,6 +117,11 @@ import {
   type FloodSimulationConfig,
   type FloodState,
 } from "../addons/FloodSimulation";
+import {
+  TrafficAnimation,
+  type TrafficAnimationConfig,
+  type TrafficAnimationState,
+} from "../addons/TrafficAnimation";
 import {
   zoomToExtentTrigger,
   type ZoomToExtentConfig,
@@ -161,6 +176,8 @@ export type AddonConfigMap = {
   layerVisibility: LayerVisibilityConfig;
   libreTerrain: LibreTerrainConfig;
   shadowSimulation: ShadowSimulationConfig;
+  shadowTexture: ShadowTextureConfig;
+  modelCollection: ModelCollectionConfig;
   infoBoxZoomImage: InfoBoxZoomImageConfig;
   outlet: OutletConfig;
   /**
@@ -187,6 +204,11 @@ export type AddonConfigMap = {
    * three.js. Open, no cage involved.
    */
   floodSimulation: FloodSimulationConfig;
+  /**
+   * Cars, buses and trucks on a road network, by day and by night, launched
+   * by a layer; see `TrafficAnimation`. The traffic values are invented.
+   */
+  trafficAnimation: TrafficAnimationConfig;
   zoomToExtent: ZoomToExtentConfig;
   /**
    * Declared on a layer to keep it above the others; the host does the
@@ -260,6 +282,12 @@ export type AddonStateMap = {
    */
   floodSimulation: FloodState;
   /**
+   * the running traffic: the moment it shows as an offset from now, how dark
+   * it is and how many vehicles are out; see `TrafficAnimation`. Written by
+   * the panel or, on the projection window, by the remote.
+   */
+  trafficAnimation: TrafficAnimationState;
+  /**
    * image the info box shows instead of the feature photo at the current zoom;
    * see `InfoBoxZoomImage`. Consumed by the host app's info box, not by an addon.
    */
@@ -274,6 +302,8 @@ export type AddonStateMap = {
   shadowSimulation: ShadowSimulationState;
   /** selected civil date and time, separate for future shared-time sync */
   shadowDate: ShadowDateState;
+  shadowTexture: ShadowTextureState;
+  modelCollection: ModelCollectionState;
 };
 
 export type AddonStateKey = keyof AddonStateMap;
@@ -402,7 +432,8 @@ export type AddonActionContext<K extends AddonKind = AddonKind> =
  * button renders next to its title. Declaring this also decides where the
  * addon is mounted: entries with a `trigger` are rendered into the interaction
  * view while their trigger is active, entries without one are mounted by
- * `AddonHost` and render wherever they like, including `<Control>`.
+ * `AddonHost`. Where the UI of those may land is `ADDON-UI.md`: a `<Control>`
+ * holds the control-column button, settings go into the interaction view.
  */
 export type AddonTrigger<K extends AddonKind = AddonKind> = {
   icon: IconDefinition;
@@ -505,6 +536,21 @@ export const addonRegistry: {
     targetPlacement: ADDON_TARGET_PLACEMENT.SECONDARY_VIEW,
     provides: ["shadowSimulation", "shadowDate"],
   },
+  shadowTexture: {
+    Component: ShadowTexture,
+    targetPlacement: ADDON_TARGET_PLACEMENT.SECONDARY_VIEW,
+    provides: [
+      "shadowSimulation",
+      "shadowDate",
+      "shadowTexture",
+      "modelCollection",
+    ],
+  },
+  modelCollection: {
+    Component: ModelCollection,
+    targetPlacement: ADDON_TARGET_PLACEMENT.SECONDARY_VIEW,
+    provides: ["modelCollection"],
+  },
   infoBoxZoomImage: {
     Component: InfoBoxZoomImage,
     provides: ["infoBoxImage"],
@@ -526,6 +572,10 @@ export const addonRegistry: {
   floodSimulation: {
     Component: FloodSimulation,
     provides: ["floodSimulation"],
+  },
+  trafficAnimation: {
+    Component: TrafficAnimation,
+    provides: ["trafficAnimation"],
   },
   zoomToExtent: { trigger: zoomToExtentTrigger },
   alwaysOnTop: { perTarget: true },

@@ -30,6 +30,8 @@ const addonStateMock = vi.hoisted(() => ({
   shadowState: undefined as ShadowStateFixture | undefined,
   setShadowDate: vi.fn(),
   shadowDate: undefined as ShadowDateFixture | undefined,
+  textureState: undefined as object | undefined,
+  routeAddons: undefined as unknown[] | undefined,
 }));
 
 const hashStateMock = vi.hoisted(() => ({ updateHashState: vi.fn() }));
@@ -38,12 +40,17 @@ const libreContextMock = vi.hoisted(() => ({
   getCenter: vi.fn(() => ({ lat: 51.256, lng: 7.15 })),
 }));
 
-vi.mock("@carma-mapping/addons", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("@carma-mapping/addons")>();
+vi.mock("@carma-mapping/addons", () => {
   return {
-    ...actual,
+    normalizeAddonEntries: (entries: unknown[]) => entries,
+    resolveAddonEntries: (entries?: unknown[]) => entries ?? [],
+    useRouteAddons: () => addonStateMock.routeAddons,
+    applyAddonOverrides: (entries: unknown[]) => entries,
+    isAlwaysOnTop: () => false,
     useAddonState: (key: string) =>
-      key === "shadowDate"
+      key === "shadowTexture"
+        ? [addonStateMock.textureState, vi.fn()]
+        : key === "shadowDate"
         ? [addonStateMock.shadowDate, addonStateMock.setShadowDate]
         : [addonStateMock.shadowState, addonStateMock.setShadowState],
   };
@@ -110,6 +117,8 @@ describe("useGeoportalShadowSimulationHash", () => {
   beforeEach(() => {
     addonStateMock.shadowState = undefined;
     addonStateMock.shadowDate = undefined;
+    addonStateMock.textureState = undefined;
+    addonStateMock.routeAddons = undefined;
     addonStateMock.setShadowState.mockReset();
     addonStateMock.setShadowDate.mockReset();
     hashStateMock.updateHashState.mockReset();
@@ -117,7 +126,65 @@ describe("useGeoportalShadowSimulationHash", () => {
     libreContextMock.getCenter.mockReturnValue({ lat: 51.256, lng: 7.15 });
   });
 
-  afterEach(() => vi.useRealTimers());
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("restores midnight when the shadow texture owns the full-day clock", () => {
+    addonStateMock.shadowState = createShadowState();
+    addonStateMock.shadowDate = createShadowDate();
+    addonStateMock.textureState = {};
+    renderHook(() =>
+      useGeoportalShadowSimulationHash({
+        customHashState: createCustomHashState({
+          selection: { dayOfYear: 172, minutes: 0 },
+        }),
+      })
+    );
+    expect(addonStateMock.setShadowDate).toHaveBeenCalledWith({
+      ...createShadowDate(),
+      minutes: 0,
+    });
+  });
+
+  it("keeps shadows off when the initial URL has no shadow parameter", async () => {
+    const customHashState = createCustomHashState({ selection: null });
+    addonStateMock.shadowState = createShadowState();
+    addonStateMock.shadowDate = createShadowDate({
+      minutes: 660,
+      dayOfYear: 140,
+    });
+
+    renderHook(() => useGeoportalShadowSimulationHash({ customHashState }));
+
+    expect(addonStateMock.setShadowState).not.toHaveBeenCalled();
+    await waitFor(() =>
+      expect(hashStateMock.updateHashState).toHaveBeenCalledWith(
+        { shadow: undefined },
+        { label: "geoportal:sync-shadow-simulation", replace: true }
+      )
+    );
+  });
+
+  it("leaves shadows a layer launched on when the URL has no shadow parameter", async () => {
+    const customHashState = createCustomHashState({ selection: null });
+    addonStateMock.routeAddons = [
+      { kind: "shadowTexture", config: { startEnabled: true } },
+    ];
+    addonStateMock.shadowState = createShadowState({ enabled: true });
+    addonStateMock.shadowDate = createShadowDate({ minutes: 391, dayOfYear: 269 });
+    addonStateMock.textureState = {};
+
+    renderHook(() => useGeoportalShadowSimulationHash({ customHashState }));
+
+    expect(addonStateMock.setShadowState).not.toHaveBeenCalled();
+    await waitFor(() =>
+      expect(hashStateMock.updateHashState).toHaveBeenCalledWith(
+        { shadow: "391;269" },
+        { label: "geoportal:sync-shadow-simulation", replace: true }
+      )
+    );
+  });
 
   it("waits for both state channels before restoring and writing", async () => {
     const customHashState = createCustomHashState({
