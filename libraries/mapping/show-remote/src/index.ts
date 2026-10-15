@@ -11,7 +11,9 @@ export {
 export {
   FIRST_STORY_ID,
   FIRST_STORY_TITLE,
+  baseLayersUnder,
   storyGroups,
+  withBaseLayers,
   withStories,
   type StoryGroup,
 } from "./lib/stories";
@@ -23,6 +25,7 @@ export {
   HIGHLIGHT_EDGE_SOFTNESS,
   HIGHLIGHT_RADIUS_RANGE_METERS,
   groundToMercator,
+  highlightButtons,
   highlightRing,
   highlightSpotsOf,
   isHighlightSpot,
@@ -31,6 +34,7 @@ export {
   lngLatToMercator,
   mercatorToLngLat,
   sceneHighlights,
+  type HighlightButton,
   type HighlightSpot,
   type ShowHighlight,
 } from "./lib/highlights";
@@ -43,15 +47,24 @@ export {
   newEditToken,
   publishShow,
   republishShow,
-  showByteSize,
   showReadUrl,
 } from "./lib/ceepr";
+export {
+  PACKED_SHOW_FORMAT,
+  isPackedShow,
+  packShow,
+  storedShowByteSize,
+  unpackStored,
+  type PackedShow,
+} from "./lib/packed-show";
 export {
   RelayError,
   helloRelay,
   readRelayState,
+  waitRelayState,
   writeRelayState,
   type RelayReadResult,
+  type RelaySnapshot,
   type RelayTarget,
   type RelayWriteResult,
 } from "./lib/relay-writer";
@@ -127,16 +140,36 @@ export {
   type Surface,
 } from "./lib/display-info";
 export {
+  SERIES_REENTRY,
   clockStep,
+  enteredSeriesClock,
   findSceneSeries,
   isTimeSeriesControl,
   planSeriesApply,
   seriesControlOf,
   type AppliedSeriesControl,
+  type LeftSeries,
   type SceneSeries,
   type SeriesClock,
+  type SeriesReentry,
   type TimeSeriesControl,
 } from "./lib/time-series";
+export {
+  SERIES_SEEK_GRACE_MS,
+  SERIES_STATUS_HEARTBEAT_MS,
+  SERIES_STATUS_STALE_MS,
+  anchorSeriesClock,
+  followedSeriesControl,
+  isSeekPending,
+  isSeriesStatus,
+  isSeriesStatusCurrent,
+  seriesStatusSessionCode,
+  seriesStatusTarget,
+  seriesView,
+  type HeardSeriesStatus,
+  type SeriesStatus,
+  type SeriesView,
+} from "./lib/series-status";
 export {
   DEFAULT_SHADOW_CYCLE_SECONDS,
   SHADOW_CYCLE_STEPS_SECONDS,

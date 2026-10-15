@@ -1,12 +1,20 @@
-import { useMemo, useState, type ReactNode } from "react";
+import {
+  useEffect,
+  useMemo,
+  useState,
+  type DragEvent,
+  type HTMLAttributes,
+  type ReactNode,
+} from "react";
 
 import {
   Button,
   Checkbox,
+  Input,
   Modal,
   Popconfirm,
   QRCode,
-  Tooltip,
+  Tag,
   Typography,
 } from "antd";
 import {
@@ -16,6 +24,7 @@ import {
   faChevronRight,
   faClapperboard,
   faCopy,
+  faDisplay,
   faEye,
   faFloppyDisk,
   faLocationCrosshairs,
@@ -35,56 +44,66 @@ import {
   type Positions,
 } from "@carma-mapping/map-controls-layout";
 import {
-  DEFAULT_HIGHLIGHT_DIM,
-  DEFAULT_HIGHLIGHT_RADIUS_METERS,
   DEFAULT_SHOW_READ_URL,
   DEFAULT_SHOW_STORE_URL,
   MAX_SHOW_BYTES,
   SHOW_FORMAT,
   SHOW_VERSION,
   ShowStoreError,
+  baseLayersUnder,
   isBounds3857,
   layerTitle,
   newEditToken,
   newSceneId,
   publishShow,
   republishShow,
-  sceneHighlights,
-  showByteSize,
+  storedShowByteSize,
   storyGroups,
   withStories,
   type Bounds3857,
   type Show,
-  type ShowHighlight,
   type ShowScene,
   type ShowStory,
 } from "@carma-mapping/show-remote";
-import type { MappingConfig } from "@carma-api";
+import type { MappingConfig, MappingConfigLayer } from "@carma-api";
 
 import { useAddonScope } from "../../lib/AddonStateContext";
 import { routeScopeFromLocation } from "../../lib/addon-overrides-storage";
 import type { AddonComponentProps } from "../../lib/registry";
+import { DraftFileRow } from "./DraftFileRow";
 import { DraftInput } from "./DraftInput";
-import { useHighlightPlacement, useHighlightPreview } from "./highlight-editing";
 import { IconButton } from "./IconButton";
 import { OpenShowRow } from "./OpenShowRow";
 import { SceneDetails } from "./SceneDetails";
 import {
+  addStoryBaseLayers,
   applyExclusionToAll,
+  copyLayerToScenes,
   deleteStory,
+  hasBaseMapChoice,
   moveEntry,
   moveSceneInStory,
   moveSceneToStory,
   newStory,
   publishedScene,
+  publishedStory,
+  removeSceneLayer,
+  removeStoryBaseLayer,
   sceneExclusion,
   setSceneLayerExcluded,
+  storyBaseLayers,
+  withBaseMapsAsLayers,
+  withoutBaseLayers,
 } from "./scene-edit";
 import {
   SHOW_DRAFT_STORAGE_PREFIX,
   useShowDraft,
+  useStoredCollapsedStories,
+  useStoredPanelOpen,
+  useStoredRelayCode,
   type ShowDraft,
 } from "./show-draft";
+import { useDraftFile } from "./useDraftFile";
 import { useOpenShow } from "./useOpenShow";
 
 /**
@@ -100,6 +119,11 @@ export type ShowScenesConfig = {
   readUrl?: string;
   /** the remote app the published link opens; without it only the key is shown */
   remoteUrl?: string;
+  /**
+   * The display page (`#/outlet`, without `relay`). With it the published row
+   * opens the display for the relay code of the QR dialog.
+   */
+  outletUrl?: string;
   /** overrides the draft's per-route key */
   storageKey?: string;
   /**
@@ -136,21 +160,36 @@ const excludedIdsOf = (entries: string[]): Set<string> =>
     )
   );
 
-/** `initial` is what a scene without its own "Nicht in der Show" list leaves out */
+/**
+ * `initial` is what a scene without its own "Nicht in der Show" list leaves
+ * out; the stories' base layers go without it too.
+ */
 const toShow = (
   draft: ShowDraft,
   publishedAt: string,
   initial: readonly string[]
-): Show => ({
-  format: SHOW_FORMAT,
-  version: SHOW_VERSION,
-  title: draft.title.trim() || "Show",
-  publishedAt,
-  stories: withStories(draft).stories,
-  scenes: withStories(draft).scenes.map((scene) =>
-    publishedScene(scene, sceneExclusion(draft, scene.id, initial))
-  ),
-});
+): Show => {
+  const { stories, scenes } = withStories(draft);
+  const excluded = new Set(initial);
+  const published = stories.map((story) => publishedStory(story, excluded));
+  const baseLayersOf = new Map(
+    published.map(({ id, baseLayers }) => [id, baseLayers ?? []])
+  );
+  return {
+    format: SHOW_FORMAT,
+    version: SHOW_VERSION,
+    title: draft.title.trim() || "Show",
+    publishedAt,
+    stories: published,
+    scenes: scenes.map((scene) =>
+      publishedScene(
+        scene,
+        sceneExclusion(draft, scene.id, initial),
+        baseLayersOf.get(scene.story ?? "") ?? []
+      )
+    ),
+  };
+};
 
 /**
  * A short hash of what a publish would store, so the panel can tell that the
@@ -172,15 +211,37 @@ const fingerprintOf = (draft: ShowDraft): string => {
   return (hash >>> 0).toString(36);
 };
 
-const remoteLinkFor = (remoteUrl: string, key: string): string => {
+/** what the relay accepts for a code a remote brings along */
+const RELAY_CODE = /^[A-Za-z0-9_-]{4,32}$/;
+
+/**
+ * The remote with the show and, when given, the display's relay code: a phone
+ * that never opened the remote drives nothing without one, and one that did
+ * would drive the display it had last.
+ */
+const remoteLinkFor = (
+  remoteUrl: string,
+  key: string,
+  relayCode: string | null
+): string => {
   try {
     const url = new URL(remoteUrl);
     url.searchParams.set("show", key);
+    if (relayCode) {
+      url.searchParams.set("relay", relayCode);
+    }
     return url.toString();
   } catch {
-    return `${remoteUrl}?show=${encodeURIComponent(key)}`;
+    const relay = relayCode ? `&relay=${encodeURIComponent(relayCode)}` : "";
+    return `${remoteUrl}?show=${encodeURIComponent(key)}${relay}`;
   }
 };
+
+/** the outlet's parameters sit in the hash, so the url is extended as text */
+const outletLinkFor = (outletUrl: string, relayCode: string): string =>
+  `${outletUrl}${outletUrl.includes("?") ? "&" : "?"}relay=${encodeURIComponent(
+    relayCode
+  )}`;
 
 const formatKb = (bytes: number): string =>
   `${(bytes / 1024).toFixed(bytes < 10 * 1024 ? 1 : 0)} kB`;
@@ -209,6 +270,31 @@ const toBounds3857 = (view: ViewBounds): Bounds3857 | null => {
   return isBounds3857(bounds) ? bounds : null;
 };
 
+/**
+ * Where a dragged layer can be dropped: the handlers for the element, and
+ * whether the layer is over it right now.
+ */
+type DropZone = {
+  props: Pick<
+    HTMLAttributes<HTMLElement>,
+    "onDragOver" | "onDragLeave" | "onDrop"
+  >;
+  isOver: boolean;
+};
+
+const NO_DROP_ZONE: DropZone = { props: {}, isOver: false };
+
+/** outline and tint only, so nothing moves under the pointer */
+const dropZoneClass = ({ isOver }: DropZone) =>
+  isOver ? "rounded bg-[#1677ff]/10 ring-1 ring-[#1677ff]" : "";
+
+/** a layer being dragged, with the scene or story base it came from */
+type DraggedLayer = {
+  layer: MappingConfigLayer;
+  sceneId?: string;
+  baseOfStoryId?: string;
+};
+
 const SceneRow = ({
   scene,
   index,
@@ -221,6 +307,7 @@ const SceneRow = ({
   onOverwrite,
   onMove,
   onDelete,
+  drop,
   children,
 }: {
   scene: ShowScene;
@@ -234,6 +321,8 @@ const SceneRow = ({
   onOverwrite: () => void;
   onMove: (delta: number) => void;
   onDelete: () => void;
+  /** a layer dropped on the row goes into the scene */
+  drop: DropZone;
   /** the details, shown under the row while it is expanded */
   children?: ReactNode;
 }) => {
@@ -241,7 +330,7 @@ const SceneRow = ({
   // what the display gets; the excluded ones only stay on the desktop
   const shown = scene.config.layers.length - excluded.length;
   return (
-    <li className="py-1">
+    <li className={`py-1 ${dropZoneClass(drop)}`} {...drop.props}>
       <div className="flex items-center gap-2">
         <IconButton
           title={isExpanded ? "Details schließen" : "Text und Ebenen"}
@@ -260,21 +349,11 @@ const SceneRow = ({
         <span className="w-20 whitespace-nowrap text-xs text-gray-500">
           {shown} {shown === 1 ? "Ebene" : "Ebenen"}
           {excluded.length > 0 && (
-            <Tooltip
-              title={`Nicht in der Show: ${excluded
-                .map(layerTitle)
-                .join(", ")}`}
-            >
-              <span className="ml-1 text-gray-400">+{excluded.length}</span>
-            </Tooltip>
+            <span className="ml-1 text-gray-400">+{excluded.length}</span>
           )}
         </span>
         <span className="w-4 text-center text-gray-500">
-          {scene.bounds && (
-            <Tooltip title="Mit Position: die Anzeige fliegt zu diesem Ausschnitt">
-              <FontAwesomeIcon icon={faLocationCrosshairs} />
-            </Tooltip>
-          )}
+          {scene.bounds && <FontAwesomeIcon icon={faLocationCrosshairs} />}
         </span>
         <IconButton
           title="Auf der Karte anzeigen"
@@ -324,25 +403,53 @@ const StoryBlock = ({
   index,
   count,
   sceneCount,
+  isCollapsed,
+  onToggle,
   onRename,
   onMove,
   onDelete,
   onSave,
+  onAddBaseLayersFromMap,
+  onRemoveBaseLayer,
+  onBaseLayerDragStart,
+  onLayerDragEnd,
+  headerDrop,
+  baseDrop,
   children,
 }: {
   story: ShowStory;
   index: number;
   count: number;
   sceneCount: number;
+  /** only the header row, without the base layers, scenes and save button */
+  isCollapsed: boolean;
+  onToggle: () => void;
   onRename: (title: string) => void;
   onMove: (delta: number) => void;
   onDelete: () => void;
   /** the current map as a new scene of this story */
   onSave: () => void;
+  /** the current map's layers into the story's base */
+  onAddBaseLayersFromMap: () => void;
+  onRemoveBaseLayer: (layerId: string) => void;
+  onBaseLayerDragStart: (layer: MappingConfigLayer, event: DragEvent) => void;
+  onLayerDragEnd: () => void;
+  /** a layer dropped on the header row goes into every scene of the story */
+  headerDrop: DropZone;
+  /** one dropped on the base line becomes a base layer */
+  baseDrop: DropZone;
   children?: ReactNode;
 }) => (
   <li className="flex flex-col gap-1 rounded border border-solid border-gray-200 p-2">
-    <div className="flex items-center gap-2">
+    <div
+      className={`flex items-center gap-2 ${dropZoneClass(headerDrop)}`}
+      {...headerDrop.props}
+    >
+      <IconButton
+        title={isCollapsed ? "Geschichte aufklappen" : "Geschichte zuklappen"}
+        icon={isCollapsed ? faChevronRight : faChevronDown}
+        onClick={onToggle}
+      />
       <DraftInput
         size="small"
         value={story.title}
@@ -388,22 +495,68 @@ const StoryBlock = ({
         />
       </Popconfirm>
     </div>
-    {sceneCount === 0 ? (
-      <p className="m-0 text-xs text-gray-500">
-        Noch keine Szene. Karte einrichten, dann hier speichern.
-      </p>
-    ) : (
-      children
+    {!isCollapsed && (
+      <>
+        <div
+          className={`flex flex-wrap items-center gap-1 ${dropZoneClass(
+            baseDrop
+          )}`}
+          {...baseDrop.props}
+        >
+          <span className="text-xs font-semibold text-gray-600">
+            Basisebenen
+          </span>
+          {story.baseLayers?.length ? (
+            story.baseLayers.map((layer) => (
+              <Tag
+                key={layer.id}
+                draggable
+                onDragStart={(event) => onBaseLayerDragStart(layer, event)}
+                onDragEnd={onLayerDragEnd}
+                closable
+                onClose={(event) => {
+                  // the list is the draft's; the tag goes with its entry
+                  event.preventDefault();
+                  onRemoveBaseLayer(layer.id);
+                }}
+                style={{ marginInlineEnd: 0, cursor: "grab" }}
+              >
+                {layerTitle(layer)}
+              </Tag>
+            ))
+          ) : (
+            <span className="text-xs text-gray-500">
+              Keine. Basisebenen liegen unter jeder Szene der Geschichte.
+            </span>
+          )}
+          <Popconfirm
+            title="Ebenen der aktuellen Karte als Basisebenen übernehmen?"
+            description="Jede Szene dieser Geschichte liegt dann auf ihnen. Ebenen, die nie in die Show gehen, bleiben draußen."
+            okText="Übernehmen"
+            cancelText="Abbrechen"
+            onConfirm={onAddBaseLayersFromMap}
+          >
+            <IconButton title="Aktuelle Karte als Basisebenen" icon={faPlus} />
+          </Popconfirm>
+        </div>
+        {sceneCount === 0 ? (
+          <p className="m-0 text-xs text-gray-500">
+            Noch keine Szene. Karte einrichten, dann hier speichern.
+          </p>
+        ) : (
+          children
+        )}
+        <Button
+          size="small"
+          type="dashed"
+          icon={<FontAwesomeIcon icon={faPlus} />}
+          onClick={onSave}
+          className="self-start"
+        >
+          Aktuelle Karte als Szene speichern
+        </Button>
+      </>
     )}
-    <Button
-      size="small"
-      type="dashed"
-      icon={<FontAwesomeIcon icon={faPlus} />}
-      onClick={onSave}
-      className="self-start"
-    >
-      Aktuelle Karte als Szene speichern
-    </Button>
   </li>
 );
 
@@ -417,6 +570,7 @@ export const ShowScenes = ({
     storeUrl = DEFAULT_SHOW_STORE_URL,
     readUrl = DEFAULT_SHOW_READ_URL,
     remoteUrl,
+    outletUrl,
     excludeLayers,
     controlPosition = DEFAULT_CONTROL_POSITION,
     controlOrder = DEFAULT_CONTROL_ORDER,
@@ -425,16 +579,20 @@ export const ShowScenes = ({
   const storageKey =
     config.storageKey || `${SHOW_DRAFT_STORAGE_PREFIX}::${scope}`;
 
-  const [isOpen, setIsOpen] = useState(false);
+  const [isOpen, setIsOpen] = useStoredPanelOpen(storageKey);
   /**
    * Here and not in the panel: `Control` registers its children anew on every
    * render. The same goes for the one expanded scene row.
    */
   const [isQrOpen, setIsQrOpen] = useState(false);
   const [expandedSceneId, setExpandedSceneId] = useState<string | null>(null);
-  /** the scene whose next highlight the next map click places */
-  const [placingSceneId, setPlacingSceneId] = useState<string | null>(null);
+  const [collapsedStoryIds, setCollapsedStoryIds] =
+    useStoredCollapsedStories(storageKey);
+  const [dragged, setDragged] = useState<DraggedLayer | null>(null);
+  /** the drop zone under the dragged layer, by its key */
+  const [dropTarget, setDropTarget] = useState<string | null>(null);
   const [draft, updateDraft] = useShowDraft(storageKey);
+  const [relayCode, setRelayCode] = useStoredRelayCode(storageKey);
   const [status, setStatus] = useState<Status>(null);
   const openShow = useOpenShow({
     readUrl,
@@ -442,6 +600,14 @@ export const ShowScenes = ({
     updateDraft,
     fingerprintOf,
     onOpened: () => {
+      setStatus(null);
+      setExpandedSceneId(null);
+    },
+  });
+  const draftFile = useDraftFile({
+    draft,
+    updateDraft,
+    onLoaded: () => {
       setStatus(null);
       setExpandedSceneId(null);
     },
@@ -459,25 +625,46 @@ export const ShowScenes = ({
     current.excludedLayerIds ?? defaultExcludedIds;
   const initialExcluded = initialExcludedOf(draft);
 
-  const byteSize = useMemo(
-    () =>
-      showByteSize(
-        toShow(
-          draft,
-          new Date(0).toISOString(),
-          draft.excludedLayerIds ?? defaultExcludedIds
-        )
-      ),
-    [draft, defaultExcludedIds]
-  );
-  const isTooLarge = byteSize > MAX_SHOW_BYTES;
+  /** what a publish sends, packed; null until it is worked out */
+  const [byteSize, setByteSize] = useState<number | null>(null);
+  useEffect(() => {
+    let isCurrent = true;
+    storedShowByteSize(
+      toShow(
+        draft,
+        new Date(0).toISOString(),
+        draft.excludedLayerIds ?? defaultExcludedIds
+      )
+    ).then(
+      (size) => {
+        if (isCurrent) {
+          setByteSize(size);
+        }
+      },
+      (error: unknown) => {
+        console.warn("[SHOW SCENES] measuring the show failed", error);
+      }
+    );
+    return () => {
+      isCurrent = false;
+    };
+  }, [draft, defaultExcludedIds]);
+  const isTooLarge = byteSize !== null && byteSize > MAX_SHOW_BYTES;
   const groups = useMemo(() => storyGroups(draft), [draft]);
   const { published } = draft;
   const isPublishCurrent =
     published?.fingerprint !== undefined &&
     published.fingerprint === fingerprintOf(draft);
+  const trimmedRelayCode = relayCode.trim();
+  const isRelayCodeValid = RELAY_CODE.test(trimmedRelayCode);
   const link =
-    published && remoteUrl ? remoteLinkFor(remoteUrl, published.key) : null;
+    published && remoteUrl
+      ? remoteLinkFor(
+          remoteUrl,
+          published.key,
+          isRelayCodeValid ? trimmedRelayCode : null
+        )
+      : null;
   const canPublish =
     draft.scenes.length > 0 && !isTooLarge && status?.kind !== "busy";
 
@@ -489,55 +676,10 @@ export const ShowScenes = ({
       ),
     }));
 
-  /** a change to one scene's highlights, read from the newest draft */
-  const updateHighlights = (
-    sceneId: string,
-    change: (highlights: ShowHighlight[]) => ShowHighlight[]
-  ) =>
-    updateDraft((current) => ({
-      ...current,
-      scenes: current.scenes.map((scene) =>
-        scene.id === sceneId
-          ? { ...scene, highlights: change(sceneHighlights(scene)) }
-          : scene
-      ),
-    }));
-
-  const placeHighlight = (sceneId: string, center: [number, number]) => {
-    updateHighlights(sceneId, (highlights) => [
-      ...highlights,
-      {
-        id: newSceneId(),
-        title: `Punkt ${highlights.length + 1}`,
-        center,
-        radiusMeters: DEFAULT_HIGHLIGHT_RADIUS_METERS,
-        dim: DEFAULT_HIGHLIGHT_DIM,
-      },
-    ]);
-    setPlacingSceneId(null);
-  };
-
-  // the open scene's highlights are drawn on the map while the panel is open
-  const expandedScene = isOpen
-    ? draft.scenes.find(({ id }) => id === expandedSceneId)
-    : undefined;
-  useHighlightPreview(
-    libreMap,
-    expandedScene ? sceneHighlights(expandedScene) : null
-  );
-  const placingScene =
-    isOpen && placingSceneId === expandedSceneId ? placingSceneId : null;
-  useHighlightPlacement(
-    libreMap,
-    placingScene !== null,
-    (center) => {
-      if (placingScene) {
-        placeHighlight(placingScene, center);
-      }
-    },
-    () => setPlacingSceneId(null)
-  );
-
+  /**
+   * The map as it stands, its base map as the lowest of its layers: listed
+   * with the others, and the display draws it whatever base maps it has.
+   */
   const currentMapConfig = () => {
     const mapConfig = carma.config.getMappingConfig();
     if (!mapConfig) {
@@ -545,9 +687,19 @@ export const ShowScenes = ({
         kind: "error",
         text: "Die Karte liefert gerade keine Konfiguration.",
       });
+      return null;
     }
-    return mapConfig;
+    return carma.config.backgroundAsLayers(mapConfig);
   };
+
+  // scenes saved before the base map went into their layers get it there too
+  useEffect(() => {
+    if (draft.scenes.some(({ config }) => hasBaseMapChoice(config))) {
+      updateDraft((current) =>
+        withBaseMapsAsLayers(current, carma.config.backgroundAsLayers)
+      );
+    }
+  }, [draft, updateDraft, carma]);
 
   /**
    * What a save stores: the map, and its visible rectangle when the tick is
@@ -593,6 +745,10 @@ export const ShowScenes = ({
             title: `Szene ${count + 1}`,
             story: storyId,
             ...scene,
+            config: withoutBaseLayers(
+              scene.config,
+              storyBaseLayers(current, storyId)
+            ),
           },
         ],
       };
@@ -614,12 +770,171 @@ export const ShowScenes = ({
       return { ...shaped, stories: change(shaped.stories) };
     });
 
+  const setStoryCollapsed = (storyId: string, isCollapsed: boolean) =>
+    setCollapsedStoryIds((ids) => {
+      if (ids.has(storyId) === isCollapsed) {
+        return ids;
+      }
+      const next = new Set(ids);
+      if (isCollapsed) {
+        next.add(storyId);
+      } else {
+        next.delete(storyId);
+      }
+      return next;
+    });
+
+  /** an open scene closes with its story */
+  const toggleStory = (storyId: string, scenes: ShowScene[]) => {
+    const isCollapsing = !collapsedStoryIds.has(storyId);
+    setStoryCollapsed(storyId, isCollapsing);
+    if (isCollapsing && scenes.some(({ id }) => id === expandedSceneId)) {
+      setExpandedSceneId(null);
+    }
+  };
+
+  /** the story's base layers stay out of the scene, see `saveCurrentMap` */
   const overwriteScene = (id: string) => {
     const scene = currentScene();
-    if (scene) {
-      setStatus(null);
-      updateScene(id, scene);
+    if (!scene) {
+      return;
     }
+    setStatus(null);
+    updateDraft((current) => ({
+      ...current,
+      scenes: current.scenes.map((entry) =>
+        entry.id === id
+          ? {
+              ...entry,
+              ...scene,
+              config: withoutBaseLayers(
+                scene.config,
+                storyBaseLayers(current, entry.story)
+              ),
+            }
+          : entry
+      ),
+    }));
+  };
+
+  const storyName = (story: ShowStory) => story.title || "(ohne Titel)";
+
+  /** the map's layers, but those the show never gets, as the story's base */
+  const addBaseLayersFromMap = (story: ShowStory) => {
+    const mapConfig = currentMapConfig();
+    if (!mapConfig) {
+      return;
+    }
+    const excluded = new Set(initialExcluded);
+    const layers = mapConfig.layers.filter(({ id }) => !excluded.has(id));
+    if (layers.length === 0) {
+      setStatus({
+        kind: "info",
+        text: `Auf der Karte ist keine Ebene für die Basis von „${storyName(
+          story
+        )}“.`,
+      });
+      return;
+    }
+    updateDraft((current) => addStoryBaseLayers(current, story.id, layers));
+    setStatus({
+      kind: "info",
+      text: `Basis von „${storyName(story)}“: ${layers
+        .map(layerTitle)
+        .join(", ")}.`,
+    });
+  };
+
+  const startLayerDrag = (from: DraggedLayer, event: DragEvent) => {
+    // Firefox starts a drag only with some data set
+    event.dataTransfer.setData("text/plain", layerTitle(from.layer));
+    event.dataTransfer.effectAllowed = "copy";
+    setDragged(from);
+  };
+
+  const endLayerDrag = () => {
+    setDragged(null);
+    setDropTarget(null);
+  };
+
+  /** none while nothing is dragged, and none where the layer came from */
+  const dropZone = (
+    key: string,
+    isSource: boolean,
+    onDrop: (layer: MappingConfigLayer) => void
+  ): DropZone => {
+    if (!dragged || isSource) {
+      return NO_DROP_ZONE;
+    }
+    const { layer } = dragged;
+    return {
+      isOver: dropTarget === key,
+      props: {
+        onDragOver: (event) => {
+          event.preventDefault();
+          event.dataTransfer.dropEffect = "copy";
+          setDropTarget(key);
+        },
+        onDragLeave: () =>
+          setDropTarget((current) => (current === key ? null : current)),
+        onDrop: (event) => {
+          event.preventDefault();
+          endLayerDrag();
+          onDrop(layer);
+        },
+      },
+    };
+  };
+
+  const copyIntoScenes = (layer: MappingConfigLayer, sceneIds: string[]) => {
+    const ids = new Set(sceneIds);
+    const { count } = copyLayerToScenes(draft, layer, ids);
+    updateDraft((current) => copyLayerToScenes(current, layer, ids).draft);
+    return count;
+  };
+
+  const dropOnScene = (layer: MappingConfigLayer, scene: ShowScene) => {
+    const title = layerTitle(layer);
+    const count = copyIntoScenes(layer, [scene.id]);
+    setStatus({
+      kind: "info",
+      text:
+        count === 0
+          ? `„${scene.title}“ hat „${title}“ schon.`
+          : `„${title}“ in „${scene.title}“ kopiert.`,
+    });
+  };
+
+  const dropOnStory = (
+    layer: MappingConfigLayer,
+    story: ShowStory,
+    scenes: ShowScene[]
+  ) => {
+    const title = layerTitle(layer);
+    const name = storyName(story);
+    const count = copyIntoScenes(
+      layer,
+      scenes.map(({ id }) => id)
+    );
+    setStatus({
+      kind: "info",
+      text:
+        scenes.length === 0
+          ? `„${name}“ hat noch keine Szene.`
+          : count === 0
+          ? `Jede Szene von „${name}“ hat „${title}“ schon.`
+          : `„${title}“ in ${count} ${
+              count === 1 ? "Szene" : "Szenen"
+            } von „${name}“ kopiert.`,
+    });
+  };
+
+  const dropOnBase = (layer: MappingConfigLayer, story: ShowStory) => {
+    updateDraft((current) => addStoryBaseLayers(current, story.id, [layer]));
+    setStatus({
+      kind: "info",
+      text: `„${layerTitle(layer)}“ ist Basisebene von „${storyName(story)}“.`,
+    });
   };
 
   const deleteScene = (id: string) =>
@@ -659,8 +974,13 @@ export const ShowScenes = ({
     }
   };
 
-  const showScene = (scene: ShowScene) =>
-    showMap(scene.config, scene.bounds, scene.title);
+  /** the scene on its story's base layers, as the display shows it */
+  const showScene = (scene: ShowScene, story: ShowStory) =>
+    showMap(
+      baseLayersUnder(scene.config, story.baseLayers),
+      scene.bounds,
+      scene.title
+    );
 
   /**
    * "reuse" replaces the show under the key the phone already has, so its link
@@ -713,6 +1033,19 @@ export const ShowScenes = ({
     }
   };
 
+  /** without a code there is no display to open; the QR dialog asks for it */
+  const openOutlet = (url: string) => {
+    if (!isRelayCodeValid) {
+      setStatus({
+        kind: "info",
+        text: "Für das Outlet fehlt der Relay-Code, er steht im QR-Dialog.",
+      });
+      setIsQrOpen(true);
+      return;
+    }
+    window.open(outletLinkFor(url, trimmedRelayCode), "_blank", "noopener");
+  };
+
   const copyLink = (text: string) => {
     navigator.clipboard.writeText(text).then(
       () => setStatus({ kind: "info", text: "Link kopiert." }),
@@ -727,17 +1060,15 @@ export const ShowScenes = ({
   return (
     <>
       <Control position={controlPosition} order={controlOrder}>
-        <Tooltip title="Show-Szenen" placement="right">
-          <ControlButtonStyler
-            onClick={() => setIsOpen((open) => !open)}
-            dataTestId="show-scenes-control"
-          >
-            <FontAwesomeIcon
-              icon={faClapperboard}
-              style={isOpen ? { color: "#1677ff" } : undefined}
-            />
-          </ControlButtonStyler>
-        </Tooltip>
+        <ControlButtonStyler
+          onClick={() => setIsOpen((open) => !open)}
+          dataTestId="show-scenes-control"
+        >
+          <FontAwesomeIcon
+            icon={faClapperboard}
+            style={isOpen ? { color: "#1677ff" } : undefined}
+          />
+        </ControlButtonStyler>
       </Control>
       {isOpen && (
         <Control position={PANEL_POSITION} order={PANEL_ORDER}>
@@ -750,6 +1081,11 @@ export const ShowScenes = ({
               <span className="flex-1 text-base font-semibold">
                 Show-Szenen
               </span>
+              {published && (
+                <span className="mr-2 font-mono text-xs text-gray-400">
+                  {published.key}
+                </span>
+              )}
               <IconButton
                 title="Schließen"
                 icon={faXmark}
@@ -771,20 +1107,19 @@ export const ShowScenes = ({
             </div>
 
             <OpenShowRow {...openShow} />
+            <DraftFileRow {...draftFile} />
 
             <div className="flex items-center gap-3">
               <span className="flex-1 text-xs text-gray-500">
                 Geschichten sind Ordner mit Szenen. Auf dem Handy blättern ‹ ›
                 innerhalb der Geschichte.
               </span>
-              <Tooltip title="Speichert den aktuellen Kartenausschnitt mit, die Anzeige fliegt bei dieser Szene dorthin. Gilt auch fürs Überschreiben.">
-                <Checkbox
-                  checked={withPosition}
-                  onChange={(event) => setWithPosition(event.target.checked)}
-                >
-                  Position mitspeichern
-                </Checkbox>
-              </Tooltip>
+              <Checkbox
+                checked={withPosition}
+                onChange={(event) => setWithPosition(event.target.checked)}
+              >
+                Position mitspeichern
+              </Checkbox>
             </div>
 
             <ol className="m-0 flex list-none flex-col gap-2 p-0">
@@ -795,6 +1130,8 @@ export const ShowScenes = ({
                   index={storyIndex}
                   count={groups.length}
                   sceneCount={storyScenes.length}
+                  isCollapsed={collapsedStoryIds.has(story.id)}
+                  onToggle={() => toggleStory(story.id, storyScenes)}
                   onRename={(title) =>
                     updateStories((stories) =>
                       stories.map((entry) =>
@@ -811,6 +1148,24 @@ export const ShowScenes = ({
                     updateDraft((current) => deleteStory(current, story.id))
                   }
                   onSave={() => saveCurrentMap(story.id)}
+                  onAddBaseLayersFromMap={() => addBaseLayersFromMap(story)}
+                  onRemoveBaseLayer={(layerId) =>
+                    updateDraft((current) =>
+                      removeStoryBaseLayer(current, story.id, layerId)
+                    )
+                  }
+                  onBaseLayerDragStart={(layer, event) =>
+                    startLayerDrag({ layer, baseOfStoryId: story.id }, event)
+                  }
+                  onLayerDragEnd={endLayerDrag}
+                  headerDrop={dropZone(`story:${story.id}`, false, (layer) =>
+                    dropOnStory(layer, story, storyScenes)
+                  )}
+                  baseDrop={dropZone(
+                    `base:${story.id}`,
+                    dragged?.baseOfStoryId === story.id,
+                    (layer) => dropOnBase(layer, story)
+                  )}
                 >
                   <ol className="m-0 list-none p-0">
                     {storyScenes.map((scene, index) => {
@@ -833,7 +1188,7 @@ export const ShowScenes = ({
                             )
                           }
                           onRename={(title) => updateScene(scene.id, { title })}
-                          onShow={() => showScene(scene)}
+                          onShow={() => showScene(scene, story)}
                           onOverwrite={() => overwriteScene(scene.id)}
                           onMove={(delta) =>
                             updateDraft((current) => ({
@@ -846,13 +1201,20 @@ export const ShowScenes = ({
                             }))
                           }
                           onDelete={() => deleteScene(scene.id)}
+                          drop={dropZone(
+                            `scene:${scene.id}`,
+                            dragged?.sceneId === scene.id,
+                            (layer) => dropOnScene(layer, scene)
+                          )}
                         >
                           <SceneDetails
                             scene={scene}
                             excluded={excludedIds}
                             canApplyToAll={draft.scenes.length > 1}
                             stories={groups.map(({ story }) => story)}
-                            onStory={(storyId) =>
+                            onStory={(storyId) => {
+                              // the scene stays open, so its new story opens too
+                              setStoryCollapsed(storyId, false);
                               updateDraft((current) => ({
                                 ...current,
                                 scenes: moveSceneToStory(
@@ -860,9 +1222,16 @@ export const ShowScenes = ({
                                   scene.id,
                                   storyId
                                 ),
-                              }))
-                            }
+                              }));
+                            }}
                             onText={(text) => updateScene(scene.id, { text })}
+                            onLayerDragStart={(layer, event) =>
+                              startLayerDrag(
+                                { layer, sceneId: scene.id },
+                                event
+                              )
+                            }
+                            onLayerDragEnd={endLayerDrag}
                             onExclude={(layerId, excluded) =>
                               updateDraft((current) =>
                                 setSceneLayerExcluded(
@@ -883,28 +1252,9 @@ export const ShowScenes = ({
                                 )
                               )
                             }
-                            highlights={sceneHighlights(scene)}
-                            isPlacingHighlight={placingScene === scene.id}
-                            onStartPlacingHighlight={() =>
-                              setPlacingSceneId(scene.id)
-                            }
-                            onCancelPlacingHighlight={() =>
-                              setPlacingSceneId(null)
-                            }
-                            onHighlightChange={(id, change) =>
-                              updateHighlights(scene.id, (highlights) =>
-                                highlights.map((highlight) =>
-                                  highlight.id === id
-                                    ? { ...highlight, ...change }
-                                    : highlight
-                                )
-                              )
-                            }
-                            onHighlightRemove={(id) =>
-                              updateHighlights(scene.id, (highlights) =>
-                                highlights.filter(
-                                  (highlight) => highlight.id !== id
-                                )
+                            onRemoveLayer={(layerId) =>
+                              updateDraft((current) =>
+                                removeSceneLayer(current, scene.id, layerId)
                               )
                             }
                           />
@@ -929,7 +1279,8 @@ export const ShowScenes = ({
                   isTooLarge ? "text-red-600" : "text-gray-500"
                 }`}
               >
-                {formatKb(byteSize)} von {formatKb(MAX_SHOW_BYTES)}
+                {byteSize === null ? "…" : formatKb(byteSize)} von{" "}
+                {formatKb(MAX_SHOW_BYTES)}
               </span>
               <div className="flex-1" />
               {published && (
@@ -978,31 +1329,21 @@ export const ShowScenes = ({
                   {published.sceneCount === 1 ? "Szene" : "Szenen"}
                 </span>
                 {!isPublishCurrent && (
-                  <Tooltip
-                    title={
-                      published.editToken
-                        ? "Die Liste wurde seitdem geändert. Nach dem nächsten Veröffentlichen sieht das Handy sie unter demselben Link."
-                        : "Die Liste wurde seitdem geändert. Das nächste Veröffentlichen erzeugt einmalig einen neuen Link, danach bleibt er gleich."
-                    }
-                  >
-                    <span className="text-amber-700">geändert</span>
-                  </Tooltip>
+                  <span className="text-amber-700">geändert</span>
                 )}
                 <span className="text-gray-400">·</span>
                 {link ? (
                   <>
-                    <Tooltip title="QR-Code zeigen">
-                      <a
-                        href={link}
-                        onClick={(event) => {
-                          event.preventDefault();
-                          setIsQrOpen(true);
-                        }}
-                        className="min-w-0 flex-1 truncate"
-                      >
-                        {link}
-                      </a>
-                    </Tooltip>
+                    <a
+                      href={link}
+                      onClick={(event) => {
+                        event.preventDefault();
+                        setIsQrOpen(true);
+                      }}
+                      className="min-w-0 flex-1 truncate"
+                    >
+                      {link}
+                    </a>
                     <IconButton
                       title="Link kopieren"
                       icon={faCopy}
@@ -1013,6 +1354,13 @@ export const ShowScenes = ({
                   <span className="min-w-0 flex-1 truncate">
                     Schlüssel <code>{published.key}</code>
                   </span>
+                )}
+                {outletUrl && (
+                  <IconButton
+                    title="Outlet öffnen"
+                    icon={faDisplay}
+                    onClick={() => openOutlet(outletUrl)}
+                  />
                 )}
               </div>
             )}
@@ -1029,6 +1377,28 @@ export const ShowScenes = ({
       >
         {link && (
           <div className="flex flex-col items-center gap-3">
+            <label className="flex w-full flex-col gap-1 text-xs text-gray-600">
+              Relay-Code der Anzeige
+              <Input
+                size="small"
+                allowClear
+                value={relayCode}
+                onChange={(event) => setRelayCode(event.target.value)}
+                placeholder="relay= aus der Outlet-Adresse"
+                status={
+                  trimmedRelayCode && !isRelayCodeValid ? "error" : undefined
+                }
+              />
+              {trimmedRelayCode && !isRelayCodeValid ? (
+                <span className="text-red-600">
+                  4 bis 32 Zeichen aus A-Z, 0-9, _ und -; so nicht im Link
+                </span>
+              ) : !trimmedRelayCode ? (
+                <span>
+                  Leer: das Handy steuert die Anzeige, die es zuletzt hatte
+                </span>
+              ) : null}
+            </label>
             <QRCode value={link} size={256} bordered={false} />
             <Typography.Link
               href={link}

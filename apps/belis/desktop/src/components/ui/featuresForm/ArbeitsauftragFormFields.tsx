@@ -95,11 +95,13 @@ interface ArbeitsauftragFormFieldsProps {
   ) => void;
   onOriginalValues?: (values: Record<string, unknown>) => void;
   aaId?: string;
+  allowProtokollDeletion?: boolean;
 }
 
 const ArbeitsauftragFormFields = ({
   data,
   readOnly = true,
+  allowProtokollDeletion = false,
   onFormInstance,
   draftValues,
   onValuesChange,
@@ -140,7 +142,11 @@ const ArbeitsauftragFormFields = ({
   const veranlassung = useMemo(() => {
     const protokolle = data?.ar_protokolleArray;
     if (!Array.isArray(protokolle) || protokolle.length === 0) return null;
-    return protokolle[0]?.arbeitsprotokoll?.veranlassung ?? null;
+    // skip orphaned entries (arbeitsprotokoll: null) left by deleted protocols
+    return (
+      protokolle.find((p) => p?.arbeitsprotokoll?.veranlassung)
+        ?.arbeitsprotokoll?.veranlassung ?? null
+    );
   }, [data]);
 
   useEffect(() => {
@@ -317,7 +323,7 @@ const ArbeitsauftragFormFields = ({
       sorter: (a, b) => compare(a.status, b.status),
       sortOrder: protokolleSort?.field === "status" ? protokolleSort.order : null,
     },
-    ...(!readOnly
+    ...(allowProtokollDeletion
       ? [
           {
             title: (() => {

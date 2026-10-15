@@ -61,14 +61,17 @@ import LoginForm from "./components/LoginForm";
 import TopNavbar from "./components/TopNavbar";
 import { ObliqueProvider } from "./oblique/components/ObliqueProvider";
 import { MatomoTracker } from "./MatomoTracker";
+import { LayerUsageTracking, MapModeTracking } from "./tracking";
 
 import { useAppConfig } from "./hooks/useAppConfig";
+import { CatalogLayersLoader } from "./components/CatalogLayersLoader";
 import { useDefaultLayers } from "./hooks/useDefaultLayers";
 import { useManageLayers } from "./hooks/useManageLayers";
 import { useSyncToken } from "./hooks/useSyncToken";
 import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
 import { useLayerLaunchedAddons } from "./hooks/useLayerLaunchedAddons";
 import { withFlowFieldRasterCache } from "./helper/flow-field-raster-cache";
+import { withTimeSliderFrameCache } from "./helper/time-slider-frame-cache";
 import { useMeasurementLayerButton } from "./hooks/useMeasurementLayerButton";
 import { useShadowSimulationLayerButton } from "./hooks/useShadowSimulationLayerButton";
 import { useModelCollectionLayerButton } from "./hooks/useModelCollectionLayerButton";
@@ -210,7 +213,11 @@ function App({
 }) {
   const dispatch = useDispatch();
   const showLoginModal = useSelector(getShowLoginModal);
-  const isLoadingConfig = useAppConfig(CONFIG_BASE_URL, layerMap);
+  const {
+    isLoadingConfig,
+    pendingCatalogLayerIds,
+    clearPendingCatalogLayerIds,
+  } = useAppConfig(CONFIG_BASE_URL, layerMap);
   useManageLayers();
   // the plain geoportal's own layers, see constants/default-layers
   useDefaultLayers(routePath);
@@ -246,11 +253,13 @@ function App({
   // route's and the defaults' place for that kind
   const routeAddons = useLayerLaunchedAddons(addons);
   // `cache=forced`, read once like the map reads it when it is created
-  const cacheFlowFieldRasters = useMemo(() => isHttpCacheForced(), []);
+  const httpCacheForced = useMemo(() => isHttpCacheForced(), []);
   const mergedAddons = useMemo(() => {
     const all = withDefaultAddons(routeAddons);
-    return cacheFlowFieldRasters ? withFlowFieldRasterCache(all) : all;
-  }, [routeAddons, cacheFlowFieldRasters]);
+    return httpCacheForced
+      ? withTimeSliderFrameCache(withFlowFieldRasterCache(all))
+      : all;
+  }, [routeAddons, httpCacheForced]);
 
   const { initialMapFramework } = geoportalInitialHashState;
 
@@ -293,6 +302,8 @@ function App({
                   fallbackDirectionConfig={CAMERA_ID_TO_DIRECTION}
                 >
                   <GeoportalAppSearchParamsIntegration />
+                  <MapModeTracking />
+                  <LayerUsageTracking />
                   <MeasurementsWrapper
                     externalMode={mode}
                     setModeExternal={handleSetMode}
@@ -303,6 +314,10 @@ function App({
                       <ShadowSimulationLayerSyncInner />
                       <ErrorBoundary FallbackComponent={AppErrorFallback}>
                         <AdhocFeatureRehydration />
+                        <CatalogLayersLoader
+                          ids={pendingCatalogLayerIds}
+                          onDone={clearPendingCatalogLayerIds}
+                        />
                         <div className={TAILWIND_CLASSNAMES_FULLSCREEN_FIXED}>
                           {isLoadingConfig && (
                             <div

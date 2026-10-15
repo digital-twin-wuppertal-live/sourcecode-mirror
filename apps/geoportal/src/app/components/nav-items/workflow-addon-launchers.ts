@@ -6,7 +6,9 @@ import {
   resolveAddonEntries,
   useFloodLauncher,
   useFlowFieldLauncher,
+  hasFlowFieldSource,
   useShadowTextureWorkflow,
+  useSpotHighlightsActions,
   useTimeSeriesLauncher,
   useVehicleAnimationLauncher,
   type AddonEntry,
@@ -71,11 +73,11 @@ const toSeriesDefinition = (
 const toFieldDefinition = (
   config: FlowFieldConfig
 ): FlowFieldDefinition | null => {
-  const { service, scenario } = config;
-  if (!service || !scenario) {
+  const { scenario } = config;
+  if (!scenario || !hasFlowFieldSource(config)) {
     return null;
   }
-  return { ...config, title: config.title ?? "Fließwege", service, scenario };
+  return { ...config, title: config.title ?? "Fließwege", scenario };
 };
 
 const toVehicleDefinition = (
@@ -139,6 +141,7 @@ export const useWorkflowAddonLaunchers = (messageApi: MessageApiLike) => {
   const { toggleField, isFieldRunning } = useFlowFieldLauncher();
   const { toggleFlood, isFloodRunning } = useFloodLauncher();
   const { toggleVehicle, isVehicleRunning } = useVehicleAnimationLauncher();
+  const spotHighlights = useSpotHighlightsActions();
 
   const startShadowTexture = useCallback(
     (config: AddonConfigMap["shadowTexture"]) =>
@@ -203,6 +206,9 @@ export const useWorkflowAddonLaunchers = (messageApi: MessageApiLike) => {
     [toggleFlood]
   );
 
+  /** a workflow card's spotHighlights tool: the spot row on or off */
+  const startSpotHighlights = spotHighlights.toggle;
+
   /**
    * Whether a workflow card that launches an addon is currently on the map.
    * Such a card adds no layer, so the catalog cannot tell from the layer stack
@@ -235,6 +241,8 @@ export const useWorkflowAddonLaunchers = (messageApi: MessageApiLike) => {
               return shadowTextureWorkflow.isActive(
                 entry.config?.workflowBackgroundVisible
               );
+            case "spotHighlights":
+              return spotHighlights.hasRow;
             default:
               return false;
           }
@@ -247,6 +255,7 @@ export const useWorkflowAddonLaunchers = (messageApi: MessageApiLike) => {
       isVehicleRunning,
       isFloodRunning,
       shadowTextureWorkflow.isActive,
+      spotHighlights.hasRow,
     ]
   );
 
@@ -256,6 +265,7 @@ export const useWorkflowAddonLaunchers = (messageApi: MessageApiLike) => {
     startVehicleAnimation,
     startFlood,
     startShadowTexture,
+    startSpotHighlights,
     isWorkflowActive,
   };
 };

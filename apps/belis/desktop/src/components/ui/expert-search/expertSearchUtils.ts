@@ -5,8 +5,9 @@
 // Hasura GraphQL `where` clause string, in the same shape the classic per-type
 // builders in SearchModal.tsx emit (so it plugs into the same query execution).
 //
-// `field.key` in the registry is already the real backend column name, so each
-// rule maps to a flat `{ key: { _op: value } }` condition.
+// `field.key` in the registry is usually the real backend column name, so a
+// rule maps to a flat `{ key: { _op: value } }` condition; fields with
+// `filterRelation` / `filterColumn` get nested into their relationship.
 
 import type { Field } from "./fieldRegistry";
 import type {
@@ -37,7 +38,7 @@ const escapeString = (s: string): string =>
   s.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
 
 const isEmptyValue = (v: unknown): boolean =>
-  v === undefined || v === null || v === "";
+  v === undefined || v === null || (typeof v === "string" && v.trim() === "");
 
 // The antd DatePicker yields a dayjs object; duck-type it to avoid importing
 // dayjs here. Fall back to plain ISO strings just in case.
@@ -60,16 +61,25 @@ const buildRuleCondition = (
   rule: ExpertRuleState,
   field: Field
 ): string | null => {
+  const relations = field.filterRelation?.split(".") ?? [];
+  if (
+    field.filterRelationIsArray &&
+    (rule.operator === "empty" || rule.operator === "notEmpty")
+  ) {
+    return rule.operator === "empty"
+      ? `_not: {${relations[0]}: {}}`
+      : `${relations[0]}: {}`;
+  }
   const cond = buildColumnCondition(rule, field);
   if (cond === null) return null;
-  return field.filterRelation ? `${field.filterRelation}: {${cond}}` : cond;
+  return relations.reduceRight((inner, rel) => `${rel}: {${inner}}`, cond);
 };
 
 const buildColumnCondition = (
   rule: ExpertRuleState,
   field: Field
 ): string | null => {
-  const col = field.key;
+  const col = field.filterColumn ?? field.key;
   const { operator, value } = rule;
 
   // "ist leer" / "ist nicht leer" need no value.
@@ -119,7 +129,7 @@ const buildColumnCondition = (
 
     case "text":
     default: {
-      const str = escapeString(String(value));
+      const str = escapeString(String(value).trim());
       if (operator === "contains") {
         return `${col}: {_ilike: "%${str}%"}`;
       }
@@ -208,11 +218,9 @@ export const buildExpertOrderBy = (
   const fieldMap = new Map(fields.map((f) => [f.key, f]));
   const clauses = query.sorts.flatMap((s) => {
     const field = fieldMap.get(s.field);
-    if (!field) return [];
+    if (!field || field.sortable === false) return [];
     if (field.sortRelation && field.sortColumn) {
-      return [
-        `{${field.sortRelation}: {${field.sortColumn}: ${s.direction}}}`,
-      ];
+      return [`{${field.sortRelation}: {${field.sortColumn}: ${s.direction}}}`];
     }
     return [`{${s.field}: ${s.direction}}`];
   });
@@ -225,7 +233,9 @@ export const buildExpertSortSpec = (
   query: ExpertTypeState,
   fields: Field[]
 ): ExpertSortSpec => {
-  const fieldKeys = new Set(fields.map((f) => f.key));
+  const fieldKeys = new Set(
+    fields.filter((f) => f.sortable !== false).map((f) => f.key)
+  );
   return query.sorts
     .filter((s) => fieldKeys.has(s.field))
     .map((s) => ({ field: s.field, direction: s.direction }));

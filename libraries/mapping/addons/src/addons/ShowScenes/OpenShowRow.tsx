@@ -1,18 +1,20 @@
 import { Button, Input } from "antd";
+import { faRotateRight } from "@fortawesome/free-solid-svg-icons";
+import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 
+import { scenesText } from "./scenes-text";
 import type { OpenShow } from "./useOpenShow";
-
-const scenesText = (count: number): string =>
-  `${count} ${count === 1 ? "Szene" : "Szenen"}`;
 
 /** the "Show öffnen" field of the panel, see `useOpenShow` */
 export const OpenShowRow = ({
   input,
   setInput,
   canOpen,
+  canReload,
   state,
   sceneCount,
   open,
+  reload,
   confirm,
   cancel,
 }: OpenShow) => (
@@ -36,6 +38,12 @@ export const OpenShowRow = ({
       >
         Öffnen
       </Button>
+      <Button
+        onClick={reload}
+        disabled={!canReload}
+        icon={<FontAwesomeIcon icon={faRotateRight} />}
+        aria-label="Veröffentlichte Show unter ihrem Schlüssel neu laden"
+      />
     </div>
     {state.kind === "pending" && (
       <div className="flex items-center gap-2 rounded bg-amber-50 px-3 py-2">

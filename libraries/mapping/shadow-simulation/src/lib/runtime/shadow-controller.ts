@@ -1,7 +1,6 @@
 import * as THREE from "three";
 
 import { clamp } from "@carma-commons/math";
-import { degToRadNumeric } from "@carma-units";
 
 import {
   fitShadowMap,
@@ -10,6 +9,13 @@ import {
 } from "../core/fit-shadow-map";
 import type { ShadowQualityMultiplier } from "../core/shadow-types";
 import { shadowRasterOffset } from "../core/shadow-raster-offset";
+import { retainShadowRaster } from "../core/retain-shadow-raster";
+import { resolveShadowReceiverBias } from "../core/shadow-receiver-bias";
+import { configureMountedShadowCamera } from "./mounted-shadow-camera";
+import {
+  getSunDiscSampleOffset,
+  SUN_ANGULAR_RADIUS_RAD,
+} from "../core/sun-disc-sampling";
 
 const BASE_SHADOW_MAP_SIZE = 2_048;
 const DEFAULT_MAX_SHADOW_MAP_SIZE = 8_192;
@@ -18,13 +24,7 @@ const MIN_CASTER_REACH_METERS = 50;
 const MAX_CASTER_REACH_METERS = 10_000;
 const CASTER_REACH_ELEVATION_EPSILON = 0.04;
 const LIGHT_CAMERA_SAFETY_METERS = 25;
-const SHADOW_DEPTH_BIAS_TEXELS = 4;
-const SHADOW_NORMAL_BIAS_TEXELS = 1.2;
-const MIN_SHADOW_BIAS_ELEVATION_SINE = 0.2;
 const MIN_SHADOW_NORMAL_BIAS_METERS = 0.05;
-const MAX_SHADOW_NORMAL_BIAS_METERS = 8;
-export const SUN_ANGULAR_RADIUS_RAD = degToRadNumeric(0.53 / 2);
-const GOLDEN_ANGLE_RAD = Math.PI * (3 - Math.sqrt(5));
 
 export const CASTER_RELIEF_MARGIN_METERS = 300;
 
@@ -69,6 +69,8 @@ export type ShadowSnapshot = Readonly<{
   totalShadowTexels: number;
   mapTexelBudget?: number;
   casterReachMeters: number;
+  /** Caster LOD spacing, independent of the allocated depth texture. */
+  casterMetersPerTexel: readonly [number, number];
   camera: ShadowCameraSnapshot;
 }>;
 
@@ -89,11 +91,22 @@ export type ShadowUpdate = Readonly<{
   stabilizeMapSize?: boolean;
   /** Cap normal and light-depth receiver offsets in world metres. */
   maxReceiverBiasMeters?: number;
+  /** Stable physical offset; independent of the fitted camera footprint. */
+  receiverBiasMeters?: number;
+  /** World-grid footprint for bias, independent of camera coverage or DPR. */
+  receiverTexelMeters?: number;
+  /** Reuse the existing world raster while its guarded coverage is sufficient.
+   * Change this identity on zoom; the anchor must stay in the terrain frame. */
+  rasterKey?: string;
+  /** Transform the shadow camera through the same affine mount as terrain. */
+  mountedShadowCamera?: boolean;
   /** Total depth texels, independent of the hardware's per-axis limit.
    * Invalid values use the quality policy; positive values clamp to at least
    * 64² texels (the allocation/guard minimum) and at most the hardware limit².
    */
   mapTexelBudget?: number;
+  /** CSS-sized budget for geometry demand; leaves depth allocation unchanged. */
+  casterMapTexelBudget?: number;
 }>;
 
 const LIGHT_UP = new THREE.Vector3(0, 1, 0);
@@ -170,6 +183,14 @@ export class ShadowController {
     groundTexelFit: boolean;
   } | null = null;
   private disposed = false;
+  private mountedShadowCamera = false;
+  private readonly restoreShadowCameras: (() => void)[] = [];
+  private retainedRaster: {
+    key: string;
+    anchor: THREE.Vector3;
+    direction: THREE.Vector3;
+    fit: ReturnType<typeof fitShadowMap>;
+  } | null = null;
 
   constructor(private readonly host: THREE.Object3D) {
     this.lights = Array.from({ length: 1 }, () => {
@@ -183,6 +204,9 @@ export class ShadowController {
       light.shadow.bias = 0;
       light.shadow.normalBias = MIN_SHADOW_NORMAL_BIAS_METERS;
       host.add(light, light.target);
+      this.restoreShadowCameras.push(
+        configureMountedShadowCamera(light, () => this.mountedShadowCamera)
+      );
       return light;
     });
   }
@@ -211,11 +235,11 @@ export class ShadowController {
     if (!fit) return;
     const count = Math.max(1, Math.floor(sampleCount));
     const sampleIndex = ((Math.floor(round) % count) + count) % count;
-    const angularOffset =
-      SUN_ANGULAR_RADIUS_RAD * Math.sqrt((sampleIndex + 0.5) / count);
-    const sampleAngle = sampleIndex * GOLDEN_ANGLE_RAD;
-    const offsetA = Math.cos(sampleAngle) * angularOffset;
-    const offsetB = Math.sin(sampleAngle) * angularOffset;
+    const {
+      angularRadius: angularOffset,
+      tangentA: offsetA,
+      tangentB: offsetB,
+    } = getSunDiscSampleOffset(sampleIndex, count);
     const tangentDirection = fit.tangentA
       .clone()
       .multiplyScalar(offsetA)
@@ -287,10 +311,16 @@ export class ShadowController {
     groundTexelFit = true,
     stabilizeMapSize = false,
     mapTexelBudget,
+    casterMapTexelBudget,
     groundTexelTargetMeters,
     maxReceiverBiasMeters,
+    receiverBiasMeters,
+    receiverTexelMeters,
+    rasterKey,
+    mountedShadowCamera = false,
   }: ShadowUpdate): ShadowSnapshot | null {
     if (this.disposed) return null;
+    this.mountedShadowCamera = mountedShadowCamera;
     if (receiverWorldPoints.length === 0) {
       for (const light of this.lights) {
         light.visible = false;
@@ -362,14 +392,17 @@ export class ShadowController {
           receiverSunDiscGuard.planarMeters
         )
       : 0;
-    const shadowFit = fitShadowMap(receiverBounds, {
-      mapSize,
-      mapTexelBudget: resolvedMapTexelBudget,
+    const fitOptions = {
       maxMapSize: this.maxShadowMapSize,
       elevationSine: normalizedDirectionToSun.y,
       sunDiscGuardMeters,
       groundTexelFit,
       groundTexelTargetMeters,
+    };
+    const nextShadowFit = fitShadowMap(receiverBounds, {
+      ...fitOptions,
+      mapSize,
+      mapTexelBudget: resolvedMapTexelBudget,
       mapDimensions:
         stabilizeMapSize &&
         this.mapAllocation?.texelBudget === resolvedMapTexelBudget &&
@@ -378,6 +411,50 @@ export class ShadowController {
           ? this.mapAllocation
           : undefined,
     });
+    const rasterIdentity = JSON.stringify([
+      rasterKey,
+      resolvedMapTexelBudget,
+      this.maxShadowMapSize,
+      groundTexelFit,
+      groundTexelTargetMeters,
+      this.softSun,
+    ]);
+    const retained = this.retainedRaster;
+    const canRetain =
+      rasterKey !== undefined &&
+      retained?.key === rasterIdentity &&
+      retained.anchor.distanceToSquared(targetPosition) < 1e-18 &&
+      retained.direction.distanceToSquared(normalizedDirectionToSun) < 1e-18;
+    const shadowFit = retainShadowRaster(
+      canRetain ? retained.fit : undefined,
+      nextShadowFit,
+      receiverBounds,
+      sunDiscGuardMeters
+    );
+    this.retainedRaster =
+      rasterKey === undefined
+        ? null
+        : {
+            key: rasterIdentity,
+            anchor: targetPosition.clone(),
+            direction: normalizedDirectionToSun.clone(),
+            fit: shadowFit,
+          };
+    // Fit geometry demand separately: scaling the allocated texture by DPR
+    // would inherit its quantization, caps and motion-stabilized dimensions.
+    const casterTexelBudget = resolveShadowMapTexelBudget(
+      casterMapTexelBudget,
+      resolvedMapTexelBudget,
+      this.maxShadowMapSize
+    );
+    const casterFit =
+      casterMapTexelBudget === undefined
+        ? shadowFit
+        : fitShadowMap(receiverBounds, {
+            ...fitOptions,
+            mapSize: Math.floor(Math.sqrt(casterTexelBudget)),
+            mapTexelBudget: casterTexelBudget,
+          });
     this.mapAllocation = {
       width: shadowFit.mapWidth,
       height: shadowFit.mapHeight,
@@ -421,18 +498,6 @@ export class ShadowController {
     // different triangles. Capping bias to that value produced black facets in
     // the overhead-sun GPU oracle. Coarse maps can still lose contact detail;
     // report unmet texel demand rather than promising centimetre shadow accuracy.
-    const normalBias = clamp(
-      (metersPerTexel * SHADOW_NORMAL_BIAS_TEXELS) /
-        Math.max(MIN_SHADOW_BIAS_ELEVATION_SINE, normalizedDirectionToSun.y),
-      MIN_SHADOW_NORMAL_BIAS_METERS,
-      MAX_SHADOW_NORMAL_BIAS_METERS
-    );
-    const depthBias = -clamp(
-      (metersPerTexel * SHADOW_DEPTH_BIAS_TEXELS) /
-        Math.max(shadowBounds.far - shadowBounds.near, 1),
-      Number.EPSILON,
-      0.01
-    );
     const tangentA = new THREE.Vector3();
     if (Math.abs(normalizedDirectionToSun.y) > 0.99) {
       tangentA.set(1, 0, 0);
@@ -468,16 +533,16 @@ export class ShadowController {
     light.target.position.copy(targetPosition);
     // Decision MESH-CONTACT-BIAS-20260908 (three/TILED_SHADOW_PAGES.md): mesh
     // contact must not inherit metre-scale heightfield acne suppression.
-    const biasLimit =
-      maxReceiverBiasMeters !== undefined &&
-      Number.isFinite(maxReceiverBiasMeters)
-        ? Math.max(0, maxReceiverBiasMeters)
-        : Infinity;
-    light.shadow.bias = Math.max(
-      depthBias,
-      -biasLimit / (shadowBounds.far - shadowBounds.near)
-    );
-    light.shadow.normalBias = Math.min(normalBias, biasLimit);
+    const receiverBias = resolveShadowReceiverBias({
+      metersPerTexel,
+      receiverTexelMeters,
+      elevationSine: normalizedDirectionToSun.y,
+      depthRangeMeters: shadowBounds.far - shadowBounds.near,
+      maxReceiverBiasMeters,
+      receiverBiasMeters,
+    });
+    light.shadow.bias = receiverBias.bias;
+    light.shadow.normalBias = receiverBias.normalBias;
     const camera = light.shadow.camera;
     camera.left = shadowBounds.left;
     camera.right = shadowBounds.right;
@@ -509,6 +574,10 @@ export class ShadowController {
           ? resolvedMapTexelBudget
           : undefined,
       casterReachMeters,
+      casterMetersPerTexel: [
+        casterFit.metersPerTexelX,
+        casterFit.metersPerTexelY,
+      ],
       camera: {
         receiverPointCount: receiverWorldPoints.length,
         receiverLeftMeters: receiverBounds.left,
@@ -546,6 +615,7 @@ export class ShadowController {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    for (const restore of this.restoreShadowCameras) restore();
     for (const light of this.lights) {
       light.shadow.map?.dispose();
       this.host.remove(light.target, light);

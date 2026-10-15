@@ -31,6 +31,8 @@ const STARKREGEN_T50_SERIES: TimeSeriesDefinition = {
   title: "Starkregen T50 (zeitlicher Verlauf)",
   wmsUrl: "https://starkregenwms-wuppertal.cismet.de/geoserver/wms?SERVICE=WMS",
   styles: "starkregen:depth",
+  /** quarter-size frames, which the show machine's memory needs */
+  frameScale: 0.5,
   intermediateValuesCount: 20,
   opacity: 0.85,
   initialStep: 2,
@@ -105,14 +107,7 @@ const STARKREGEN_T50_FLOW: FlowFieldDefinition = {
   scenario: "T50/",
   // Leaflet 17 in the old rain hazard map; MapLibre counts one lower
   minZoom: 16,
-  // without cage: the same scenario's direction arrows as a plain WMS
-  fallback: {
-    wmsUrl:
-      "https://starkregenwms-wuppertal.cismet.de/geoserver/wms?SERVICE=WMS",
-    layers: "starkregen:L_T50_direction3857",
-    styles: "starkregen:direction",
-  },
-  // u/v for the projection model's area plus about 200 m; outside it the
+  // u/v for the projection model's outline box plus 20 m; outside it the
   // animation fetches per view from `service` as before
   preload: {
     u: "https://assets.cismet.de/cache/t50_u.tif",
@@ -142,6 +137,8 @@ const STARKREGEN_T100_SERIES: TimeSeriesDefinition = {
   title: "Starkregen T100 (zeitlicher Verlauf)",
   wmsUrl: "https://starkregenwms-wuppertal.cismet.de/geoserver/wms?SERVICE=WMS",
   styles: "starkregen:depth",
+  /** quarter-size frames, which the show machine's memory needs */
+  frameScale: 0.5,
   intermediateValuesCount: 20,
   opacity: 0.85,
   initialStep: 2,
@@ -208,12 +205,11 @@ const STARKREGEN_T100_FLOW: FlowFieldDefinition = {
   scenario: "T100/",
   // Leaflet 17 in the old rain hazard map; MapLibre counts one lower
   minZoom: 16,
-  // without cage: the same scenario's direction arrows as a plain WMS
-  fallback: {
-    wmsUrl:
-      "https://starkregenwms-wuppertal.cismet.de/geoserver/wms?SERVICE=WMS",
-    layers: "starkregen:L_T100_direction3857",
-    styles: "starkregen:direction",
+  // u/v for the projection model's outline box plus 20 m; outside it the
+  // animation fetches per view from `service` as before
+  preload: {
+    u: "https://assets.cismet.de/cache/t100_u.tif",
+    v: "https://assets.cismet.de/cache/t100_v.tif",
   },
 };
 
@@ -238,6 +234,8 @@ const STARKREGEN_90MM_SERIES: TimeSeriesDefinition = {
   title: "Starkregen 90 mm (zeitlicher Verlauf)",
   wmsUrl: "https://starkregenwms-wuppertal.cismet.de/geoserver/wms?SERVICE=WMS",
   styles: "starkregen:depth",
+  /** quarter-size frames, which the show machine's memory needs */
+  frameScale: 0.5,
   intermediateValuesCount: 20,
   opacity: 0.85,
   initialStep: 2,
@@ -304,12 +302,11 @@ const STARKREGEN_90MM_FLOW: FlowFieldDefinition = {
   scenario: "90mm/",
   // Leaflet 17 in the old rain hazard map; MapLibre counts one lower
   minZoom: 16,
-  // without cage: the same scenario's direction arrows as a plain WMS
-  fallback: {
-    wmsUrl:
-      "https://starkregenwms-wuppertal.cismet.de/geoserver/wms?SERVICE=WMS",
-    layers: "starkregen:L_90mm_direction3857",
-    styles: "starkregen:direction",
+  // u/v for the projection model's outline box plus 20 m; outside it the
+  // animation fetches per view from `service` as before
+  preload: {
+    u: "https://assets.cismet.de/cache/90mm_u.tif",
+    v: "https://assets.cismet.de/cache/90mm_v.tif",
   },
 };
 
@@ -335,6 +332,8 @@ const STARKREGEN_EXTREM2018_SERIES: TimeSeriesDefinition = {
   title: "Regen vom 29.05.2018 (zeitlicher Verlauf)",
   wmsUrl: "https://starkregenwms-wuppertal.cismet.de/geoserver/wms?SERVICE=WMS",
   styles: "starkregen:depth",
+  /** quarter-size frames, which the show machine's memory needs */
+  frameScale: 0.5,
   intermediateValuesCount: 20,
   opacity: 0.85,
   initialStep: 2,
@@ -401,12 +400,11 @@ const STARKREGEN_EXTREM2018_FLOW: FlowFieldDefinition = {
   scenario: "Extrem2018/",
   // Leaflet 17 in the old rain hazard map; MapLibre counts one lower
   minZoom: 16,
-  // without cage: the same scenario's direction arrows as a plain WMS
-  fallback: {
-    wmsUrl:
-      "https://starkregenwms-wuppertal.cismet.de/geoserver/wms?SERVICE=WMS",
-    layers: "starkregen:L_Extrem2018_direction3857",
-    styles: "starkregen:direction",
+  // u/v for the projection model's outline box plus 20 m; outside it the
+  // animation fetches per view from `service` as before
+  preload: {
+    u: "https://assets.cismet.de/cache/extrem2018_u.tif",
+    v: "https://assets.cismet.de/cache/extrem2018_v.tif",
   },
 };
 

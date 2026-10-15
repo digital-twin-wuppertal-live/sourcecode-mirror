@@ -1,7 +1,7 @@
 import {
-  createDerivedBufferCache,
   resolveDerivedCacheAssetEpoch,
 } from "@carma-commons/utils";
+import { createPersistentTileCache } from "./persistent-tile-cache";
 import {
   TILESET_HIERARCHY,
   createTilesetHierarchyPageReader,
@@ -23,7 +23,8 @@ const scope = self as unknown as {
   onmessage: ((event: MessageEvent<HierarchyRequest>) => void) | null;
 };
 const jobs = new Map<number, AbortController>();
-let manager: ReturnType<typeof createDerivedBufferCache> | null = null;
+const inflight = new Map<string, Promise<TilesetDescriptor>>();
+let manager: ReturnType<typeof createPersistentTileCache> | null = null;
 let rootRevision: string | null = null;
 let initialized: Promise<void> | null = null;
 let rootDocument: TilesetDescriptor | null = null;
@@ -75,10 +76,7 @@ const initialize = async (
         )
       : null);
   if (epoch)
-    manager = createDerivedBufferCache({
-      capacityBytes: 256 * 1024 ** 2,
-      producerEpoch: epoch,
-    });
+    manager = createPersistentTileCache(epoch);
 };
 
 const optionalRead = async (url: string) => {
@@ -92,7 +90,16 @@ const optionalRead = async (url: string) => {
   try {
     // Persistence is optional; blocked IndexedDB must never block discovery.
     const record = await Promise.race([
-      records.get<TilesetHierarchyPage>(key, { touch: false }),
+      records
+        .get<TilesetHierarchyPage>(key, { touch: false })
+        .then((record) => {
+          // Decision: runtime profiling/cache-recovery record in TILES_COVERAGE.md.
+          // A stall parks reads, not the whole
+          // session. Reopen only when an outstanding read actually completes;
+          // a permanently blocked database therefore cannot accumulate probes.
+          readsAvailable = true;
+          return record;
+        }),
       new Promise<null>((resolve) => {
         timer = setTimeout(() => {
           readsAvailable = false;
@@ -139,13 +146,22 @@ const execute = async (
     };
   const started = performance.now();
   if (!document) {
-    const response = await fetchTileResponse(request.url, {
-      ...request.options,
-      signal,
-    });
-    if (!response.ok)
-      throw new Error(`Tileset metadata HTTP ${response.status}`);
-    document = (await response.json()) as TilesetDescriptor;
+    // One download per file: a warm-up and the traversal asking for the same
+    // file share it. The shared fetch outlives a single requester's abort.
+    let shared = inflight.get(request.url);
+    if (!shared) {
+      shared = fetchTileResponse(request.url, { ...request.options })
+        .then(async (response) => {
+          if (!response.ok)
+            throw new Error(`Tileset metadata HTTP ${response.status}`);
+          return (await response.json()) as TilesetDescriptor;
+        })
+        .finally(() => {
+          inflight.delete(request.url);
+        });
+      inflight.set(request.url, shared);
+    }
+    document = await shared;
   }
   signal.throwIfAborted();
   let page: TilesetHierarchyPage;

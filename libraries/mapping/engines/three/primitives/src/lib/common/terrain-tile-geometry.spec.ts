@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { Vector3 } from "three";
 
 import { createProjectedTerrainTileGeometry } from "./terrain-tile-geometry";
 
@@ -39,6 +40,30 @@ describe("createProjectedTerrainTileGeometry", () => {
     expect(geometry.getIndex()?.count).toBe(6);
   });
 
+  it("preserves caller-prepared normals and rejects incomplete output buffers", () => {
+    const normalBuffer = new Float32Array([0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1]);
+    const options = {
+      tile,
+      normalBuffer,
+      projectToWorld: (
+        longitude: number,
+        latitude: number,
+        height: number,
+        target: Vector3
+      ) => target.set(longitude, height, -latitude),
+    };
+    const geometry = createProjectedTerrainTileGeometry(options);
+    expect(geometry.getAttribute("normal").array).toBe(normalBuffer);
+    expect(geometry.getAttribute("normal").getZ(0)).toBe(1);
+    expect(() =>
+      createProjectedTerrainTileGeometry({
+        ...options,
+        normalBuffer: new Float32Array(3),
+      })
+    ).toThrow("normal buffer");
+    geometry.dispose();
+  });
+
   it("drops zero-area faces and corrects downward winding", () => {
     const geometry = createProjectedTerrainTileGeometry({
       tile: {
@@ -55,6 +80,22 @@ describe("createProjectedTerrainTileGeometry", () => {
     for (const index of [0, 1, 3]) {
       expect(geometry.getAttribute("normal").getY(index)).toBeGreaterThan(0);
     }
+  });
+
+  it("keeps nondegenerate geographic faces whose local XZ projection collapses", () => {
+    const geometry = createProjectedTerrainTileGeometry({
+      tile: { ...tile, indices: [0, 2, 1] },
+      triangleOrientation: "geographic",
+      projectToWorld: (longitude, latitude, height, target) =>
+        target.set(longitude, latitude, height),
+    });
+
+    expect([...(geometry.getIndex()?.array ?? [])]).toEqual([0, 2, 1]);
+    const normal = geometry.getAttribute("normal");
+    for (const index of [0, 1, 2])
+      expect(
+        Math.hypot(normal.getX(index), normal.getY(index), normal.getZ(index))
+      ).toBeGreaterThan(0);
   });
 
   it("rejects out-of-range indices before creating GPU buffers", () => {

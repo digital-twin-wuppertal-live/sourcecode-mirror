@@ -35,7 +35,7 @@ export type HighlightSpot = Omit<ShowHighlight, "title">;
 
 export const DEFAULT_HIGHLIGHT_RADIUS_METERS = 80;
 export const DEFAULT_HIGHLIGHT_DIM = DEFAULT_POINTER_DIM;
-/** the size slider in pm-show: a single building up to a quarter */
+/** the sizes the spot layer's wheel allows: a single building up to a quarter */
 export const HIGHLIGHT_RADIUS_RANGE_METERS = [15, 400] as const;
 /** the same range the pointer's "Abdunkeln" slider offers */
 export const HIGHLIGHT_DIM_RANGE = [0.2, 0.95] as const;
@@ -90,6 +90,39 @@ export const sceneHighlights = (scene: {
   Array.isArray(scene.highlights)
     ? scene.highlights.filter(isShowHighlight)
     : [];
+
+/** one button on the remote: every highlight of one name */
+export type HighlightButton = {
+  /** stable within the scene: the first highlight's id */
+  key: string;
+  title: string;
+  ids: string[];
+};
+
+/**
+ * The remote's buttons for a scene's highlights. Highlights of the same name
+ * share a button, which switches them together, so several spots can light
+ * up as one; an unnamed one keeps a button of its own. In the order the
+ * names first appear.
+ */
+export const highlightButtons = (
+  highlights: readonly ShowHighlight[]
+): HighlightButton[] => {
+  const buttons: HighlightButton[] = [];
+  const byTitle = new Map<string, HighlightButton>();
+  for (const { id, title } of highlights) {
+    const name = title.trim();
+    const shared = name ? byTitle.get(name) : undefined;
+    if (shared) {
+      shared.ids.push(id);
+      continue;
+    }
+    const button = { key: id, title: name, ids: [id] };
+    buttons.push(button);
+    if (name) byTitle.set(name, button);
+  }
+  return buttons;
+};
 
 /** the spots of the switched-on ids, in the scene's order */
 export const highlightSpotsOf = (

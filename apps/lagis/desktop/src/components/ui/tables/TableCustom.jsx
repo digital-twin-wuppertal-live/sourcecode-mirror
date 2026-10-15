@@ -1,10 +1,10 @@
-import { useState, useEffect, useContext } from "react";
+import { useState, useEffect } from "react";
 import { Table } from "antd";
 import "./table-style.css";
-import { TopicMapContext } from "react-cismap/contexts/TopicMapContextProvider";
 import { useSelector } from "react-redux";
 import { getFeatureCollection } from "../../../store/slices/mapping";
 import { selectedFeatureFitBounds } from "../../../core/tools/helper";
+import { getLibreMapInstance } from "../../../core/tools/libreMapRegistry";
 
 const TableCustom = ({
   columns,
@@ -16,9 +16,9 @@ const TableCustom = ({
   fixHeight = false,
   setActiveDataId,
   selectedFeatureKey,
+  scroll,
 }) => {
   const [selectedRow, setSelectedRow] = useState(activeRow);
-  const { routedMapRef } = useContext(TopicMapContext);
   const features = useSelector(getFeatureCollection);
 
   const handleRowClick = (record) => {
@@ -55,8 +55,8 @@ const TableCustom = ({
         onRow={(record) => ({
           onClick: () => handleRowClick(record),
           onDoubleClick: () => {
-            if (routedMapRef && features) {
-              const map = routedMapRef.leafletMap.leafletElement;
+            const map = getLibreMapInstance();
+            if (map && features) {
               const selectedFeature = features.filter(
                 (f) => f[selectedFeatureKey]
               );
@@ -71,6 +71,7 @@ const TableCustom = ({
         dataSource={data}
         pagination={paginationConfig}
         bordered={true}
+        scroll={scroll}
         // scroll={{ y: "auto" }}
       />
     </div>

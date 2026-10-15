@@ -109,6 +109,36 @@ export {
 } from "./addons/SwitchOn";
 export type { SwitchOnConfig, SwitchOnTarget } from "./addons/SwitchOn";
 export { useSwitchOn } from "./lib/useSwitchOn";
+export {
+  CONDITIONAL_LAYER_KIND,
+  conditionalLayerConfig,
+  conditionRouteOf,
+  isShownByCondition,
+} from "./addons/ConditionalLayer";
+export type {
+  ConditionalLayerCondition,
+  ConditionalLayerConfig,
+  ConditionalLayerContext,
+} from "./addons/ConditionalLayer";
+
+export {
+  SpotHighlights,
+  SpotHighlightsPanel,
+  useSpotHighlightsActions,
+  useSpotHighlightsLayerRow,
+  SPOT_HIGHLIGHTS_LAYER,
+  SPOT_HIGHLIGHTS_LAYER_ID,
+  SPOT_HIGHLIGHTS_TOOLS_INTERACTION_ID,
+  findSpotLayer,
+  spotLayerContent,
+  spotLayerFromHighlights,
+  spotLayerHighlights,
+  type Spot,
+  type SpotHighlightsConfig,
+  type SpotHighlightsState,
+  type SpotLayerContent,
+  type UseSpotHighlightsLayerRowOptions,
+} from "./addons/SpotHighlights";
 
 export {
   TimeSlider,
@@ -137,6 +167,7 @@ export {
   useFlowFieldActions,
   useFlowFieldLauncher,
   useFlowFieldLayerRow,
+  hasFlowFieldSource,
   FLOW_FIELD_LAYER,
   FLOW_FIELD_LAYER_ID,
   FLOW_FIELD_STATUS_ID,
@@ -255,6 +286,10 @@ export {
 } from "./addons/Annotation";
 export { GazetteerMode } from "./addons/GazetteerMode";
 export { GazetteerSource } from "./addons/GazetteerSource";
+export {
+  HighlightFromFilter,
+  type HighlightFromFilterConfig,
+} from "./addons/HighlightFromFilter";
 export { HomeOverride, type HomeOverrideConfig } from "./addons/HomeOverride";
 export {
   VectorHighlight,

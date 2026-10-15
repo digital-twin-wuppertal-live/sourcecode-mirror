@@ -11,7 +11,10 @@ import { PersistGate } from "redux-persist/integration/react";
 
 import { AdhocFeatureDisplayProvider } from "@carma-appframeworks/portals";
 import { carma } from "@carma-api";
-import { preventPinchZoom } from "@carma-commons/dom/window";
+import {
+  preventPinchZoom,
+  reloadOnStaleChunk,
+} from "@carma-commons/dom/window";
 import { cjsGlobalShim, suppressReactCismapErrors } from "@carma-commons/utils";
 import { setupCesiumEnvironment } from "@carma-mapping/engines/cesium/core";
 import { ImageList, ServiceList } from "@carma-mapping/layers";
@@ -33,6 +36,7 @@ import {
   setUIVisibleControls,
 } from "./app/store/slices/ui";
 import { discoverProps } from "./app/constants/discover";
+import { projectionMappingFachzwilling } from "./app/constants/fachzwillinge/projectionMapping";
 import {
   fachzwillingRoutes,
   findFachzwillingByPathname,
@@ -131,6 +135,24 @@ const persistor = persistStore(store);
 suppressReactCismapErrors();
 
 preventPinchZoom();
+
+/**
+ * The show's curating route runs in front of an audience, where a reload of
+ * its own would interrupt the show; there the error page offers the reload as
+ * a button instead. The projection window (the outlet) does reload: nobody
+ * stands at its window to press a button, and on the projector the error page
+ * is worse than the second a reload takes.
+ */
+const NO_AUTO_RELOAD_PATHS = [projectionMappingFachzwilling.path].map(
+  (path) => `/${path}`
+);
+
+reloadOnStaleChunk("carma::geoportal", {
+  shouldReload: () =>
+    !NO_AUTO_RELOAD_PATHS.includes(
+      window.location.hash.replace(/^#/, "").split("?")[0]
+    ),
+});
 
 /**
  * Vite's React plugin treats this export-less entry as a Fast Refresh

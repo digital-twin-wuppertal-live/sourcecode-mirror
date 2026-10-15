@@ -32,9 +32,6 @@ const LOCAL_STYLES = new URL(
  * 16 would keep the animation still on the whole model.
  */
 const MODEL_FLOW_MIN_ZOOM = 14;
-const DZ_B_PRM_ASSET_BASE_URL =
-  import.meta.env.VITE_DZ_B_PRM_GLB_BASE_URL ||
-  "https://wupp-3d-data.cismet.de/dz-b-prm/derived";
 
 /**
  * The remote the published show opens on the phone (`apps/pm-remote`). The
@@ -48,6 +45,15 @@ const PM_REMOTE_URL =
   ["localhost", "127.0.0.1"].includes(window.location.hostname)
     ? "http://localhost:4210/"
     : "https://carma-dev-deployments.github.io/pm-remote/");
+
+/**
+ * The display page of this deployment, for "Outlet öffnen" in the Show-Szenen
+ * panel, which adds the relay code. The route brings the model's bounds along.
+ */
+const OUTLET_URL = new URL(
+  `${import.meta.env.BASE_URL}#/outlet?ff=ng`,
+  window.location.origin
+).href;
 
 /**
  * Where "Veröffentlichen" stores the show. Unset, the addon's default ceepr
@@ -130,16 +136,9 @@ export const projectionMappingFachzwilling: FachzwillingRoute = {
       },
     ],
   },
+  // no route-wide shadowTexture: the "Schatten" styles launch their own, see
+  // their carmaConf.tools, and only a layer's shadows go into a scene
   addons: [
-    {
-      addon: "shadowTexture",
-      config: {
-        manifestUrl: `${
-          import.meta.env.BASE_URL
-        }assets/dz-b-prm/collection.json`,
-        assetBaseUrl: DZ_B_PRM_ASSET_BASE_URL,
-      },
-    },
     // the engine the Schwebebahn cards launch into; idle until one is clicked
     "vehicleAnimation",
     // the same for the Starkregen cards. Its own storage key, so tuning it for
@@ -153,12 +152,16 @@ export const projectionMappingFachzwilling: FachzwillingRoute = {
       addon: "showScenes",
       config: {
         remoteUrl: PM_REMOTE_URL,
+        outletUrl: OUTLET_URL,
         ...(SHOW_STORE_URL ? { storeUrl: SHOW_STORE_URL } : {}),
         ...(SHOW_READ_URL ? { readUrl: SHOW_READ_URL } : {}),
         // pre-ticked in the panel's "Nicht in der Show" list
         excludeLayers: [PROJECTION_AREA_STYLE],
       },
     },
+    // spots placed on the map; a scene with them gets them as its
+    // highlights, one button each on the remote
+    "spotHighlights",
   ],
   /**
    * The layers of the show, grouped as it walks through them. Most are built
@@ -225,12 +228,44 @@ export const projectionMappingFachzwilling: FachzwillingRoute = {
       ],
     },
     {
+      Title: "Fließwege",
+      // the same four scenarios as particles, see each style's carmaConf.tools;
+      // they preload the u/v rasters of the model's area from assets.cismet.de,
+      // so the animation starts without a request per view. The
+      // `_wassertiefen` ones draw the scenario's maximum depths underneath.
+      layers: [
+        `${PROJECTION_MAPPING_STYLES}/starkregen_t50_fliesswege.style.json`,
+        `${PROJECTION_MAPPING_STYLES}/starkregen_t100_fliesswege.style.json`,
+        `${PROJECTION_MAPPING_STYLES}/starkregen_90mm_fliesswege.style.json`,
+        `${PROJECTION_MAPPING_STYLES}/starkregen_extrem2018_fliesswege.style.json`,
+        `${PROJECTION_MAPPING_STYLES}/starkregen_t50_fliesswege_wassertiefen.style.json`,
+        `${PROJECTION_MAPPING_STYLES}/starkregen_t100_fliesswege_wassertiefen.style.json`,
+        `${PROJECTION_MAPPING_STYLES}/starkregen_90mm_fliesswege_wassertiefen.style.json`,
+        `${PROJECTION_MAPPING_STYLES}/starkregen_extrem2018_fliesswege_wassertiefen.style.json`,
+      ],
+    },
+    {
       Title: "Schatten",
       // each style switches the BuGa model's shadows on for its bridge, see its
       // carmaConf.tools; date, time and playback sit on the style's button
       layers: [
         `${PROJECTION_MAPPING_STYLES}/schatten_bestand.style.json`,
         `${PROJECTION_MAPPING_STYLES}/schatten_buga_entwurf.style.json`,
+      ],
+    },
+    {
+      Title: "Brücke",
+      // the Buga suspension bridge's footprint as printed by Kubitur, the gaps
+      // between the hangers left open. It keeps streets and everything else
+      // off the printed bridge; black blanks the bridge, the colours light it
+      // up. Each style pins itself on top and, in the outlet, only draws with
+      // `?mask=buga-bruecke`, see its carmaConf.tools: on the Bestand insert
+      // it would cover the valley.
+      layers: [
+        `${PROJECTION_MAPPING_STYLES}/brueckenmaske.style.json`,
+        `${PROJECTION_MAPPING_STYLES}/brueckenmaske_silbergrau.style.json`,
+        `${PROJECTION_MAPPING_STYLES}/brueckenmaske_stahlblau.style.json`,
+        `${PROJECTION_MAPPING_STYLES}/brueckenmaske_regenbogen.style.json`,
       ],
     },
     {
@@ -282,40 +317,6 @@ export const projectionMappingFachzwilling: FachzwillingRoute = {
    */
   perspectives: [
     {
-      id: "schatten",
-      title: "Schatten",
-      workflows: [
-        {
-          id: "ohne-karte",
-          title: "Schatten ohne Karte",
-          description: "Nur die vom BuGa-Modell berechneten Schatten anzeigen.",
-          tools: [
-            {
-              addon: "shadowTexture",
-              config: {
-                assetBaseUrl: DZ_B_PRM_ASSET_BASE_URL,
-                workflowBackgroundVisible: false,
-              },
-            },
-          ],
-        },
-        {
-          id: "mit-karte",
-          title: "Schatten mit Karte",
-          description: "Die Schatten über der gewählten Basiskarte anzeigen.",
-          tools: [
-            {
-              addon: "shadowTexture",
-              config: {
-                assetBaseUrl: DZ_B_PRM_ASSET_BASE_URL,
-                workflowBackgroundVisible: true,
-              },
-            },
-          ],
-        },
-      ],
-    },
-    {
       id: "mobilitaet",
       title: "Mobilität",
       // the workflows route's cards without the two 3d ones, which this route
@@ -328,6 +329,25 @@ export const projectionMappingFachzwilling: FachzwillingRoute = {
       title: "Starkregen",
       // the workflows route's Fließwege cards, animated from the model's zoom
       workflows: starkregenFlowWorkflows(MODEL_FLOW_MIN_ZOOM),
+    },
+    {
+      id: "praesentation",
+      title: "Präsentation",
+      workflows: [
+        {
+          // No `layers`: the spots live in a row of their own, which the card
+          // adds or removes, the same as the bullseye button on the map
+          id: "hervorhebungen",
+          title: "Hervorhebungen",
+          description:
+            "Inhalt: Kreise auf der Karte, alles außerhalb wird abgedunkelt. " +
+            "Nutzung: Mit + und einem Klick in die Karte einen Kreis setzen. " +
+            "Das Mausrad auf einem Kreis ändert seine Größe, daneben das " +
+            "Abdunkeln. In einer Szene gespeichert, wird jeder Name ein Knopf " +
+            "auf der Fernbedienung; Kreise mit gleichem Namen teilen sich einen.",
+          tools: ["spotHighlights"],
+        },
+      ],
     },
   ],
 };

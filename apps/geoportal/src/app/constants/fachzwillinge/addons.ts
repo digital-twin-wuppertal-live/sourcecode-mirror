@@ -8,6 +8,9 @@ import {
 
 const SHADOW_TERRAIN_RUNTIME_OPTIONS = {
   errorTargetPixels: 0.5,
+  // While the view keeps changing, select at a target the next camera change
+  // does not immediately discard; the fine target above runs once it settles.
+  motionErrorTargetPixels: 4,
   shadowLevelOffset: 3,
   minimumLevel: 8,
   meshSegments: 512,
@@ -16,6 +19,9 @@ const SHADOW_TERRAIN_RUNTIME_OPTIONS = {
   requestConcurrency: 24,
   maxCacheBytes: 268_435_456,
   maxCachedMeshes: 2_048,
+  persistBaseTiles: true,
+  baseRasterEdgePixels: 8_192,
+  baseCoverageMemoryShare: 0.1,
   material: {
     color: "#d3d3d3",
   },
@@ -76,6 +82,14 @@ export const addonsFachzwilling: FachzwillingRoute = {
       },
     },
     { addon: "vectorHighlightControl" },
+    // Turns the style filter into a highlight: the same buttons and the same
+    // selection, but the features that do not match are dimmed instead of
+    // removed. Covers every filtered layer, e.g. wohnlagen2026; `layerIds:
+    // ["<layer id>"]` narrows it, `dimOpacity` sets how far the rest fades
+    // (0.25 by default, same as vectorHighlight). Nothing in the app is wired
+    // to it: it sets the libre map's filter presentation itself. MapLibre only,
+    // so the Leaflet map keeps filtering.
+    { addon: "highlightFromFilter" },
     // annotation layer over the map, pinned to the ground so it pans with the
     // camera. Geometry scales with the map, stroke width and font size do not.
     // The map is the only scale there is, so excalidraw's own zoom widget is

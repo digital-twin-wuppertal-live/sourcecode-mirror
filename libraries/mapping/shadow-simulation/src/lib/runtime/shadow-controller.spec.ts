@@ -30,6 +30,123 @@ const buildUpdate = (overrides: Partial<ShadowUpdate> = {}): ShadowUpdate => ({
 });
 
 describe("ShadowController", () => {
+  it("retains world shadow coordinates for contained receivers and refits on zoom or sun changes", () => {
+    const controller = new ShadowController(new THREE.Scene());
+    const reference = new ShadowController(new THREE.Scene());
+    try {
+      const initial = buildUpdate({
+        rasterKey: "terrain-zoom-16",
+        receiverWorldPoints: receiverWorldPoints.map((point) =>
+          point.clone().multiply(new THREE.Vector3(4, 1, 4))
+        ),
+      });
+      controller.update(initial);
+      const probe = new THREE.Vector3(20, 120, 10);
+      const initialClip = probe
+        .clone()
+        .project(controller.lights[0].shadow.camera);
+      const contained = {
+        ...initial,
+        receiverWorldPoints: receiverWorldPoints.map((point) => point.clone()),
+      };
+      const retained = controller.update(contained)!;
+      const retainedClip = probe
+        .clone()
+        .project(controller.lights[0].shadow.camera);
+      expect(retainedClip.x).toBeCloseTo(initialClip.x, 12);
+      expect(retainedClip.y).toBeCloseTo(initialClip.y, 12);
+
+      const zoomed = { ...contained, rasterKey: "terrain-zoom-17" };
+      const zoomSnapshot = controller.update(zoomed)!;
+      expect(zoomSnapshot.camera).toEqual(reference.update(zoomed)!.camera);
+      expect(
+        zoomSnapshot.camera.rightMeters - zoomSnapshot.camera.leftMeters
+      ).toBeLessThan(retained.camera.rightMeters - retained.camera.leftMeters);
+
+      const newSun = {
+        ...zoomed,
+        directionToSun: new THREE.Vector3(-0.5, 0.7, -0.5).normalize(),
+      };
+      expect(controller.update(newSun)!.camera).toEqual(
+        reference.update(newSun)!.camera
+      );
+    } finally {
+      controller.dispose();
+      reference.dispose();
+    }
+  });
+  it("keeps terrain receiver offsets and buffer aspect fixed as camera coverage changes", () => {
+    const controller = new ShadowController(new THREE.Scene());
+    try {
+      for (const scale of [1, 2, 5]) {
+        const snapshot = controller.update(
+          buildUpdate({
+            receiverWorldPoints: receiverWorldPoints.map(
+              (point) =>
+                new THREE.Vector3(
+                  point.x * scale,
+                  point.y,
+                  point.z * scale * scale
+                )
+            ),
+            directionToSun: new THREE.Vector3(-0.94, 0.18, 0.3).normalize(),
+            receiverBiasMeters: 0.5,
+            groundTexelFit: false,
+          })
+        )!;
+        const shadow = controller.lights[0].shadow;
+        expect(shadow.normalBias).toBe(0.5);
+        expect(
+          -shadow.bias *
+            (snapshot.camera.farMeters - snapshot.camera.nearMeters)
+        ).toBeCloseTo(0.5, 12);
+        expect(snapshot.camera.shadowMapWidth).toBe(
+          snapshot.camera.shadowMapHeight
+        );
+        expect(
+          snapshot.camera.rightMeters - snapshot.camera.leftMeters
+        ).toBeCloseTo(
+          snapshot.camera.topMeters - snapshot.camera.bottomMeters,
+          9
+        );
+      }
+    } finally {
+      controller.dispose();
+    }
+  });
+  it.each([false, true])(
+    "keeps caster density independent of depth DPR, caps and stabilization (ground fit %s)",
+    (groundTexelFit) => {
+      const controller = new ShadowController(new THREE.Scene());
+      controller.setMaxShadowMapSize(2048);
+      try {
+        const update = buildUpdate({
+          groundTexelFit,
+          casterMapTexelBudget: 800 * 600,
+          mapTexelBudget: 800 * 600,
+        });
+        const baseline = controller.update(update)!;
+        for (const dpr of [1.25, 2, 3]) {
+          const snapshot = controller.update({
+            ...update,
+            mapTexelBudget: 800 * 600 * dpr ** 2,
+            stabilizeMapSize: true,
+          })!;
+          expect(snapshot.casterMetersPerTexel).toEqual(
+            baseline.casterMetersPerTexel
+          );
+          expect(snapshot.totalShadowTexels).toBeGreaterThan(
+            baseline.totalShadowTexels
+          );
+          expect(snapshot.camera.shadowMapWidth).toBeLessThanOrEqual(2048);
+          expect(snapshot.camera.shadowMapHeight).toBeLessThanOrEqual(2048);
+        }
+      } finally {
+        controller.dispose();
+      }
+    }
+  );
+
   it("caps mesh receiver offsets at one millimetre even with coarse depth maps", () => {
     const controller = new ShadowController(new THREE.Scene());
     controller.setMaxShadowMapSize(512);

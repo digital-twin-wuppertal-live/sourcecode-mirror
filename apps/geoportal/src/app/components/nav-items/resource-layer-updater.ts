@@ -47,6 +47,12 @@ import {
   type TimeSliderConfig,
   type VehicleAnimationConfig,
 } from "@carma-mapping/addons";
+import {
+  LayerAction,
+  TrackingCategory,
+  formatItemName,
+  trackEvent,
+} from "../../tracking";
 
 type MessageType = "success" | "error";
 
@@ -130,6 +136,11 @@ type ResourceLayerUpdaterDeps = {
   startShadowTexture?: (
     config: AddonConfigMap["shadowTexture"]
   ) => void | Promise<void>;
+  /**
+   * Adds or removes the spot highlights row a workflow card launches with
+   * its `spotHighlights` tool. Supplied by ResourceModal.
+   */
+  startSpotHighlights?: () => void;
 };
 
 const DEFAULT_MAX_LAYERS = 12;
@@ -184,6 +195,11 @@ const applyCollectionLayer = async ({
 }) => {
   if (deleteItem) {
     dispatch(deleteSavedLayerConfig(layer.id));
+    trackEvent(
+      TrackingCategory.COLLECTION,
+      LayerAction.DELETE_SAVED,
+      formatItemName(layer.title, layer.id)
+    );
     return;
   }
 
@@ -255,6 +271,11 @@ const applyCollectionLayer = async ({
         `${layer.title} wurde erfolgreich geladen.`
       ),
     });
+    trackEvent(
+      TrackingCategory.COLLECTION,
+      LayerAction.ADD,
+      formatItemName(layer.title, layer.id)
+    );
   } catch {
     messageApi.open({
       type: "error",
@@ -485,6 +506,11 @@ const removeExistingLayer = ({
         `${layer.title} wurde erfolgreich entfernt.`
       ),
     });
+    trackEvent(
+      TrackingCategory.LAYER,
+      LayerAction.REMOVE,
+      formatItemName(layer.title, id)
+    );
   } catch {
     messageApi.open({
       type: "error",
@@ -538,6 +564,17 @@ const addOrUpdateLayer = ({
           ),
         });
       }
+      // tracked here rather than at the call site so that an add rejected by
+      // the maxLayers guard above is not counted as usage
+      trackEvent(
+        TrackingCategory.LAYER,
+        previewLayer
+          ? LayerAction.PREVIEW
+          : updateExisting
+          ? LayerAction.UPDATE
+          : LayerAction.ADD,
+        formatItemName(layer.title, id)
+      );
     }, 1);
   } catch {
     messageApi.open({
@@ -568,6 +605,7 @@ export const createResourceLayerUpdater = ({
   startVehicleAnimation,
   startFlood,
   startShadowTexture,
+  startSpotHighlights,
 }: ResourceLayerUpdaterDeps) => {
   return async (
     layer: Item,
@@ -635,6 +673,16 @@ export const createResourceLayerUpdater = ({
       );
       if (floodTool && startFlood) {
         startFlood(floodTool.config ?? {});
+        return;
+      }
+
+      // The spots live in a row of their own that the addon adds, so the card
+      // only switches it on or off.
+      if (
+        startSpotHighlights &&
+        tools.some((entry) => entry.kind === "spotHighlights")
+      ) {
+        startSpotHighlights();
         return;
       }
     }

@@ -13,12 +13,11 @@ export function noteExtractor(dataIn) {
   } else {
     const lagisLandparcel = dataIn;
     const currentText = lagisLandparcel?.bemerkung || "";
-    const bemerkungSperre =
-      lagisLandparcel?.flurstueck_schluessel.bemerkung_sperre || null;
-
     return {
       currentText,
-      ifBemerkungSperre: bemerkungSperre === "Stei" ? true : false,
+      ifBemerkungSperre: Boolean(
+        lagisLandparcel?.flurstueck_schluessel?.ist_gesperrt
+      ),
     };
   }
 }
@@ -53,7 +52,7 @@ export function additionalRollExtractor(dataIn) {
           agency: `${r.verwaltende_dienststelle.ressort.abkuerzung}.${r.verwaltende_dienststelle.abkuerzung_abteilung}`,
           rolle: `${r.zusatz_rolle_art.name}`,
           color: getColorFromCode(
-            r.verwaltende_dienststelle.farbeArrayRelationShip[0].rgb_farbwert
+            r.verwaltende_dienststelle.farbeArrayRelationShip?.[0]?.rgb_farbwert
           ),
         };
       });

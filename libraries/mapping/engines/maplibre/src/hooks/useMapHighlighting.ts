@@ -20,6 +20,7 @@ import type {
 import { useMapHighlight } from "../contexts/MapHighlightContext";
 import type { HighlightCriteria } from "../contexts/MapHighlightContext";
 import { buildFeatureStateTarget } from "../utils/featureStateTarget";
+import { ownLayerId } from "../lib/SelectionManager";
 import type { FeatureStateRef } from "../utils/featureStateTarget";
 
 /**
@@ -58,8 +59,9 @@ function promotesProperty(
   sourceLayer: string,
   property: string
 ): boolean {
-  const promoteId = (map.getSource(source) as { promoteId?: unknown } | undefined)
-    ?.promoteId;
+  const promoteId = (
+    map.getSource(source) as { promoteId?: unknown } | undefined
+  )?.promoteId;
   if (typeof promoteId === "string") return promoteId === property;
   if (promoteId && typeof promoteId === "object") {
     return (promoteId as Record<string, unknown>)[sourceLayer] === property;
@@ -462,8 +464,8 @@ export const useMapHighlighting = ({
       const feature = hits.find((f) => {
         if (f.id == null || !f.source) return false;
         if (
-          f.layer.id.includes("selection") ||
-          f.layer.id.includes("background")
+          ownLayerId(f).includes("selection") ||
+          ownLayerId(f).includes("background")
         )
           return false;
         // Vector tiles always carry sourceLayer; geojson features don't,

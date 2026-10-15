@@ -17,7 +17,9 @@ import type {
 } from "@carma-mapping/fuzzy-search";
 import type { LayerStackEntry } from "@carma-mapping/layers";
 
+import { MapStyle3d, type MapStyle3dConfig } from "../addons/MapStyle3d";
 import { AddonManager, type AddonManagerConfig } from "../addons/AddonManager";
+import { Attribution, type AttributionConfig } from "../addons/Attribution";
 import type { AddonOverridesState } from "./addon-overrides";
 import {
   CameraRestriction,
@@ -32,6 +34,10 @@ import {
   type AnnotationState,
 } from "../addons/Annotation";
 import { GazetteerMode } from "../addons/GazetteerMode";
+import {
+  HighlightFromFilter,
+  type HighlightFromFilterConfig,
+} from "../addons/HighlightFromFilter";
 import { GazetteerSource } from "../addons/GazetteerSource";
 import { HomeOverride, type HomeOverrideConfig } from "../addons/HomeOverride";
 import {
@@ -123,11 +129,17 @@ import {
   type TrafficAnimationState,
 } from "../addons/TrafficAnimation";
 import {
+  SpotHighlights,
+  type SpotHighlightsConfig,
+  type SpotHighlightsState,
+} from "../addons/SpotHighlights";
+import {
   zoomToExtentTrigger,
   type ZoomToExtentConfig,
 } from "../addons/ZoomToExtent";
 import type { AlwaysOnTopConfig } from "../addons/AlwaysOnTop";
 import type { SwitchOnConfig } from "../addons/SwitchOn";
+import type { ConditionalLayerConfig } from "../addons/ConditionalLayer";
 import {
   CageIndicatorBadge,
   type CageIndicatorBadgeConfig,
@@ -153,6 +165,8 @@ import type { CompareLayerEntry } from "../addons/comparing/comparing-layers";
 
 export type AddonConfigMap = {
   addonManager: AddonManagerConfig;
+  /** credits on the libre map, read from the visible sources' `attribution` */
+  attribution: AttributionConfig;
   cameraRestriction: CameraRestrictionConfig;
   freeCamera: FreeCameraConfig;
   comparingControl: ComparingControlConfig;
@@ -163,6 +177,7 @@ export type AddonConfigMap = {
   annotationControl: AnnotationControlConfig;
   gazetteerSource: GazDataSourceConfig;
   gazetteerMode: GazDataAdditionalModeConfig;
+  highlightFromFilter: HighlightFromFilterConfig;
   homeOverride: HomeOverrideConfig;
   nearestFeature: NearestFeatureConfig;
   nearestFeatureApotheken: NearestFeatureApothekenConfig;
@@ -175,6 +190,7 @@ export type AddonConfigMap = {
   vectorHighlightDebug: VectorHighlightDebugPanelConfig;
   layerVisibility: LayerVisibilityConfig;
   libreTerrain: LibreTerrainConfig;
+  mapStyle3d: MapStyle3dConfig;
   shadowSimulation: ShadowSimulationConfig;
   shadowTexture: ShadowTextureConfig;
   modelCollection: ModelCollectionConfig;
@@ -185,6 +201,11 @@ export type AddonConfigMap = {
    * list for the remote on the phone; see `apps/pm-remote`.
    */
   showScenes: ShowScenesConfig;
+  /**
+   * Highlight spots as a layer: placed with "+" and a click, sized with the
+   * wheel. A pm-show scene with the layer publishes them as its highlights.
+   */
+  spotHighlights: SpotHighlightsConfig;
   visibleFeatureStatsSource: VisibleFeatureStatsSourceConfig;
   visibleFeatureStatsPanel: VisibleFeatureStatsPanelConfig;
   /** WMS time-series transport; the interpolation behind it is caged */
@@ -221,6 +242,12 @@ export type AddonConfigMap = {
    * is what lets it work on a board with no UI at all.
    */
   switchOn: SwitchOnConfig;
+  /**
+   * Declared on a layer to draw it only where the url asks for it (a hash
+   * parameter, the route); the host leaves it off the map otherwise, so there
+   * is nothing to mount.
+   */
+  conditionalLayer: ConditionalLayerConfig;
   /** implemented in cage; renders nothing when cage is absent */
   cageIndicatorBadge: CageIndicatorBadgeConfig;
 };
@@ -252,6 +279,12 @@ export type AddonStateMap = {
   highlightMode: HighlightModeState;
   /** whether the sketch layer owns the pointer; see `AnnotationOverlay` */
   annotationMode: AnnotationState;
+  /**
+   * the spot layer's working copy of its row: the spots, the dimming and
+   * whether they are being edited; see `SpotHighlights`. Read by the row hook
+   * and the ribbon, which sit in the host's tree rather than in the addon's.
+   */
+  spotHighlights: SpotHighlightsState;
   /** whether the comparison is running; see `ComparingControl` */
   compareState: CompareState;
   /** the assignable layer blocks, with the titles the layer bar shows */
@@ -469,6 +502,7 @@ export const addonRegistry: {
   [K in AddonKind]: AddonRegistryEntry<K>;
 } = {
   addonManager: { Component: AddonManager, provides: ["addonOverrides"] },
+  attribution: { Component: Attribution },
   cameraRestriction: { Component: CameraRestriction },
   freeCamera: { Component: FreeCamera },
   comparingControl: {
@@ -487,8 +521,11 @@ export const addonRegistry: {
     requires: ["annotationMode"],
   },
   gazetteerSource: { Component: GazetteerSource },
+  // no channel: it sets the map's filter presentation directly
+  highlightFromFilter: { Component: HighlightFromFilter },
   outlet: { Component: OutletAddon },
   showScenes: { Component: ShowScenes },
+  spotHighlights: { Component: SpotHighlights, provides: ["spotHighlights"] },
   gazetteerMode: { Component: GazetteerMode },
   homeOverride: { Component: HomeOverride },
   nearestFeature: {
@@ -531,6 +568,7 @@ export const addonRegistry: {
     trigger: layerVisibilityTrigger,
   },
   libreTerrain: { Component: LibreTerrain },
+  mapStyle3d: { Component: MapStyle3d },
   shadowSimulation: {
     Component: ShadowSimulation,
     targetPlacement: ADDON_TARGET_PLACEMENT.SECONDARY_VIEW,
@@ -580,6 +618,7 @@ export const addonRegistry: {
   zoomToExtent: { trigger: zoomToExtentTrigger },
   alwaysOnTop: { perTarget: true },
   switchOn: { perTarget: true },
+  conditionalLayer: { perTarget: true },
   // Component is undefined when cage is absent; AddonHost renders nothing then.
   cageIndicatorBadge: { Component: CageIndicatorBadge },
 };

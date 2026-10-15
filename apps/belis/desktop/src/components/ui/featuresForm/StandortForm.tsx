@@ -37,6 +37,15 @@ import { ChangedFieldsProvider, FieldPrefix } from "./DraftFieldHighlight";
 import { updateDataByClassName } from "../../../helper/apiMethods";
 import { uploadDraftFiles } from "../../../helper/uploadDraftFiles";
 import toTitleCase from "../../../helper/toTitleCase";
+import { useRepeatableChanges } from "./useRepeatableChanges";
+import { useFeatureRights } from "./FeatureRightsContext";
+
+// Wiederholfelder never carry the read-only timestamp or the creation-only
+// "+ Leuchte" tabs.
+const REPEATABLE_EXCLUDED_FIELDS: ReadonlySet<string> = new Set([
+  "letzte_aenderung",
+  "leuchten",
+]);
 
 const transformDatesForBackend = (
   values: Record<string, unknown>
@@ -117,6 +126,7 @@ const StandortForm = ({
   removedDocumentKeys: removedDocumentKeysProp,
   onRemovedDocumentKeysChange,
 }: StandortFormProps) => {
+  const { fieldsReadOnly } = useFeatureRights();
   const removedDocumentKeys = removedDocumentKeysProp ?? new Set<string>();
   const [saving, setSaving] = useState(false);
   const [localDocuments, setLocalDocuments] = useState<DokumentItem[] | null>(
@@ -380,6 +390,19 @@ const StandortForm = ({
     [onDraftChange, draftValues]
   );
 
+  const handleRepeatablePaste = useCallback(
+    (formValues: Record<string, unknown>) =>
+      handleMastValuesChange({}, formValues),
+    [handleMastValuesChange]
+  );
+  const repeatableChanges = useRepeatableChanges({
+    featureType: "standort",
+    slice: null,
+    formRef: mastFormRef,
+    excludedFields: REPEATABLE_EXCLUDED_FIELDS,
+    onPaste: handleRepeatablePaste,
+  });
+
   // Sidebar-driven tab focus: clicking a nested Leuchte row in the "Entwürfe"
   // list raises a focus request. Forward it to FeatureFormLayout only when it
   // targets this very draft.
@@ -434,23 +457,28 @@ const StandortForm = ({
     { title: mastTypTitle, documents: mastTypDocuments },
   ];
 
-  // Extract subtitle - use rawFeature (vector tile) to match list display
-  const rawProps = rawFeature?.properties as
+  // The selected feature is a click-time snapshot; prefer the fetched record.
+  const snapshotProps = rawFeature?.properties as
     | Record<string, unknown>
     | undefined;
-  const strassenschluessel = rawProps?.fk_strassenschluessel as
-    | { strasse?: string }
-    | undefined;
+  const useFetched =
+    !isCreation && !!mast && String(mast.id) === String(snapshotProps?.id);
+  const rawProps = useFetched
+    ? { ...snapshotProps, lfd_nummer: mast.lfd_nummer }
+    : snapshotProps;
+  const strassenschluessel = (
+    useFetched ? mast.tkey_strassenschluessel : rawProps?.fk_strassenschluessel
+  ) as { strasse?: string } | undefined;
   const subtitle =
     toTitleCase(strassenschluessel?.strasse || "") ||
     toTitleCase((rawProps?.strasse as string) || "") ||
     toTitleCase((rawProps?.standortangabe as string) || "") ||
     "-ohne Straße-";
 
-  // Header title comes from the shared sidebar extractor, so the sticky header
-  // reads identically to the sidebar row — drafts included. The `standorte`
-  // extractor already yields "Standort <lfd>", so no prefix is added below.
-  const sidebarMain = extractListItem("standorte", rawFeature).main;
+  const sidebarMain = extractListItem("standorte", {
+    ...rawFeature,
+    properties: rawProps,
+  }).main;
 
   const handleSave = async () => {
     if (!jwt) {
@@ -577,7 +605,7 @@ const StandortForm = ({
               <FieldPrefix name="leuchte">
                 <LeuchteFormFields
                   leuchte={null}
-                  readOnly={readOnly}
+                  readOnly={readOnly || fieldsReadOnly}
                   isCreation={isCreation}
                   featureId={`${featureId ?? ""}#${tabId}`}
                   hideStrassenschluessel={isCreation}
@@ -623,6 +651,11 @@ const StandortForm = ({
       onToggleReadOnly={onToggleReadOnly}
       onCancel={onCancel}
       onSave={handleSave}
+      showRepeatableChangesButtons
+      onCopyRepeatableChanges={repeatableChanges.onCopy}
+      onPasteRepeatableChanges={repeatableChanges.onPaste}
+      onClearRepeatableChanges={repeatableChanges.onClear}
+      repeatableChangesCount={repeatableChanges.count}
       onCreateRelatedDraft={() =>
         createFeatureDraft(
           "standort",
@@ -634,7 +667,7 @@ const StandortForm = ({
     >
       <MastFormFields
         mast={mast}
-        readOnly={readOnly}
+        readOnly={readOnly || fieldsReadOnly}
         isCreation={isCreation}
         featureId={featureId}
         geometrySelector={geometrySelector}

@@ -62,6 +62,11 @@ export type BlendLayerOptions = {
   viewportBuffer?: number;
   beforeId?: string;
   id?: string;
+  /**
+   * How a frame's image is loaded; a plain `fetch` per frame when left out. A
+   * cage from before this option ignores it and fetches as before.
+   */
+  fetchFrame?: (url: string) => Promise<Blob>;
   onFrameLoaded?: (loaded: number, total: number) => void;
   /**
    * Every cached frame was dropped and the series is being fetched again, which
@@ -187,8 +192,11 @@ export const FLOW_FIELD_OPTION_DEFAULTS = {
  */
 export type FlowLayerOptions = {
   map: MapLibreMap;
-  /** rasterfari base, e.g. `https://rain-rasterfari-wuppertal.cismet.de` */
-  service: string;
+  /**
+   * rasterfari base, e.g. `https://rain-rasterfari-wuppertal.cismet.de`. Left
+   * out, only `preload` is drawn and nothing is fetched per view.
+   */
+  service?: string;
   /** scenario folder, the rain hazard map config's `animation` value */
   scenario: string;
   layerPostfix?: string;

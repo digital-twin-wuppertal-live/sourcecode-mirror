@@ -64,7 +64,6 @@ export {
   type CismapRuntimeAnnotationInfoBoxProps,
 } from "./lib/components/CismapRuntimeAnnotationInfoBox";
 export { GenericInfoBoxFromFeature } from "./lib/components/GenericInfoBoxFromFeature.tsx";
-export { PieChart } from "./lib/components/PieChart.tsx";
 export { ContactMailButton } from "./lib/components/ContactMailButton.tsx";
 export { FeatureInfobox } from "./lib/components/FeatureInfobox.tsx";
 export { InfoBoxHeader } from "./lib/components/InfoBoxHeader.tsx";
@@ -154,7 +153,11 @@ export { ProgressIndicator } from "./lib/components/ProgressIndicator";
 export { useSelectionTopicMap } from "./lib/hooks/useSelectionTopicMap";
 export { useSelectionCesium } from "./lib/hooks/useSelectionCesium";
 export { useSelectionLibreMap } from "./lib/hooks/useSelectionLibreMap";
-export { useShareUrl, SHORTENER_URL } from "./lib/hooks/useShareUrl";
+export {
+  useShareUrl,
+  storeMappingConfig,
+  SHORTENER_URL,
+} from "./lib/hooks/useShareUrl";
 export { useProgress } from "./lib/hooks/useProgress";
 export {
   useAdhocCesiumFeatureDisplay,

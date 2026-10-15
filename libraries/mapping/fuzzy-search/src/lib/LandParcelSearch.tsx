@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useMemo } from "react";
 import { AutoComplete, Button, message } from "antd";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import {
@@ -20,6 +20,7 @@ import {
   LAND_PARCEL_SEPARATOR,
   parseLandparcelToSelectionItem,
 } from "./utils/landParcelSearchHelper";
+import type { LandParcelParseState } from "./utils/landParcelSearchHelper";
 
 import "./fuzzy-search.css";
 
@@ -27,6 +28,12 @@ export type ParcelChangeInfo = {
   gemarkung: string;
   flur: string;
   fstck: string;
+};
+
+export type LandParcelOptionsContext = {
+  input: string;
+  parseState: LandParcelParseState;
+  hasResults: boolean;
 };
 
 export type LandParcelSearchProps = {
@@ -38,6 +45,15 @@ export type LandParcelSearchProps = {
   showDropdownBelow?: boolean;
   showButton?: boolean;
   defaultValue?: string;
+  value?: string;
+  onValueChange?: (value: string) => void;
+  transformOptions?: (
+    groups: GroupedOptions[],
+    context: LandParcelOptionsContext
+  ) => GroupedOptions[];
+  onOptionSelect?: (option: Option) => void;
+  onNotFound?: (input: string) => void;
+  dimPrefix?: boolean;
 };
 
 const defaultIcon = (
@@ -58,10 +74,24 @@ export function LandParcelSearch({
   showDropdownBelow = false,
   showButton = true,
   defaultValue,
+  value: controlledValue,
+  onValueChange,
+  transformOptions,
+  onOptionSelect,
+  onNotFound,
+  dimPrefix = true,
 }: LandParcelSearchProps) {
   const [searchResult, setSearchResult] = useState<GroupedOptions[]>([]);
   const [options, setOptions] = useState<Option[]>([]);
-  const [value, setValue] = useState(defaultValue ?? "");
+  const [innerValue, setInnerValue] = useState(defaultValue ?? "");
+  const isControlled = controlledValue !== undefined;
+  const value = isControlled ? controlledValue : innerValue;
+  const setValue = (next: string) => {
+    if (!isControlled) {
+      setInnerValue(next);
+    }
+    onValueChange?.(next);
+  };
   const [cleanBtnDisable, setCleanBtnDisable] = useState(!defaultValue);
   const [autoCompleteOpen, setAutoCompleteOpen] = useState(false);
 
@@ -87,8 +117,11 @@ export function LandParcelSearch({
 
   // Sync value when defaultValue changes from outside
   useEffect(() => {
+    if (isControlled) {
+      return;
+    }
     if (defaultValue != null) {
-      setValue(defaultValue);
+      setInnerValue(defaultValue);
       setCleanBtnDisable(!defaultValue);
     }
   }, [defaultValue]);
@@ -106,6 +139,14 @@ export function LandParcelSearch({
       setOptions([]);
     }
   }, [landParcelData]);
+
+  const notifyNotFound = (input: string) => {
+    if (onNotFound) {
+      onNotFound(input);
+      return;
+    }
+    message.warning("Kein Flurstück gefunden");
+  };
 
   const handleSearch = (searchValue: string) => {
     if (!landParcelData) return;
@@ -130,14 +171,14 @@ export function LandParcelSearch({
           parseState.stage === "flur_matched" &&
           parseState.fstckFilter !== ""
         ) {
-          message.warning("Kein Flurstück gefunden");
+          notifyNotFound(searchValue);
         }
         setSearchResult(parcelOptions);
         setOptions([]);
       } else {
         const segments = searchValue.split(LAND_PARCEL_SEPARATOR);
         if (segments.length >= 3 && segments[2].trim() !== "") {
-          message.warning("Kein Flurstück gefunden");
+          notifyNotFound(searchValue);
         }
         setSearchResult([]);
         setOptions([]);
@@ -151,7 +192,7 @@ export function LandParcelSearch({
         setSearchResult(compactMatch);
         setOptions([]);
       } else if (normalizeLandParcelInput(searchValue) !== null) {
-        message.warning("Kein Flurstück gefunden");
+        notifyNotFound(searchValue);
         setSearchResult([]);
         setOptions([]);
       } else {
@@ -166,6 +207,9 @@ export function LandParcelSearch({
   };
 
   const handleOnSelect = (option: any) => {
+    // added options carry a stage none of the branches below handles
+    onOptionSelect?.(option);
+
     if (option.parcelStage === "gemarkung" || option.parcelStage === "flur") {
       setValue(option.value);
       handleSearch(option.value);
@@ -221,6 +265,24 @@ export function LandParcelSearch({
       };
 
   const isLoading = !externalData && landParcelLoading;
+  const showOverlay = dimPrefix && Boolean(landParcelData) && cleanBtnDisable;
+
+  // parsed again rather than remembered, so the transform sees the current text
+  const displayedOptions = useMemo(() => {
+    if (!transformOptions) {
+      return searchResult;
+    }
+    const parseState: LandParcelParseState = landParcelData
+      ? parseLandParcelInput(value, landParcelData)
+      : { stage: "none" };
+    return transformOptions(searchResult, {
+      input: value,
+      parseState,
+      hasResults: searchResult.some(
+        (group) => (group.options ?? []).length > 0
+      ),
+    });
+  }, [transformOptions, searchResult, value, landParcelData]);
 
   return (
     <div
@@ -254,7 +316,7 @@ export function LandParcelSearch({
       <div style={{ position: "relative", width: "calc(100% - 32px)" }}>
         {(() => {
           const sepIdx = value.lastIndexOf(LAND_PARCEL_SEPARATOR);
-          if (landParcelData && sepIdx > 0 && cleanBtnDisable) {
+          if (showOverlay && sepIdx > 0) {
             const prefix = value.substring(0, sepIdx + 1);
             const active = value.substring(sepIdx + 1);
             return (
@@ -269,7 +331,7 @@ export function LandParcelSearch({
         <AutoComplete
           ref={autoCompleteRef}
           dropdownAlign={dropdownAlign}
-          options={searchResult.map(({ titleText, ...rest }) => rest)}
+          options={displayedOptions.map(({ titleText, ...rest }) => rest)}
           style={{ width: "100%", borderTopLeftRadius: 0 }}
           onSearch={handleSearch}
           onChange={(val) => {
@@ -303,9 +365,7 @@ export function LandParcelSearch({
           onSelect={(_value, option) => handleOnSelect(option)}
           defaultActiveFirstOption={true}
           className={
-            value.includes(LAND_PARCEL_SEPARATOR) &&
-            landParcelData &&
-            cleanBtnDisable
+            showOverlay && value.includes(LAND_PARCEL_SEPARATOR)
               ? "fuzzy-input-transparent"
               : ""
           }

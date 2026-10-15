@@ -18,7 +18,7 @@ export const getNonce = () => {
   return todayInt + Math.random();
 };
 
-export const getColorFromCode = (code = 12004320) => {
+export const getColorFromCode = (code) => {
   if (code) {
     let c = code;
     let r = (c & 0xff0000) >> 16;
@@ -118,7 +118,7 @@ export function getOfficesWithColorAndSquare(
   ifHistory = false
 ) {
   const nameGeomColorData = [];
-  const alkisArea = dataIn.alkisLandparcel?.area;
+  const alkisArea = dataIn.alkisLandparcel?.area ?? dataIn.geometryArea;
 
   let area;
   officesArray?.verwaltungsbereichArrayRelationShip.forEach((item) => {
@@ -129,7 +129,7 @@ export function getOfficesWithColorAndSquare(
       officesArray.verwaltungsbereichArrayRelationShip.length === 1 &&
       !ifHistory
     ) {
-      area = alkisArea;
+      area = alkisArea ?? item.flaeche;
     } else {
       if (item.flaeche !== null) {
         area = item.flaeche;
@@ -209,7 +209,9 @@ export function getGemarkunFlurFstckFromAlkisId(alkisId) {
 export const selectedFeatureFitBounds = (map, selectedFeature) => {
   if (map && selectedFeature) {
     const bb = getBoundsForFeatureArray([selectedFeature]);
-    map.fitBounds(bb);
+    if (bb) {
+      map.fitBounds(bb, { animate: false, padding: 20 });
+    }
   }
 };
 

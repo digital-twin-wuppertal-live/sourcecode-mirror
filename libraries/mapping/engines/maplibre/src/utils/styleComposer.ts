@@ -47,6 +47,7 @@ import {
   styleProvidesTerrain,
   withTerrainProviderMetadata,
 } from "./terrainProviderMetadata";
+import { styleFetchInit } from "./forcedCache";
 
 /**
  * Slugify a URL into a compact ID: strips protocol and .json extension,
@@ -273,7 +274,7 @@ export class StyleComposer {
     try {
       styleJson =
         typeof vectorLayer.style === "string"
-          ? await (await fetch(vectorLayer.style)).json()
+          ? await (await fetch(vectorLayer.style, styleFetchInit())).json()
           : JSON.parse(JSON.stringify(vectorLayer.style));
     } catch (err) {
       if (vectorLayer.carmaLayerId) {
@@ -387,7 +388,11 @@ export class StyleComposer {
       // keep MapLibre terrain available for draping while making its base
       // surfaces transparent underneath a photogrammetric terrain mesh.
       layer.metadata = {
-        ...withTerrainProviderMetadata(styleLayerMetadata, providesTerrain),
+        ...withTerrainProviderMetadata(
+          styleLayerMetadata,
+          providesTerrain,
+          styleJson.metadata as Record<string, unknown> | undefined
+        ),
         "z-index": opts.zIndex,
         "layer-id": layerId,
         ...(vectorLayer.carmaLayerId
@@ -1124,7 +1129,7 @@ export class StyleComposer {
    */
   static async fetchGlyphsUrl(styleUrl: string): Promise<string | undefined> {
     try {
-      const resp = await fetch(styleUrl);
+      const resp = await fetch(styleUrl, styleFetchInit());
       const json = await resp.json();
       return json.glyphs as string | undefined;
     } catch {

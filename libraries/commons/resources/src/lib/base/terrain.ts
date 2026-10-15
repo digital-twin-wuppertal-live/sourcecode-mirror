@@ -27,9 +27,11 @@ export type RasterDemTerrainResource = Readonly<{
    * case (flat, open ground) and worst case (steep or vegetated) pair.
    */
   elevation: Readonly<{
-    groundSamplingMeters: number;
+    /** Null when a heterogeneous source has no single sampling distance. */
+    groundSamplingMeters: number | null;
     heightStepMeters: number;
-    accuracyMeters95: readonly [best: number, worst: number];
+    /** Null when the source does not declare a global accuracy bound. */
+    accuracyMeters95: readonly [best: number, worst: number] | null;
   }>;
   /** Change when content at an unchanged URL or its height datum changes. */
   revision?: string;
@@ -42,3 +44,19 @@ export type RasterDemTerrainResource = Readonly<{
    */
   notes?: string;
 }>;
+
+/** Share one revisioned ground-truth URL between MapLibre and prepared terrain.
+ * Keep XYZ placeholders literal; URL normalization would percent-encode them.
+ */
+export const rasterDemTerrainTileUrl = (
+  resource: Pick<RasterDemTerrainResource, "url" | "revision">
+): string => {
+  if (!resource.revision) return resource.url;
+  const fragmentAt = resource.url.indexOf("#");
+  const base =
+    fragmentAt < 0 ? resource.url : resource.url.slice(0, fragmentAt);
+  const fragment = fragmentAt < 0 ? "" : resource.url.slice(fragmentAt);
+  return `${base}${
+    base.includes("?") ? "&" : "?"
+  }carmaTerrainRevision=${encodeURIComponent(resource.revision)}${fragment}`;
+};

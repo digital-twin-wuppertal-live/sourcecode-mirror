@@ -1,18 +1,38 @@
 import { describe, expect, it } from "vitest";
 
+import type { MappingConfig, MappingConfigLayer } from "@carma-api";
 import type { ShowScene } from "@carma-mapping/show-remote";
 
 import {
+  SPOT_HIGHLIGHTS_LAYER,
+  SPOT_HIGHLIGHTS_LAYER_ID,
+  withSpotLayerContent,
+  type SpotLayerContent,
+} from "../SpotHighlights/spot-layer";
+
+import {
+  addStoryBaseLayers,
   applyExclusionToAll,
+  copyLayerToScenes,
   deleteStory,
   moveSceneInStory,
   moveSceneToStory,
   publishedScene,
+  publishedStory,
+  removeSceneLayer,
+  removeStoryBaseLayer,
   sceneExclusion,
+  storyBaseLayers,
+  withBaseMapsAsLayers,
+  withHighlightsAsLayer,
+  withoutBaseLayers,
 } from "./scene-edit";
 import type { ShowDraft } from "./show-draft";
 
 const layers = (...ids: string[]) => ids.map((id) => ({ id }));
+
+const withSpotContent = (content: SpotLayerContent) =>
+  withSpotLayerContent(SPOT_HIGHLIGHTS_LAYER, content);
 
 const idsOf = (config: ShowScene["config"]) =>
   config.layers.map(({ id }) => id);
@@ -39,25 +59,110 @@ describe("publishedScene", () => {
     expect(publishedScene(stale, new Set())).not.toHaveProperty("controls");
   });
 
-  it("takes the highlights along, without broken ones and without an empty list", () => {
-    const highlight = {
-      id: "h1",
-      title: "Zoo",
-      center: [791700, 6664800] as const,
-      radiusMeters: 80,
-      dim: 0.75,
-    };
+  const spot = {
+    id: "h1",
+    title: "Zoo",
+    center: [791700, 6664800] as [number, number],
+    radiusMeters: 80,
+  };
+  const spotLayer = (dim: number, spots = [spot]) =>
+    withSpotContent({ spots, dim }) as MappingConfigLayer;
+
+  it("takes its spot layer's spots as the highlights, with the layer's dim", () => {
     const published = publishedScene(
       {
         ...scene,
-        highlights: [highlight, { id: "h2" }] as ShowScene["highlights"],
+        config: { layers: [...scene.config.layers, spotLayer(0.75)] },
       },
       new Set()
     );
-    expect(published.highlights).toEqual([highlight]);
+    expect(published.highlights).toEqual([{ ...spot, dim: 0.75 }]);
+    // the layer goes along, the display draws nothing for it
+    expect(idsOf(published.config)).toContain(SPOT_HIGHLIGHTS_LAYER_ID);
+  });
+
+  it("has no highlights without a spot layer, or with it left out", () => {
+    expect(publishedScene(scene, new Set())).not.toHaveProperty("highlights");
+    const withLayer = {
+      ...scene,
+      config: { layers: [...scene.config.layers, spotLayer(0.75)] },
+    };
     expect(
-      publishedScene({ ...scene, highlights: [] }, new Set())
+      publishedScene(withLayer, new Set([SPOT_HIGHLIGHTS_LAYER_ID]))
     ).not.toHaveProperty("highlights");
+    expect(
+      publishedScene(
+        { ...scene, config: { layers: [spotLayer(0.5, [])] } },
+        new Set()
+      )
+    ).not.toHaveProperty("highlights");
+  });
+
+  it("falls back to the story's spot layer, its own winning", () => {
+    const base = [spotLayer(0.4)];
+    expect(publishedScene(scene, new Set(), base).highlights).toEqual([
+      { ...spot, dim: 0.4 },
+    ]);
+    const own = {
+      ...scene,
+      config: { layers: [spotLayer(0.9, [{ ...spot, id: "own" }])] },
+    };
+    expect(publishedScene(own, new Set(), base).highlights).toEqual([
+      { ...spot, id: "own", dim: 0.9 },
+    ]);
+  });
+
+  it("ignores highlights stored on the scene the old way", () => {
+    const old = {
+      ...scene,
+      highlights: [{ ...spot, dim: 0.75 }],
+    };
+    expect(publishedScene(old, new Set())).not.toHaveProperty("highlights");
+  });
+});
+
+describe("withHighlightsAsLayer", () => {
+  const scene: ShowScene = {
+    id: "s1",
+    title: "Szene 1",
+    config: { layers: layers("base") },
+  };
+  const highlight = {
+    id: "h1",
+    title: "Zoo",
+    center: [791700, 6664800] as const,
+    radiusMeters: 80,
+    dim: 0.75,
+  };
+
+  it("leaves a scene without stored highlights as it is", () => {
+    expect(withHighlightsAsLayer(scene)).toBe(scene);
+  });
+
+  it("turns stored highlights into the spot layer, dropping broken ones", () => {
+    const converted = withHighlightsAsLayer({
+      ...scene,
+      highlights: [highlight, { id: "h2" }] as ShowScene["highlights"],
+    });
+    expect(converted).not.toHaveProperty("highlights");
+    expect(idsOf(converted.config)).toEqual(["base", SPOT_HIGHLIGHTS_LAYER_ID]);
+    expect(publishedScene(converted, new Set()).highlights).toEqual([
+      highlight,
+    ]);
+  });
+
+  it("keeps a spot layer the scene has already, dropping the copy", () => {
+    const layer = withSpotContent({
+      spots: [],
+      dim: 0.5,
+    }) as MappingConfigLayer;
+    const converted = withHighlightsAsLayer({
+      ...scene,
+      config: { layers: [layer] },
+      highlights: [highlight],
+    });
+    expect(converted).not.toHaveProperty("highlights");
+    expect(converted.config.layers).toEqual([layer]);
   });
 });
 
@@ -84,6 +189,30 @@ describe("applyExclusionToAll", () => {
 
   it("leaves the draft alone for an unknown scene", () => {
     expect(applyExclusionToAll(draft, "nope", initial)).toBe(draft);
+  });
+});
+
+describe("removeSceneLayer", () => {
+  const draft: ShowDraft = {
+    title: "Show",
+    scenes: [
+      { id: "a", title: "A", config: { layers: layers("x", "y") } },
+      { id: "b", title: "B", config: { layers: layers("x") } },
+    ],
+    excludedLayerIdsByScene: { a: ["x", "y"], b: ["x"] },
+  };
+
+  it("takes the layer out of that scene and out of its exclusion list only", () => {
+    const next = removeSceneLayer(draft, "a", "x");
+    expect(idsOf(next.scenes[0].config)).toEqual(["y"]);
+    expect(idsOf(next.scenes[1].config)).toEqual(["x"]);
+    expect(next.excludedLayerIdsByScene).toEqual({ a: ["y"], b: ["x"] });
+  });
+
+  it("gives a scene without a list of its own none", () => {
+    const withoutLists: ShowDraft = { title: "Show", scenes: draft.scenes };
+    const next = removeSceneLayer(withoutLists, "a", "x");
+    expect(next).not.toHaveProperty("excludedLayerIdsByScene");
   });
 });
 
@@ -132,5 +261,144 @@ describe("stories", () => {
     expect(next.stories).toEqual([{ id: "b", title: "B" }]);
     expect(ids(next.scenes)).toEqual(["b1"]);
     expect(next.excludedLayerIdsByScene).toEqual({ b1: ["y"] });
+  });
+});
+
+describe("base layers", () => {
+  const draft: ShowDraft = {
+    title: "Show",
+    stories: [
+      { id: "bridge", title: "Brücke", baseLayers: layers("mask") },
+      { id: "city", title: "Stadt" },
+    ],
+    scenes: [
+      {
+        id: "b1",
+        title: "B1",
+        story: "bridge",
+        config: { layers: layers("x") },
+      },
+      {
+        id: "b2",
+        title: "B2",
+        story: "bridge",
+        config: { layers: layers("x", "y") },
+      },
+      { id: "c1", title: "C1", story: "city", config: { layers: [] } },
+    ],
+  };
+  const baseIds = (next: ShowDraft, storyId: string) =>
+    storyBaseLayers(next, storyId).map(({ id }) => id);
+
+  it("adds new ones last and replaces a known one in its place", () => {
+    const opaque = { id: "mask", opacity: 1 };
+    const next = addStoryBaseLayers(draft, "bridge", [{ id: "top" }, opaque]);
+    expect(baseIds(next, "bridge")).toEqual(["mask", "top"]);
+    expect(storyBaseLayers(next, "bridge")[0]).toBe(opaque);
+    expect(baseIds(next, "city")).toEqual([]);
+  });
+
+  it("drops the field with the last one removed", () => {
+    const next = removeStoryBaseLayer(draft, "bridge", "mask");
+    expect(next.stories?.[0]).toEqual({ id: "bridge", title: "Brücke" });
+  });
+
+  it("keeps a saved scene free of its story's base layers", () => {
+    const config = { layers: layers("mask", "x") };
+    expect(idsOf(withoutBaseLayers(config, layers("mask")))).toEqual(["x"]);
+    expect(withoutBaseLayers(config, [])).toBe(config);
+  });
+
+  it("copies a layer on top of the scenes that lack it", () => {
+    const { draft: next, count } = copyLayerToScenes(
+      draft,
+      { id: "y" },
+      new Set(["b1", "b2"])
+    );
+    expect(count).toBe(1);
+    expect(idsOf(next.scenes[0].config)).toEqual(["x", "y"]);
+    expect(next.scenes[1]).toBe(draft.scenes[1]);
+    expect(next.scenes[2]).toBe(draft.scenes[2]);
+    expect(copyLayerToScenes(draft, { id: "x" }, new Set(["b1"]))).toEqual({
+      draft,
+      count: 0,
+    });
+  });
+
+  it("publishes a story without the show-wide excluded base layers", () => {
+    const story = {
+      id: "bridge",
+      title: "Brücke",
+      baseLayers: layers("mask", "outline"),
+    };
+    expect(publishedStory(story, new Set(["outline"]))).toEqual({
+      id: "bridge",
+      title: "Brücke",
+      baseLayers: layers("mask"),
+    });
+    expect(
+      publishedStory(
+        { ...story, baseLayers: layers("outline") },
+        new Set(["outline"])
+      )
+    ).toEqual({ id: "bridge", title: "Brücke" });
+  });
+});
+
+describe("withBaseMapsAsLayers", () => {
+  const chosen: MappingConfig = {
+    layers: layers("top"),
+    backgroundLayer: { id: "luftbild", selectedLayerId: "trueOrtho2024" },
+  };
+  const converted: MappingConfig = { layers: layers("top") };
+  const draft: ShowDraft = {
+    title: "Show",
+    scenes: [
+      { id: "old", title: "Alt", config: chosen },
+      { id: "new", title: "Neu", config: converted },
+    ],
+  };
+  /** what the app answers: the base map as a row, the choice dropped */
+  const asLayers = (config: MappingConfig): MappingConfig => ({
+    layers: [{ id: "background:trueOrtho2024" }, ...config.layers],
+  });
+
+  it("gives a scene with a base map choice its base map as a layer", () => {
+    const next = withBaseMapsAsLayers(draft, asLayers);
+    expect(idsOf(next.scenes[0].config)).toEqual([
+      "background:trueOrtho2024",
+      "top",
+    ]);
+    expect(next.scenes[0].config).not.toHaveProperty("backgroundLayer");
+    expect(next.scenes[1]).toBe(draft.scenes[1]);
+  });
+
+  it("also converts a scene that only switches the base map off", () => {
+    const switchedOff: ShowDraft = {
+      title: "Show",
+      scenes: [
+        {
+          id: "off",
+          title: "Aus",
+          config: {
+            layers: layers("top"),
+            // what a stored scene may say, though the type wants the entry
+            backgroundLayer: { visible: false } as NonNullable<
+              MappingConfig["backgroundLayer"]
+            >,
+          },
+        },
+      ],
+    };
+    const next = withBaseMapsAsLayers(switchedOff, ({ layers }) => ({
+      layers,
+    }));
+    expect(next.scenes[0].config).toEqual({ layers: layers("top") });
+  });
+
+  it("returns the draft itself when the app cannot convert anything", () => {
+    expect(withBaseMapsAsLayers(draft, (config) => config)).toBe(draft);
+    const done = withBaseMapsAsLayers(draft, asLayers);
+    expect(withBaseMapsAsLayers(done, asLayers)).toBe(done);
   });
 });

@@ -8,7 +8,12 @@ import localForage from "localforage";
 import { HASH_LAUNCH_MODE } from "@carma-commons/utils";
 
 import { APP_KEY, STORAGE_PREFIX } from "../config";
-import { STORE_APP_KEY } from "./app-key";
+import {
+  backgroundConfig,
+  toBackgroundLayer,
+} from "../config/backgroundConfig";
+import { findFachzwillingRouteByPath } from "../constants/fachzwillinge/routes";
+import { initialRoutePath, STORE_APP_KEY } from "./app-key";
 import {
   dropUnrestorableRows,
   stripInteractionButtons,
@@ -20,6 +25,10 @@ import measurementsReducer from "./slices/measurements";
 import uiReducer, { initialUIState, UIMode } from "./slices/ui";
 import featuresReducer from "./slices/features";
 import printReducer from "./slices/print";
+import {
+  withKnownBackground,
+  withoutStoredBackground,
+} from "./stored-background";
 import { resolveGeoportalCustomHashState } from "../helper/geoportal-custom-hash-state";
 
 console.info("store initializing ....");
@@ -33,6 +42,10 @@ const initialUIMode =
 
 /** the namespace the persisted records live in, see `app-key` */
 const customAppKey = STORE_APP_KEY;
+
+/** whether the route the app started on remembers its base map, see its doc */
+const persistsBackground =
+  !findFachzwillingRouteByPath(initialRoutePath)?.disableBackgroundPersistence;
 
 const devToolsEnabled =
   new URLSearchParams(window.location.search).get("devToolsEnabled") === "true";
@@ -128,11 +141,21 @@ const mappingMigrations = {
   },
 };
 
+const migrateMapping = createMigrate(mappingMigrations);
+
 const mappingConfig = {
   key: "@" + (customAppKey || APP_KEY) + "." + STORAGE_PREFIX + ".app.mapping",
   storage: localForage,
   version: 1,
-  migrate: createMigrate(mappingMigrations),
+  // runs on every load, so a stored base map is checked against the route's
+  migrate: (state: PersistedState, version: number) =>
+    migrateMapping(state, version).then((migrated) =>
+      !migrated
+        ? migrated
+        : persistsBackground
+        ? withKnownBackground(migrated, backgroundConfig, toBackgroundLayer)
+        : withoutStoredBackground(migrated)
+    ),
   transforms: [dropModeRows],
   whitelist: [
     "layers",
@@ -141,9 +164,8 @@ const mappingConfig = {
     "hiddenPermanentLayers",
     "focusMode",
     "savedLayerConfigs",
-    "selectedByCategory",
+    ...(persistsBackground ? ["selectedByCategory", "backgroundLayer"] : []),
     "paleOpacityValue",
-    "backgroundLayer",
     "showFullscreenButton",
     "showLocatorButton",
     "showMeasurementButton",
