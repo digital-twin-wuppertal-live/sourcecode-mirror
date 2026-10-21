@@ -1,0 +1,790 @@
+import type { Dispatch } from "redux";
+import { createElement, type ReactNode } from "react";
+import type { Map as MaplibreMap } from "maplibre-gl";
+import type {
+  BackgroundLayer,
+  Item,
+  Layer,
+  LayerGroup,
+  LayerStackEntry,
+} from "@carma-mapping/layers";
+import { isLayerGroup } from "@carma-mapping/layers";
+import { parseToMapLayer } from "@carma-mapping/utils";
+import { DEFAULT_ADHOC_FEATURE_LAYER_ID } from "@carma-appframeworks/portals";
+
+import {
+  setTriggerSelectionById,
+  updateInfoElementsAfterRemovingFeature,
+} from "../../store/slices/features";
+import {
+  appendLayer,
+  deleteSavedLayerConfig,
+  removeLayer,
+  setActiveInteractionLayerID,
+  setBackgroundLayer,
+  setLayers,
+  setSelectedByCategory,
+} from "../../store/slices/mapping";
+import { removeMeasurement } from "../../store/slices/measurements";
+import { layerMap } from "../../config";
+import { toBackgroundLayer } from "../../config/backgroundConfig";
+import {
+  zoomToLibreStyleFeatures,
+  zoomToStyleFeatures,
+} from "../../helper/gisHelper";
+import {
+  addAdhocFeatureFromLayer,
+  type AddFeatureFn,
+} from "../../helper/adhoc-layer-feature";
+import { isAdhocVectorLayer } from "../../helper/adhoc-feature-utils";
+import { AddLayerOptions } from "@carma-mapping/carma-map-api";
+import {
+  resolveAddonEntries,
+  type AddonConfigMap,
+  type AddonEntry,
+  type FlowFieldConfig,
+  type FloodSimulationConfig,
+  type TimeSliderConfig,
+  type VehicleAnimationConfig,
+} from "@carma-mapping/addons";
+import {
+  LayerAction,
+  TrackingCategory,
+  formatItemName,
+  trackEvent,
+} from "../../tracking";
+
+type MessageType = "success" | "error";
+
+export type MessageApiLike = {
+  open: (config: { type: MessageType; content: ReactNode }) => void;
+  success: (content: string) => void;
+  error: (content: string) => void;
+};
+
+type RoutedMapRef = Parameters<typeof zoomToStyleFeatures>[1];
+
+type SetSelectedFeatureByIdFn = (
+  id: string,
+  collectionId: string,
+  layerId?: string
+) => void;
+type SetShouldFocusSelectedFn = (shouldFocus: boolean) => void;
+type ClearFeatureCollectionsFn = (collectionIds?: string[]) => void;
+type ToggleFrameworkFn = () => Promise<unknown>;
+type SetCurrentStyleFn = (style: string) => void;
+type GetFrameworkModeFn = () => {
+  isLeaflet: boolean;
+  isCesium: boolean;
+};
+
+type CollectionLayerItem = Item & {
+  type: "collection";
+  layers: Layer[];
+  backgroundLayer?: BackgroundLayer;
+  settings?: {
+    zoom?: number;
+    lat?: number;
+    lng?: number;
+    minZoomlevel?: number;
+    maxZoomlevel?: number;
+  };
+};
+
+type ResourceLayerUpdaterDeps = {
+  dispatch: Dispatch;
+  activeLayers: Layer[];
+  layerStack: LayerStackEntry[];
+  addFeature: AddFeatureFn;
+  setSelectedFeatureById: SetSelectedFeatureByIdFn;
+  setShouldFocusSelected: SetShouldFocusSelectedFn;
+  clearFeatureCollections: ClearFeatureCollectionsFn;
+  toggleFramework: ToggleFrameworkFn;
+  getFrameworkMode: GetFrameworkModeFn;
+  routedMap: RoutedMapRef;
+  libreMap?: MaplibreMap | null;
+  setCurrentStyle: SetCurrentStyleFn;
+  messageApi: MessageApiLike;
+  maxLayers?: number;
+  addLayerById?: (
+    id: string,
+    options?: AddLayerOptions
+  ) => Promise<Layer | undefined>;
+  /**
+   * Launches (or toggles) the time series a workflow card carries in its
+   * `timeSlider` tool. Supplied by ResourceModal from `useTimeSeriesLauncher`.
+   */
+  startTimeSeries?: (config: TimeSliderConfig) => void;
+  /**
+   * Launches (or toggles) the flow-field animation a workflow card carries in
+   * its `flowField` tool. Supplied by ResourceModal from
+   * `useFlowFieldLauncher`.
+   */
+  startFlowField?: (config: FlowFieldConfig) => void;
+  /**
+   * Launches (or toggles) the animation a workflow card carries in its
+   * `vehicleAnimation` tool. Supplied by ResourceModal from
+   * `useVehicleAnimationLauncher`.
+   */
+  startVehicleAnimation?: (config: VehicleAnimationConfig) => void;
+  /**
+   * Launches (or toggles) the flood a workflow card carries in its
+   * `floodSimulation` tool. Supplied by ResourceModal from `useFloodLauncher`.
+   */
+  startFlood?: (config: FloodSimulationConfig) => void;
+  /** Activates the shadow-texture preset with or without the basemap. */
+  startShadowTexture?: (
+    config: AddonConfigMap["shadowTexture"]
+  ) => void | Promise<void>;
+  /**
+   * Adds or removes the spot highlights row a workflow card launches with
+   * its `spotHighlights` tool. Supplied by ResourceModal.
+   */
+  startSpotHighlights?: () => void;
+};
+
+const DEFAULT_MAX_LAYERS = 12;
+
+const toLayerId = (layer: Item): string =>
+  layer.id.startsWith("fav_") ? layer.id.slice(4) : layer.id;
+
+const getLayerModeSwitch = (layer: Layer): string | undefined => {
+  const conf = layer.conf as { modeSwitch?: unknown } | undefined;
+  return typeof conf?.modeSwitch === "string" ? conf.modeSwitch : undefined;
+};
+
+const shouldToggleFramework = (layer: Layer, isLeaflet: boolean): boolean => {
+  const modeSwitch = getLayerModeSwitch(layer);
+  return (
+    (modeSwitch === "3D" && isLeaflet) || (modeSwitch === "2D" && !isLeaflet)
+  );
+};
+
+const shouldSelectIn3D = (
+  layer: Layer,
+  mode: { isLeaflet: boolean; isCesium: boolean }
+): boolean => {
+  const modeSwitch = getLayerModeSwitch(layer);
+  // Keep legacy behavior (select when operating in 3D context) while also
+  // allowing explicit 3D layers to auto-select after a framework switch.
+  return mode.isCesium || !mode.isLeaflet || modeSwitch === "3D";
+};
+
+const toSuccessToastContent = (text: string): ReactNode =>
+  createElement("span", { "data-test-id": "toast-success" }, text);
+
+const applyCollectionLayer = async ({
+  layer,
+  dispatch,
+  messageApi,
+  routedMap,
+  setCurrentStyle,
+  deleteItem,
+  addLayerById,
+}: {
+  layer: CollectionLayerItem;
+  dispatch: Dispatch;
+  messageApi: MessageApiLike;
+  routedMap: RoutedMapRef;
+  setCurrentStyle: SetCurrentStyleFn;
+  deleteItem: boolean;
+  addLayerById?: (
+    id: string,
+    options?: AddLayerOptions
+  ) => Promise<Layer | undefined>;
+}) => {
+  if (deleteItem) {
+    dispatch(deleteSavedLayerConfig(layer.id));
+    trackEvent(
+      TrackingCategory.COLLECTION,
+      LayerAction.DELETE_SAVED,
+      formatItemName(layer.title, layer.id)
+    );
+    return;
+  }
+
+  try {
+    let useSetLayersFallback = false;
+
+    if (addLayerById) {
+      dispatch(setLayers([]));
+      for (const l of layer.layers) {
+        if (isLayerGroup(l)) {
+          dispatch(appendLayer(l));
+          continue;
+        }
+        const result = await addLayerById(l.id);
+        if (!result) {
+          dispatch(appendLayer(l));
+        }
+      }
+    } else {
+      useSetLayersFallback = true;
+    }
+
+    if (useSetLayersFallback) {
+      dispatch(setLayers(layer.layers));
+    }
+
+    if (layer.backgroundLayer) {
+      dispatch(setBackgroundLayer(layer.backgroundLayer));
+      const layerKey = Object.keys(layerMap).find(
+        (key) => layerMap[key].title === layer.backgroundLayer?.title
+      );
+      if (layerKey) {
+        dispatch(
+          setSelectedByCategory({
+            categoryId: layer.backgroundLayer.id,
+            layer: toBackgroundLayer(layerKey),
+          })
+        );
+        setCurrentStyle(layer.backgroundLayer.id);
+      }
+    }
+    if (layer.settings) {
+      const map = routedMap.leafletMap.leafletElement;
+      const currentZoom = map.getZoom();
+      const settings = layer.settings;
+      const changePosition = settings.zoom || settings.lat || settings.lng;
+      const changeZoomLevel =
+        settings.zoom || settings.minZoomlevel || settings.maxZoomlevel;
+
+      const zoom =
+        layer.settings.zoom ||
+        (settings.minZoomlevel > currentZoom && settings.minZoomlevel) ||
+        (settings.maxZoomlevel < currentZoom && settings.maxZoomlevel) ||
+        currentZoom;
+      const lat = layer.settings.lat || map.getCenter().lat;
+      const lng = layer.settings.lng || map.getCenter().lng;
+
+      if (changePosition) {
+        map.flyTo([lat, lng], zoom);
+      }
+
+      if (changeZoomLevel) {
+        map.setZoom(zoom);
+      }
+    }
+    messageApi.open({
+      type: "success",
+      content: toSuccessToastContent(
+        `${layer.title} wurde erfolgreich geladen.`
+      ),
+    });
+    trackEvent(
+      TrackingCategory.COLLECTION,
+      LayerAction.ADD,
+      formatItemName(layer.title, layer.id)
+    );
+  } catch {
+    messageApi.open({
+      type: "error",
+      content: `Es gab einen Fehler beim Laden von ${layer.title}`,
+    });
+  }
+};
+
+const applyWorkflowLayerGroup = async ({
+  item,
+  activeLayers,
+  layerStack,
+  deleteItem,
+  dispatch,
+  messageApi,
+}: {
+  item: Item;
+  activeLayers: Layer[];
+  layerStack: LayerStackEntry[];
+  deleteItem: boolean;
+  dispatch: Dispatch;
+  messageApi: MessageApiLike;
+}) => {
+  const existingGroup = layerStack.find(
+    (entry) => isLayerGroup(entry) && entry.id === item.id
+  ) as LayerGroup | undefined;
+
+  if (existingGroup || deleteItem) {
+    if (existingGroup) {
+      existingGroup.layers.forEach((member) => {
+        dispatch(updateInfoElementsAfterRemovingFeature(member.id));
+      });
+      dispatch(removeLayer(existingGroup.id));
+      messageApi.open({
+        type: "success",
+        content: toSuccessToastContent(
+          `${item.title} wurde erfolgreich entfernt.`
+        ),
+      });
+    }
+    return;
+  }
+
+  const childItems = item.workflowLayerItems ?? [];
+  const members: Layer[] = [];
+  for (const childItem of childItems) {
+    const childId = childItem.id.startsWith("fav_")
+      ? childItem.id.slice(4)
+      : childItem.id;
+    if (activeLayers.some((activeLayer) => activeLayer.id === childId)) {
+      continue;
+    }
+    try {
+      members.push(await parseToMapLayer(childItem, false, true));
+    } catch {
+      continue;
+    }
+  }
+
+  if (members.length === 0) {
+    messageApi.open({
+      type: "error",
+      content: `Es gab einen Fehler beim hinzufügen von ${item.title}`,
+    });
+    return;
+  }
+
+  dispatch(
+    appendLayer({
+      type: "group",
+      id: item.id,
+      title: item.title,
+      description: item.description,
+      ...(item.icon ? { icon: item.icon } : {}),
+      ...(item.thumbnail ? { thumbnail: item.thumbnail } : {}),
+      ...(item.groupInfo ? { groupInfo: item.groupInfo } : {}),
+      ...(item.tools?.length ? { tools: item.tools } : {}),
+      visible: true,
+      opacity: 1,
+      layers: members,
+    })
+  );
+
+  messageApi.open({
+    type: "success",
+    content: toSuccessToastContent(
+      `${item.title} wurde erfolgreich hinzugefügt.`
+    ),
+  });
+};
+
+const addAdhocFeatureIfApplicable = async ({
+  layer,
+  id,
+  addFeature,
+  getFrameworkMode,
+  routedMap,
+  libreMap,
+  setSelectedFeatureById,
+  setShouldFocusSelected,
+  dispatch,
+  toggleFramework,
+}: {
+  layer: Layer;
+  id: string;
+  addFeature: AddFeatureFn;
+  getFrameworkMode: GetFrameworkModeFn;
+  routedMap: RoutedMapRef;
+  libreMap?: MaplibreMap | null;
+  setSelectedFeatureById: SetSelectedFeatureByIdFn;
+  setShouldFocusSelected: SetShouldFocusSelectedFn;
+  dispatch: Dispatch;
+  toggleFramework: ToggleFrameworkFn;
+}) => {
+  if (!isAdhocVectorLayer(layer)) {
+    return;
+  }
+
+  const initialMode = getFrameworkMode();
+  const { isLeaflet: startedInLeaflet, isCesium: startedInCesium } =
+    initialMode;
+  console.debug("[ADHOC|ADD] addAdhocFeatureIfApplicable:start", {
+    id,
+    modeSwitch: getLayerModeSwitch(layer),
+    startedInLeaflet,
+    startedInCesium,
+  });
+
+  if (shouldToggleFramework(layer, startedInLeaflet)) {
+    console.debug("[ADHOC|ADD] toggling framework before add", { id });
+    await toggleFramework();
+  }
+
+  const addedFeature = await addAdhocFeatureFromLayer({
+    layer,
+    collectionId: id,
+    layerId: DEFAULT_ADHOC_FEATURE_LAYER_ID,
+    addFeature,
+  });
+  if (!addedFeature) {
+    console.debug("[ADHOC|ADD] no adhoc feature added", { id });
+    return;
+  }
+  console.debug("[ADHOC|ADD] feature added", {
+    id,
+    featureId: addedFeature.id,
+    collectionId: addedFeature.collectionId,
+    layerId: addedFeature.layerId,
+  });
+
+  const mutableLayer = layer as Layer & {
+    props?: { style?: string | object };
+  };
+  mutableLayer.props = {
+    ...(mutableLayer.props ?? {}),
+    style: addedFeature.styleData,
+  };
+
+  if (libreMap) {
+    zoomToLibreStyleFeatures(addedFeature.styleData, libreMap);
+  } else {
+    await zoomToStyleFeatures(addedFeature.styleData, routedMap);
+  }
+
+  const modeAfterAdd = getFrameworkMode();
+  const shouldAutoSelectIn3D = shouldSelectIn3D(layer, modeAfterAdd);
+  console.debug("[ADHOC|ADD] selection gate", {
+    id,
+    shouldAutoSelectIn3D,
+    modeAfterAdd,
+  });
+  if (shouldAutoSelectIn3D) {
+    setSelectedFeatureById(
+      addedFeature.id,
+      addedFeature.collectionId,
+      addedFeature.layerId
+    );
+    setShouldFocusSelected(true);
+    console.debug("[ADHOC|ADD] selected + focus requested", {
+      id,
+      featureId: addedFeature.id,
+    });
+  }
+
+  // Keep cross-framework auto-selection sync semantics:
+  // 2D consumes this directly; 3D can still hand off when switching framework.
+  dispatch(setTriggerSelectionById(id));
+  console.debug("[ADHOC|ADD] triggerSelectionById dispatched", { id });
+};
+
+const removeExistingLayer = ({
+  id,
+  layer,
+  existingLayer,
+  dispatch,
+  clearFeatureCollections,
+  messageApi,
+}: {
+  id: string;
+  layer: Layer;
+  existingLayer: Layer;
+  dispatch: Dispatch;
+  clearFeatureCollections: ClearFeatureCollectionsFn;
+  messageApi: MessageApiLike;
+}) => {
+  try {
+    dispatch(removeLayer(id));
+    dispatch(updateInfoElementsAfterRemovingFeature(id));
+    const shouldClearAdhocCollection =
+      isAdhocVectorLayer(existingLayer) || isAdhocVectorLayer(layer);
+    console.debug("[ADHOC|REMOVE] removeExistingLayer", {
+      id,
+      shouldClearAdhocCollection,
+      existingLayerType: existingLayer.type,
+      existingLayerLayerType: existingLayer.layerType,
+      parsedLayerType: layer.type,
+      parsedLayerLayerType: layer.layerType,
+    });
+    if (shouldClearAdhocCollection) {
+      clearFeatureCollections([id]);
+      console.debug("[ADHOC|REMOVE] clearFeatureCollections called", {
+        collectionId: id,
+      });
+    }
+    messageApi.open({
+      type: "success",
+      content: toSuccessToastContent(
+        `${layer.title} wurde erfolgreich entfernt.`
+      ),
+    });
+    trackEvent(
+      TrackingCategory.LAYER,
+      LayerAction.REMOVE,
+      formatItemName(layer.title, id)
+    );
+  } catch {
+    messageApi.open({
+      type: "error",
+      content: `Es gab einen Fehler beim Entfernen von ${layer.title}`,
+    });
+  }
+};
+
+const addOrUpdateLayer = ({
+  id,
+  layer,
+  existingLayer,
+  updateExisting,
+  previewLayer,
+  activeLayers,
+  dispatch,
+  messageApi,
+  maxLayers,
+}: {
+  id: string;
+  layer: Layer;
+  existingLayer: Layer | undefined;
+  updateExisting: boolean;
+  previewLayer: boolean;
+  activeLayers: Layer[];
+  dispatch: Dispatch;
+  messageApi: MessageApiLike;
+  maxLayers: number;
+}) => {
+  if (existingLayer && updateExisting) {
+    dispatch(removeLayer(id));
+    dispatch(updateInfoElementsAfterRemovingFeature(id));
+  }
+
+  if (activeLayers.length >= maxLayers) {
+    messageApi.open({
+      type: "error",
+      content: "Zu viele Layer hinzugefügt. Layer entfernen um fortzufahren.",
+    });
+    return;
+  }
+
+  try {
+    setTimeout(() => {
+      dispatch(appendLayer(layer));
+      if (!previewLayer) {
+        messageApi.open({
+          type: "success",
+          content: toSuccessToastContent(
+            `${layer.title} wurde erfolgreich hinzugefügt.`
+          ),
+        });
+      }
+      // tracked here rather than at the call site so that an add rejected by
+      // the maxLayers guard above is not counted as usage
+      trackEvent(
+        TrackingCategory.LAYER,
+        previewLayer
+          ? LayerAction.PREVIEW
+          : updateExisting
+          ? LayerAction.UPDATE
+          : LayerAction.ADD,
+        formatItemName(layer.title, id)
+      );
+    }, 1);
+  } catch {
+    messageApi.open({
+      type: "error",
+      content: `Es gab einen Fehler beim hinzufügen von ${layer.title}`,
+    });
+  }
+};
+
+export const createResourceLayerUpdater = ({
+  dispatch,
+  activeLayers,
+  layerStack,
+  addFeature,
+  setSelectedFeatureById,
+  setShouldFocusSelected,
+  clearFeatureCollections,
+  toggleFramework,
+  getFrameworkMode,
+  routedMap,
+  libreMap,
+  setCurrentStyle,
+  messageApi,
+  maxLayers = DEFAULT_MAX_LAYERS,
+  addLayerById,
+  startTimeSeries,
+  startFlowField,
+  startVehicleAnimation,
+  startFlood,
+  startShadowTexture,
+  startSpotHighlights,
+}: ResourceLayerUpdaterDeps) => {
+  return async (
+    layer: Item,
+    deleteItem: boolean = false,
+    forceWMS: boolean = false,
+    previewLayer: boolean = false,
+    updateExisting: boolean = false
+  ) => {
+    // A workflow whose tools carry a time series is not a layer group: the
+    // card launches the series into the timeSlider engine its route mounts,
+    // and a second click on the running series switches it off again.
+    if (layer.type === "workflow") {
+      // `Item.tools` is the layer catalog's wider ToolEntry shape;
+      // resolveAddonEntries drops every kind the addon registry does not know
+      const tools = resolveAddonEntries(
+        layer.tools as AddonEntry[] | undefined
+      );
+
+      const shadowTextureTool = tools.find(
+        (entry) => entry.kind === "shadowTexture"
+      );
+      if (shadowTextureTool && startShadowTexture) {
+        await startShadowTexture(shadowTextureTool.config);
+        return;
+      }
+
+      const timeSeriesTool = tools.find(
+        (entry): entry is { kind: "timeSlider"; config?: TimeSliderConfig } =>
+          entry.kind === "timeSlider"
+      );
+      if (timeSeriesTool && startTimeSeries) {
+        const config = timeSeriesTool.config ?? {};
+        // The card's own texts are what its info view shows, so the series
+        // does not have to repeat them; a series that brings its own wins.
+        startTimeSeries({
+          ...config,
+          description: config.description ?? layer.description,
+          metaDataText: config.metaDataText ?? layer.groupInfo?.metaDataText,
+          links: config.links ?? layer.groupInfo?.links,
+          legend: config.legend ?? layer.groupInfo?.legend,
+        });
+        return;
+      }
+
+      // The animation carries its own backdrop raster in its config rather than
+      // as a layer group, so this card is done here too.
+      const flowFieldTool = tools.find(
+        (entry): entry is { kind: "flowField"; config?: FlowFieldConfig } =>
+          entry.kind === "flowField"
+      );
+      if (flowFieldTool && startFlowField) {
+        startFlowField(flowFieldTool.config ?? {});
+        return;
+      }
+
+      // The flood is a plane of water over the DEM, not a layer group, so this
+      // card is done here too.
+      const floodTool = tools.find(
+        (
+          entry
+        ): entry is {
+          kind: "floodSimulation";
+          config?: FloodSimulationConfig;
+        } => entry.kind === "floodSimulation"
+      );
+      if (floodTool && startFlood) {
+        startFlood(floodTool.config ?? {});
+        return;
+      }
+
+      // The spots live in a row of their own that the addon adds, so the card
+      // only switches it on or off.
+      if (
+        startSpotHighlights &&
+        tools.some((entry) => entry.kind === "spotHighlights")
+      ) {
+        startSpotHighlights();
+        return;
+      }
+    }
+
+    // The same for a card whose tools carry a vehicle animation: the click
+    // launches the route into the vehicleAnimation engine, and a second click
+    // on the running animation switches it off again.
+    if (layer.type === "workflow" && startVehicleAnimation) {
+      const vehicleTool = resolveAddonEntries(
+        layer.tools as AddonEntry[] | undefined
+      ).find((entry) => entry.kind === "vehicleAnimation");
+      if (vehicleTool) {
+        startVehicleAnimation(vehicleTool.config ?? {});
+        return;
+      }
+    }
+
+    if (layer.type === "workflow" && (layer.workflowLayers?.length ?? 0) > 0) {
+      await applyWorkflowLayerGroup({
+        item: layer,
+        activeLayers,
+        layerStack,
+        deleteItem,
+        dispatch,
+        messageApi,
+      });
+      return;
+    }
+
+    if (layer.type === "collection") {
+      applyCollectionLayer({
+        layer: layer as CollectionLayerItem,
+        dispatch,
+        messageApi,
+        routedMap,
+        setCurrentStyle,
+        deleteItem,
+        addLayerById,
+      });
+      return;
+    }
+
+    if (deleteItem && layer.serviceName === "measurements") {
+      const rawId = layer.id.startsWith("fav_") ? layer.id.slice(4) : layer.id;
+      dispatch(removeMeasurement({ ...layer, id: rawId }));
+      return;
+    }
+
+    const id = toLayerId(layer);
+    let parsedLayer = null;
+    try {
+      parsedLayer = await parseToMapLayer(layer, forceWMS, true);
+    } catch {
+      messageApi.open({
+        type: "error",
+        content: `Es gab einen Fehler beim hinzufügen von ${layer.title}`,
+      });
+      return;
+    }
+    const existingLayer = activeLayers.find(
+      (activeLayer) => activeLayer.id === id
+    );
+
+    if (existingLayer && !updateExisting) {
+      removeExistingLayer({
+        id,
+        layer: parsedLayer,
+        existingLayer,
+        dispatch,
+        clearFeatureCollections,
+        messageApi,
+      });
+      return;
+    }
+
+    await addAdhocFeatureIfApplicable({
+      layer: parsedLayer,
+      id,
+      addFeature,
+      getFrameworkMode,
+      routedMap,
+      libreMap,
+      setSelectedFeatureById,
+      setShouldFocusSelected,
+      dispatch,
+      toggleFramework,
+    });
+
+    addOrUpdateLayer({
+      id,
+      layer: parsedLayer,
+      existingLayer,
+      updateExisting,
+      previewLayer,
+      activeLayers,
+      dispatch,
+      messageApi,
+      maxLayers,
+    });
+
+    if (parsedLayer.conf?.autoOpenInteractionView === true) {
+      dispatch(setActiveInteractionLayerID(id));
+    }
+  };
+};

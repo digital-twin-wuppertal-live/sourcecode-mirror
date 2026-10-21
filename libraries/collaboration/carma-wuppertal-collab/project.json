@@ -1,0 +1,76 @@
+{
+  "name": "carma-wuppertal-collab",
+  "$schema": "../../../node_modules/nx/schemas/project-schema.json",
+  "sourceRoot": "libraries/collaboration/carma-wuppertal-collab/src",
+  "projectType": "library",
+  "tags": [],
+  "namedInputs": {
+    "default": [
+      "{projectRoot}/**/*",
+      "sharedGlobals",
+      {
+        "runtime": "git -C libraries/collaboration/carma-wuppertal-collab/wuppertal-collab-submodule rev-parse HEAD"
+      }
+    ]
+  },
+  "targets": {
+    "build": {
+      "executor": "@nx/vite:build",
+      "outputs": ["{options.outputPath}"],
+      "inputs": [
+        "production",
+        "^production",
+        "{projectRoot}/wuppertal-collab-submodule/src/**/*"
+      ],
+      "options": {
+        "outputPath": "dist/libraries/collaboration/carma-wuppertal-collab"
+      }
+    },
+    "test": {
+      "executor": "@nx/vite:test",
+      "outputs": ["{options.reportsDirectory}"],
+      "inputs": [
+        "default",
+        "^production",
+        "{projectRoot}/wuppertal-collab-submodule/src/**/*"
+      ],
+      "options": {
+        "reportsDirectory": "../../../coverage/libraries/collaboration/carma-wuppertal-collab"
+      }
+    },
+    "lint": {
+      "executor": "@nx/eslint:lint",
+      "inputs": [
+        "default",
+        "{projectRoot}/wuppertal-collab-submodule/src/**/*"
+      ]
+    },
+    "storybook": {
+      "executor": "nx:run-commands",
+      "options": {
+        "cwd": "libraries/collaboration/carma-wuppertal-collab/wuppertal-collab-submodule",
+        "command": "npm run storybook"
+      }
+    },
+    "build-storybook": {
+      "executor": "nx:run-commands",
+      "outputs": ["libraries/collaboration/carma-wuppertal-collab/wuppertal-collab-submodule/storybook-static"],
+      "inputs": [
+        "default",
+        "^production",
+        "{projectRoot}/wuppertal-collab-submodule/**/*"
+      ],
+      "options": {
+        "cwd": "libraries/collaboration/carma-wuppertal-collab/wuppertal-collab-submodule",
+        "command": "npm run build-storybook"
+      }
+    },
+    "serve-storybook": {
+      "executor": "nx:run-commands",
+      "options": {
+        "cwd": "libraries/collaboration/carma-wuppertal-collab/wuppertal-collab-submodule",
+        "command": "npm run serve-storybook"
+      }
+    }
+  }
+}

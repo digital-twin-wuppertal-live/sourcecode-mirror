@@ -1,0 +1,254 @@
+import { useCallback, useEffect, useMemo, useRef } from "react";
+
+import type { AppSearchParamsCustomStateSnapshot } from "@carma-appframeworks/portals";
+import {
+  resolveAddonEntries,
+  useAddonState,
+  useRouteAddons,
+} from "@carma-mapping/addons";
+import { useLibreContext } from "@carma-mapping/contexts";
+import {
+  DEFAULT_SHADOW_SIMULATION_TIME_ZONE,
+  applyShadowHashSelection,
+  resolveShadowHashSelection,
+  shadowStateMatchesHashSelection,
+} from "@carma-mapping/shadow-simulation/core";
+import { useHashState } from "@carma-providers/hash-state";
+
+import {
+  buildGeoportalShadowSimulationHashUpdate,
+  type GeoportalCustomHashState,
+} from "../helper/geoportal-custom-hash-state";
+
+type UseGeoportalShadowSimulationHashOptions = {
+  customHashState: AppSearchParamsCustomStateSnapshot<GeoportalCustomHashState> | null;
+};
+
+type ShadowHashUpdate = ReturnType<
+  typeof buildGeoportalShadowSimulationHashUpdate
+>;
+
+const SHADOW_HASH_WRITE_INTERVAL_MS = 500;
+
+export const useGeoportalShadowSimulationHash = ({
+  customHashState,
+}: UseGeoportalShadowSimulationHashOptions) => {
+  const [shadowState, setShadowState] = useAddonState("shadowSimulation");
+  const [shadowDate, setShadowDate] = useAddonState("shadowDate");
+  const [textureState] = useAddonState("shadowTexture");
+  const textureAvailable = Boolean(textureState);
+  // a layer that launched the shadows is their switch, see `ShadowTexture`
+  const routeAddons = useRouteAddons();
+  const launchedByLayer = useMemo(
+    () =>
+      resolveAddonEntries(routeAddons).some(
+        (entry) =>
+          entry.kind === "shadowTexture" && entry.config?.startEnabled === true
+      ),
+    [routeAddons]
+  );
+  const { map: libreMap } = useLibreContext();
+  const { updateHashState } = useHashState();
+  const handledHashStateVersionRef = useRef<number | null>(null);
+  const pendingHashStateVersionRef = useRef<number | null>(null);
+  const pendingHashUpdateRef = useRef<ShadowHashUpdate | null>(null);
+  const hashWriteTimerRef = useRef<number | null>(null);
+  const lastHashWriteAtRef = useRef<number | null>(null);
+  const updateHashStateRef = useRef(updateHashState);
+  updateHashStateRef.current = updateHashState;
+
+  const flushPendingHashUpdate = useCallback(() => {
+    hashWriteTimerRef.current = null;
+    const update = pendingHashUpdateRef.current;
+    if (!update) {
+      return;
+    }
+
+    pendingHashUpdateRef.current = null;
+    lastHashWriteAtRef.current = Date.now();
+    updateHashStateRef.current(update, {
+      label: "geoportal:sync-shadow-simulation",
+      replace: true,
+    });
+  }, []);
+
+  const cancelPendingHashUpdate = useCallback(() => {
+    if (hashWriteTimerRef.current !== null) {
+      window.clearTimeout(hashWriteTimerRef.current);
+      hashWriteTimerRef.current = null;
+    }
+    pendingHashUpdateRef.current = null;
+  }, []);
+
+  const scheduleHashUpdate = useCallback(
+    (update: ShadowHashUpdate) => {
+      pendingHashUpdateRef.current = update;
+      if (hashWriteTimerRef.current !== null) {
+        return;
+      }
+
+      const lastWriteAt = lastHashWriteAtRef.current;
+      const elapsed =
+        lastWriteAt === null ? Infinity : Date.now() - lastWriteAt;
+      const delay = Math.max(0, SHADOW_HASH_WRITE_INTERVAL_MS - elapsed);
+      if (delay === 0) {
+        flushPendingHashUpdate();
+        return;
+      }
+
+      hashWriteTimerRef.current = window.setTimeout(
+        flushPendingHashUpdate,
+        delay
+      );
+    },
+    [flushPendingHashUpdate]
+  );
+
+  const hashStateVersion = customHashState?.version;
+  const decodedHashSelection =
+    customHashState?.shadowSimulationSelection ?? null;
+  const mapCenter = libreMap?.getCenter();
+  const shadowYear = shadowDate?.year;
+  const shadowTimeZone =
+    shadowDate?.timeZone ?? DEFAULT_SHADOW_SIMULATION_TIME_ZONE;
+  const hashSelection = useMemo(
+    () =>
+      resolveShadowHashSelection(
+        decodedHashSelection,
+        shadowYear,
+        { latitude: mapCenter?.lat, longitude: mapCenter?.lng },
+        shadowTimeZone,
+        { daylightOnly: !textureAvailable }
+      ),
+    [
+      decodedHashSelection,
+      mapCenter?.lat,
+      mapCenter?.lng,
+      shadowTimeZone,
+      shadowYear,
+      textureAvailable,
+    ]
+  );
+
+  useEffect(() => {
+    if (!shadowState || !shadowDate) {
+      cancelPendingHashUpdate();
+      handledHashStateVersionRef.current = null;
+      pendingHashStateVersionRef.current = null;
+    }
+  }, [cancelPendingHashUpdate, shadowDate, shadowState]);
+
+  useEffect(
+    () => () => {
+      cancelPendingHashUpdate();
+    },
+    [cancelPendingHashUpdate]
+  );
+
+  useEffect(() => {
+    if (
+      hashStateVersion === undefined ||
+      !shadowState ||
+      !shadowDate ||
+      handledHashStateVersionRef.current === hashStateVersion
+    ) {
+      return;
+    }
+
+    handledHashStateVersionRef.current = hashStateVersion;
+    cancelPendingHashUpdate();
+
+    if (
+      shadowStateMatchesHashSelection(
+        shadowState.enabled,
+        {
+          ...shadowDate,
+          tileDiagnostics: shadowState.showTileDiagnostics === true,
+        },
+        hashSelection
+      ) ||
+      // a URL without shadows leaves those a layer launched on
+      (hashSelection === null && launchedByLayer)
+    ) {
+      pendingHashStateVersionRef.current = null;
+      return;
+    }
+
+    pendingHashStateVersionRef.current = hashStateVersion;
+    const next = applyShadowHashSelection(
+      shadowState,
+      shadowDate,
+      hashSelection
+    );
+    setShadowState(next.shadowState);
+    setShadowDate(next.dateState);
+  }, [
+    cancelPendingHashUpdate,
+    customHashState?.source,
+    decodedHashSelection,
+    hashSelection,
+    hashStateVersion,
+    launchedByLayer,
+    setShadowState,
+    setShadowDate,
+    shadowDate,
+    shadowState,
+  ]);
+
+  const shadowEnabled = shadowState?.enabled;
+  const shadowTileDiagnostics = shadowState?.showTileDiagnostics === true;
+  const shadowAnimating = shadowState?.isAnimating === true;
+  const shadowMinutes = shadowDate?.minutes;
+  const shadowDayOfYear = shadowDate?.dayOfYear;
+
+  useEffect(() => {
+    if (
+      hashStateVersion === undefined ||
+      shadowEnabled === undefined ||
+      shadowMinutes === undefined ||
+      shadowDayOfYear === undefined ||
+      handledHashStateVersionRef.current !== hashStateVersion
+    ) {
+      return;
+    }
+
+    if (pendingHashStateVersionRef.current === hashStateVersion) {
+      if (
+        !shadowStateMatchesHashSelection(
+          shadowEnabled,
+          {
+            minutes: shadowMinutes,
+            dayOfYear: shadowDayOfYear,
+            tileDiagnostics: shadowTileDiagnostics,
+          },
+          hashSelection
+        )
+      ) {
+        return;
+      }
+      pendingHashStateVersionRef.current = null;
+    }
+    // The animation publishes dates continuously; the hash follows once it
+    // stops, so history and the URL are not rewritten twice a second.
+    if (shadowAnimating) return;
+    scheduleHashUpdate(
+      buildGeoportalShadowSimulationHashUpdate({
+        enabled: shadowEnabled,
+        dateState: {
+          minutes: shadowMinutes,
+          dayOfYear: shadowDayOfYear,
+        },
+        tileDiagnostics: shadowTileDiagnostics,
+      })
+    );
+  }, [
+    hashSelection,
+    hashStateVersion,
+    scheduleHashUpdate,
+    shadowAnimating,
+    shadowDayOfYear,
+    shadowEnabled,
+    shadowMinutes,
+    shadowTileDiagnostics,
+  ]);
+};

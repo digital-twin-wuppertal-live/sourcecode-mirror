@@ -1,0 +1,230 @@
+name: Release Action
+run-name: >
+  ${{ github.event.inputs['release-type'] }} Release 
+  -- will trigger a ${{ github.event.inputs['target'] }} Deployment for
+  ${{ github.event.inputs['project-name'] }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      release-type:
+        description: "Versionsmanipulation im Collab-Projekt (eine der folgenden): patch, minor, major, prepatch, preminor, premajor, prerelease"
+        required: false
+      project-name:
+        description: "Bitte geben Sie einen Projektnamen ein oder * für alle Projekte"
+        required: true
+      target:
+        type: choice
+        description: "Wohin soll ich deployen?"
+        options:
+          - dev
+          - live
+      i-know-what-im-doing:
+        type: boolean
+        description: "Ich weiß, was ich tue"
+        required: true
+      i-know-what-im-doing-when-i-dont-manipulate-version-in-collab:
+        type: boolean
+        description: "Ich weiß, was ich tue, wenn ich keine Versionsmanipulation im Collab-Projekt mache"
+        required: true
+      i-know-what-im-doing-multiple:
+        type: boolean
+        description: "Ich weiß, was ich tue, wenn ich mehrere Deployments anfordere"
+        required: false
+      i-know-what-im-doing-live:
+        type: boolean
+        description: "Ich weiß, was ich tue, wenn ich live-Deployments mache"
+        required: false
+      carma-release-type:
+        description: "Versionsmanipulation im Carma-Projekt (eine der folgenden): patch, minor, major, prepatch, preminor, premajor, prerelease"
+        required: false
+      i-know-what-im-doing-live-release-type:
+        type: boolean
+        description: "Ich weiß, was ich tue, wenn ich live-Deployments mit Versionsmanipulation mache"
+        required: false
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+      contents: write
+    strategy:
+      matrix:
+        node-version: [20.x]
+    steps:
+      - name: Pre-check validations
+        run: |
+          # Get common variables
+          target="${{ github.event.inputs['target'] }}"
+          project_name="${{ github.event.inputs['project-name'] }}"
+          release_type="${{ github.event.inputs['release-type'] }}"
+
+          # Validate i-know-what-im-doing is true
+          if [ "${{ github.event.inputs['i-know-what-im-doing'] }}" != "true" ]; then
+            echo "Error: You must acknowledge that you know what you're doing."
+            exit 1
+          fi
+
+          # Validate if it's a live deploy, i-know-what-im-doing-live must be true, otherwise false
+          if [ "$target" = "live" ]; then
+            if [ "${{ github.event.inputs['i-know-what-im-doing-live'] }}" != "true" ]; then
+              echo "Error: Live deploy requires you to confirm that you know what you're doing."
+              exit 1
+            fi
+            # Prevent wildcard deployments to live
+            if [ "$project_name" = "*" ]; then
+              echo "Error: Wildcard deployments (*) are not allowed for live target."
+              exit 1
+            fi
+          else
+            if [ "${{ github.event.inputs['i-know-what-im-doing-live'] }}" = "true" ]; then
+              echo "Error: The 'I know what I'm doing live' option should not be checked for non-live deployments."
+              exit 1
+            fi
+          fi
+
+          # Validate if project-name=* then i-know-what-im-doing-multiple must be true, otherwise false
+          if [ "$project_name" = "*" ]; then
+            if [ "${{ github.event.inputs['i-know-what-im-doing-multiple'] }}" != "true" ]; then
+              echo "Error: Deploying to all projects requires you to confirm that you know what you're doing for multiple deployments."
+              exit 1
+            fi
+          else
+            if [ "${{ github.event.inputs['i-know-what-im-doing-multiple'] }}" = "true" ]; then
+              echo "Error: The 'I know what I'm doing multiple' option should not be checked if you are not deploying to all projects."
+              exit 1
+            fi
+          fi
+
+          # Validate that project-name is either * or a non-empty string
+          if [ -z "$project_name" ] || { [ "$project_name" != "*" ] && [ -z "$project_name" ]; }; then
+            echo "Error: Project name must be either '*' or a non-empty string."
+            exit 1
+          fi
+
+          # Validate release-type and i-know-what-im-doing-when-i-dont-manipulate-version-in-collab relationship
+          if [ -z "$release_type" ]; then
+            if [ "${{ github.event.inputs['i-know-what-im-doing-when-i-dont-manipulate-version-in-collab'] }}" != "true" ]; then
+              echo "Error: When no release-type is specified, you must acknowledge that you know what you're doing without version manipulation in collab."
+              exit 1
+            fi
+          else
+            if [ "${{ github.event.inputs['i-know-what-im-doing-when-i-dont-manipulate-version-in-collab'] }}" = "true" ]; then
+              echo "Error: The 'I know what I'm doing when I don't manipulate version in collab' option should not be checked when release-type is specified."
+              exit 1
+            fi
+          fi
+
+          # Validate carma-release-type and i-know-what-im-doing-live-release-type relationship
+          carma_release_type="${{ github.event.inputs['carma-release-type'] }}"
+          if [ -n "$carma_release_type" ]; then
+            if [ "${{ github.event.inputs['i-know-what-im-doing-live-release-type'] }}" != "true" ]; then
+              echo "Error: When specifying a carma-release-type, you must acknowledge that you know what you're doing with live release type changes."
+              exit 1
+            fi
+          else
+            if [ "${{ github.event.inputs['i-know-what-im-doing-live-release-type'] }}" = "true" ]; then
+              echo "Error: The 'I know what I'm doing live release type' option should not be checked when carma-release-type is empty."
+              exit 1
+            fi
+          fi
+
+          echo "All checks passed."
+      - uses: actions/checkout@v3
+        with:
+          clean: true
+          ref: dev # Checkout the dev branch initially
+      - name: Clone carma monorepo
+        run: git clone --depth 1 --branch dev https://github.com/cismet/carma.git _carma_monorepo
+      - name: Use Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v3
+        with:
+          node-version: ${{ matrix.node-version }}
+      - name: Git configuration
+        run: |
+          git config --global user.email "902348742+github-actions[bot]@users.noreply.github.com"
+          git config --global user.name "GitHub Actions"
+      - name: Cache node_modules
+        id: cache-node-modules
+        uses: actions/cache@v4
+        with:
+          path: node_modules
+          key: node-modules-${{ runner.os }}-node-20-${{ hashFiles('package-lock.json') }}
+      - name: Install Packages
+        if: steps.cache-node-modules.outputs.cache-hit != 'true'
+        run: npm install
+      # Step 1: Put the state from dev to main
+      - name: Checkout main branch and reset to dev
+        run: |
+          git fetch --all
+          git checkout main
+          git reset --hard dev  # Reset main to match dev
+          git push origin main --force
+
+      # Step 2: Make a npm version command to update package.json and create tags
+      - name: Change release version and create tag
+        run: npm version ${{ env.RELEASE_TYPE }}
+        env:
+          RELEASE_TYPE: ${{ github.event.inputs.release-type }}
+
+      - name: Push changes to main branch with tags
+        run: |
+          git push origin main
+          git push origin --tags
+
+      # Step 3: Put that change back to dev
+      - name: Checkout dev branch and update with new version
+        run: |
+          git checkout dev
+          git reset --hard main  # Reset dev to match main
+          git push origin dev --force
+      # Additional steps for deployment and build process
+      # copied from gh-pages
+      - name: prepare 0
+        run: touch .version && touch .githash && yarn run postversion
+      - name: prepare 1 (version stuff)
+        run: VERSION=`cat .version`; sed -i "s/%LIB_VERSION%/$VERSION/" src/version.js
+      - name: prepare 2 (hash stuff)
+        run: HASH=`cat .githash`; sed -i "s/%LIB_HASH%/$HASH/" src/version.js
+      - name: prepare 3 (gitdescribe stuff)
+        run: DESCRIBE=`cat .gitdescribe`; sed -i "s/%LIB_DESCRIBE%/$DESCRIBE/" src/version.js
+      - name: Build Storybook
+        run: npm run build-storybook
+        env:
+          CI: false
+      - name: Deploy to gh-pages
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./storybook-static
+      - name: show deployed folder
+        run: ls storybook-static
+      - name: Trigger Workflow in Another Repository
+        run: |
+          # Set the required variables
+          repo_owner="cismet"
+          repo_name="carma"
+          event_type="trigger-workflow"
+          versionManipulator=${{ github.event.inputs.carma-release-type }}
+          projectName="${{ github.event.inputs['project-name'] }}"
+          actor="${{ github.actor }}"
+          target="${{ github.event.inputs['target'] }}"
+
+          # Dynamically construct the client_payload as a single line
+          if [ -z "$versionManipulator" ]; then
+            payload="{\"event_type\": \"$event_type\", \"client_payload\": {\"project-name\": \"$projectName\", \"target\": \"$target\", \"actor\": \"$actor\", \"unit\": false, \"integration\": true}}"
+          else
+            payload="{\"event_type\": \"$event_type\", \"client_payload\": {\"project-name\": \"$projectName\", \"target\": \"$target\", \"version-manipulator\": \"$versionManipulator\", \"actor\": \"$actor\", \"unit\": false, \"integration\": true}}"
+          fi
+
+          # Print the payload (optional, for debugging purposes)
+          echo "Payload: $payload"
+
+          # Send the request
+          curl -L \
+            -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${{ secrets.CISMET_CI_DEPLOY2_PAT }}" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            https://api.github.com/repos/$repo_owner/$repo_name/dispatches \
+            -d "$payload"

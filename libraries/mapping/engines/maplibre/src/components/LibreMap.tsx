@@ -1,0 +1,2637 @@
+import type { LayerSpecification, StyleSpecification } from "maplibre-gl";
+import maplibregl from "maplibre-gl";
+import "maplibre-gl/dist/maplibre-gl.css";
+import { cogProtocol } from "@geomatico/maplibre-cog-protocol";
+import {
+  RETRY_TILE_PROTOCOL,
+  retryTileProtocol,
+} from "../utils/retryTileProtocol";
+
+// Register COG protocol once
+maplibregl.addProtocol("cog", cogProtocol as any);
+// Tiles that must not stay missing after a dropped transfer (terrain DEM)
+maplibregl.addProtocol(RETRY_TILE_PROTOCOL, retryTileProtocol);
+import {
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import { getHashParams } from "@carma-commons/utils";
+import { isForcedCacheUrl, isPageCacheForced } from "../utils/forcedCache";
+import { MAPLIBRE_EVENT } from "../constants/mapEvents";
+import type {
+  Carma3dConfig,
+  ThreePerfData,
+} from "@carma-mapping/engines/threejs";
+import { FeatureCollectionContext } from "react-cismap/contexts/FeatureCollectionContextProvider";
+import PhotoLightBox from "react-cismap/topicmaps/PhotoLightbox";
+import { TopicMapStylingContext } from "react-cismap/contexts/TopicMapStylingContextProvider";
+import "../styles/map.css";
+import {
+  applySymbolScalingToMap,
+  getGeoJsonSourceId,
+  getVectorMapping,
+  styleManipulation,
+  vectorStylesToMapLibreStyle,
+} from "../utils/styleBuilder";
+import { slugifyUrl } from "../utils/styleComposer";
+import {
+  attachNonTiledWmsUpdater,
+  createNonTiledImageSource,
+  createNonTiledMetadata,
+} from "../utils/nonTiledWms";
+import {
+  DEFAULT_MAX_PITCH,
+  setCameraRestrictionBase,
+} from "../utils/cameraRestriction";
+import { publishMapLayers } from "../utils/mapLayers";
+import { publishMapThreeRuntimeParams } from "../utils/mapThreeParams";
+import { createFeature } from "../utils/featureUtils";
+import { buildFeatureStateTarget } from "../utils/featureStateTarget";
+import { HidingForwardingManager } from "../lib/HidingForwardingManager";
+import {
+  applySelectionForwarding,
+  enrichHitsWithCarmaInfo,
+  getCarmaConf,
+  getCarmaConfFromStyle,
+  isNonSelectable,
+  ownLayerId,
+  resolvePropertyTarget,
+} from "../lib/SelectionManager";
+import type { FeatureIdentifier } from "../lib/selectionTypes";
+import { isClickClaimed } from "../utils/clickClaims";
+import { zoom256as512, zoom512as256 } from "../utils/zoomUtils";
+import {
+  LibreMapSelectionContent,
+  SELECTION_OVERLAY_LAYER_IDS,
+} from "./LibreMapSelectionContent";
+import {
+  ENDPOINT,
+  isAreaType,
+  type TextureColorCorrection,
+} from "@carma-commons/resources";
+import proj4 from "proj4";
+import {
+  ensureLayerLoadingTracker,
+  proj4crs3857def,
+  proj4crs4326def,
+  stampSourceLayerFromProperty,
+} from "@carma-mapping/utils";
+import { useSelectionLibreMap } from "../hooks/useSelectionLibreMap";
+import { useLibreContext } from "../contexts/LibreContext";
+import { useMapSelection } from "../contexts/MapSelectionContext";
+import { useDatasheet } from "../contexts/DatasheetContext";
+import { useClusterMarkers } from "../hooks/useClusterMarkers";
+import { useHoverTooltip } from "../hooks/useHoverTooltip";
+import { useImperativeStyle } from "../hooks/useImperativeStyle";
+import { useInitialMapStyle } from "../hooks/useInitialMapStyle";
+import {
+  WUPPERTAL_DEFAULT_STYLE,
+  WUPPERTAL_CONFIG,
+  WUPPERTAL_TERRAIN_SOURCE_ID,
+  createTerrainSources,
+} from "../constants/wuppertalDefaultStyle";
+
+// Import from portals temporarily until these are migrated
+import { FeatureInfobox, utils } from "@carma-appframeworks/portals";
+import { SelectionItem, useSelection } from "@carma-appframeworks/portals";
+import { defaultLayerConf } from "@carma-appframeworks/portals";
+import { useMapHashRouting } from "@carma-appframeworks/portals";
+import { ThreeLayerManager } from "./ThreeLayerManager";
+import { getGenericThreeLayers as get3dLayers } from "../lib/runtime/integrations/generic-three-layer-registry";
+import {
+  Tiles3dLayerManager,
+  withTilesetColorCorrection,
+} from "./Tiles3dLayerManager";
+import type { Tiles3dConfig } from "./Tiles3dLayerManager";
+import { SharedThreeTilesLayerManager } from "./SharedThreeTilesLayerManager";
+import {
+  THREE_TILES_LAYER_TYPE,
+  type ThreeTilesLayer,
+} from "../lib/runtime/integrations/three-tiles-layer";
+import {
+  notifyMapLibreStyleCompositionReady,
+  notifyMapLibreStyleCompositionStarted,
+} from "../lib/runtime/integrations/map-style-layer-suppression";
+
+const buildGazetteerRouteInfobox = (pos: number[], label: string) => ({
+  properties: {
+    header: "Informationen",
+    title: label,
+    genericLinks: [
+      {
+        iconname: "car",
+        tooltip: "Route berechnen",
+        routeAction: true,
+        getRouteParams: () => ({
+          to: { lat: pos[1], lng: pos[0] },
+        }),
+      },
+    ],
+  },
+});
+
+/** Default upper zoom bound in Leaflet-like 256px zoom (21.9999 in MapLibre's
+ *  512px scale), kept for hosts that do not pass their own maxZoom. */
+const DEFAULT_MAX_ZOOM_256 = 22.9999;
+
+export interface GeoJsonData {
+  sourceId: string;
+  data: GeoJSON.FeatureCollection;
+}
+
+export interface VectorStyle {
+  name: string;
+  style: string | StyleSpecification;
+  layer?: string;
+  /** Host app layer id this sub-style belongs to, used to report loading and
+   *  error state back per layer (see LayerLoadingTracker). Several LibreLayers
+   *  may share one id, e.g. a background spec expanding into named layers. */
+  carmaLayerId?: string;
+  opacity?: number;
+  /** animate opacity changes, see OpacityTransition; omitted keeps the default */
+  opacityTransition?: OpacityTransition;
+  infoboxMapping?: string[];
+  /** Promote a feature property to the source's feature id (MapLibre source
+   *  option). Without it, `feature-state` is keyed by the tile-local MVT id,
+   *  which is only unique within a single tile — passing a database primary key
+   *  there aliases every feature sharing that integer in each loaded tile. Set
+   *  e.g. "id" so selection/highlight feature-state keys by the stable DB pk. */
+  promoteId?: string;
+  /** Optional 3D layer config; when present, a Three.js layer is auto-created. */
+  carma3d?: Carma3dConfig;
+  /** Optional filter expression to AND into every style layer in this vector style
+   *  during style construction. The original filter is preserved at
+   *  metadata.originalFilter so consumers can still recover it. */
+  userFilter?: unknown[] | null;
+  /** Optional pure transform applied to the freshly fetched/cloned stylesheet
+   *  before it is merged into the composite style. Used to bake in features
+   *  like dynamic styling selections so the merged map reflects them on the
+   *  first render. Must return a stylesheet (modified or original); returning
+   *  a falsy value keeps the input unchanged. */
+  userStyleTransform?: (style: any) => any;
+  /** Serializable fingerprint of `userStyleTransform`'s effective output.
+   *  Hosts that memoize LibreLayer arrays via JSON.stringify need this to
+   *  detect transform changes (functions are stripped by JSON.stringify). */
+  userStyleTransformKey?: string;
+}
+
+/**
+ * How an opacity change should be animated, as milliseconds or as MapLibre's
+ * own `{duration, delay}`. Omitted leaves MapLibre's default in place, which
+ * is a 300ms linear fade; there is no easing, the spec has no curve.
+ *
+ * Meant for displays whose opacity is driven from outside, where a change is a
+ * deliberate visual step rather than someone dragging a slider.
+ */
+export type OpacityTransition = number | { duration: number; delay?: number };
+
+/**
+ * Additional raster paint properties for image manipulation (night mode, etc.).
+ * These map directly to MapLibre raster paint properties.
+ */
+export interface RasterPaintOverrides {
+  "raster-brightness-min"?: number; // 0–1, default 0
+  "raster-brightness-max"?: number; // 0–1, default 1
+  "raster-saturation"?: number; // -1–1, default 0 (-1 = grayscale)
+  "raster-contrast"?: number; // -1–1, default 0
+  "raster-hue-rotate"?: number; // degrees, default 0
+}
+
+export type LibreLayer =
+  | ({ type: "vector" } & VectorStyle)
+  | ThreeTilesLayer
+  | {
+      type: "geojson";
+      name: string;
+      data: string;
+      carmaLayerId?: string;
+      infoboxMapping?: string[];
+      /** Feature property used to color cluster pie chart slices.
+       * Defaults to "schrift" (Stadtplan POI schema). */
+      colorProperty?: string;
+      /** Promote a feature property to feature id (MapLibre source option).
+       * Required for propertyTarget selection forwarding to match by id. */
+      promoteId?: string;
+      /** Feature property shown as a tooltip while hovering a feature. */
+      hoverTooltip?: string;
+    }
+  | {
+      type: "wms" | "wmts";
+      url: string;
+      layers: string;
+      carmaLayerId?: string;
+      styles?: string;
+      version?: string;
+      tileSize?: number;
+      maxZoom?: number;
+      format?: string;
+      opacity?: number;
+      /** animate opacity changes, see OpacityTransition */
+      opacityTransition?: OpacityTransition;
+      transparent?: boolean;
+      rasterPaint?: RasterPaintOverrides;
+      nonTiled?: boolean;
+    }
+  | {
+      type: "tiles";
+      name: string;
+      url: string;
+      carmaLayerId?: string;
+      opacity?: number;
+      /** animate opacity changes, see OpacityTransition */
+      opacityTransition?: OpacityTransition;
+      tileSize?: number;
+      maxZoom?: number;
+      rasterPaint?: RasterPaintOverrides;
+    }
+  | {
+      type: "cog";
+      name: string;
+      url: string;
+      carmaLayerId?: string;
+      opacity?: number;
+      /** animate opacity changes, see OpacityTransition */
+      opacityTransition?: OpacityTransition;
+      rasterPaint?: RasterPaintOverrides;
+    };
+
+export interface LibreMapProps {
+  backgroundLayers?: string | null;
+  /**
+   * Colour of the map where no layer draws, as a MapLibre background layer
+   * under everything the host composes. Applies with `backgroundLayers`
+   * null: a standalone tileset then sits on this instead of the page.
+   */
+  backgroundColor?: string;
+  layers?: LibreLayer[];
+  setLibreMap?: (map: maplibregl.Map) => void;
+  onProgressUpdate?: (progress: { current: number; total: number }) => void;
+  filterFunction?: (
+    map: maplibregl.Map,
+    layers?: LibreLayer[],
+    geoJsonData?: GeoJsonData[]
+  ) => void;
+  /**
+   * Filters the features of inline geojson sources while the style is built,
+   * before it reaches the map or the context. Unlike `filterFunction`, which
+   * runs on the map afterwards, a rebuild (e.g. toggling clustering) never
+   * shows filtered-out features, not even for a frame. Keep it referentially
+   * stable; a new function rebuilds the style.
+   */
+  geoJsonFeatureFilter?: (
+    sourceId: string,
+    features: GeoJSON.Feature[]
+  ) => GeoJSON.Feature[];
+  /** Override glyphs (font) URL. undefined = use from first vector layer style, string = use this URL */
+  overrideGlyphs?: string;
+  /** Symbol scaling base. Defaults to the value from TopicMapStylingContext
+   * (35 = unscaled). Hosts whose styles are authored for a different base can
+   * override it here without touching the shared context. */
+  markerSymbolSize?: number;
+  useRouting?: boolean;
+  /** Keep the canvas readable for toDataURL() snapshot capture */
+  preserveDrawingBuffer?: boolean;
+  /** Initial canvas ceiling; omitted retains MapLibre's default. */
+  maxCanvasSize?: maplibregl.MapOptions["maxCanvasSize"];
+  /**
+   * Compose the first style from the layers before creating the map, so the
+   * instance loads its final style once instead of a background style that
+   * the composed one replaces a moment later. The host must hand over the
+   * layers it wants on the first render; later changes apply as before.
+   * A failed or slow composition falls back to the background within
+   * five seconds.
+   */
+  deferInitialStyle?: boolean;
+  /** Disable all map interaction (pan, zoom, rotate, keyboard) */
+  interactive?: boolean;
+  /** Enable visual selection via setFeatureState even without infoboxMapping */
+  selectionEnabled?: boolean;
+  /** Layer composition strategy.
+   * - 'merged' (default): builds a single StyleSpecification and calls setStyle()
+   * - 'imperative': uses addSource/addLayer/addSprite for incremental updates */
+  layerMode?: "merged" | "imperative";
+  onFeatureSelect?: (
+    feature: any,
+    selectionInfo?: {
+      source: string;
+      sourceLayer?: string;
+      id?: string | number;
+    }
+  ) => void;
+  /** Fired once per click with the raw filtered hits and the click latlng.
+   * Mirrors the shape of CismapLayer's onSelectionChanged: hosts can drive
+   * their own selection / infobox flow without registering a second
+   * map.on("click", ...) handler. Fires even when there are no hits, so
+   * hosts can also clear state on empty-area clicks. */
+  onSelectionChanged?: (e: {
+    hits: maplibregl.MapGeoJSONFeature[];
+    hit: maplibregl.MapGeoJSONFeature | undefined;
+    latlng: maplibregl.LngLat;
+    semanticIdentifier?: string;
+  }) => void;
+  /** Pick which feature to select from all click hits.
+   * Receives filtered hits (no selection/cluster layers).
+   * Return the preferred feature, or undefined to clear selection.
+   * If omitted, the first hit is selected (default behavior). */
+  selectFromHits?: (
+    hits: maplibregl.MapGeoJSONFeature[]
+  ) => maplibregl.MapGeoJSONFeature | undefined;
+  /** Enable debug logging for [LAYER_MODE] and [StyleComposer] messages */
+  debugLog?: boolean;
+  /** Also log the raw MapLibre error event, not just its message. MapLibre
+   * errors (style validation, tile loading, worker failures, etc.) are always
+   * logged; this only adds the full event for debugging. */
+  logErrors?: boolean;
+  /** Expose the map instance as window.__carmaMap for console debugging */
+  exposeMapToWindow?: boolean;
+  /** Re-request tiles once the server's Cache-Control/Expires marks them stale
+   * (default: true, MapLibre's own default). Each refresh repaints the tile
+   * through the raster fade, so a window that is being screen-captured or
+   * projected wants this off; it must be set at construction, since the option
+   * is what decides whether expiry data is recorded at all. */
+  refreshExpiredTiles?: boolean;
+  /** Write lat/lng/zoom to the url hash on every moveend (default: true).
+   * Set false for a map whose view is driven externally and must not push
+   * history entries or seed the next reload's initial view. */
+  hashWriteEnabled?: boolean;
+  /** Override selected feature for the infobox when internal selection is null
+   * (e.g. programmatic selection of a feature not present on the map) */
+  overrideSelectedFeature?: Record<string, unknown> | null;
+  /** Show gazetteer selection info when clicking on empty map area (default: true) */
+  gazetteerInfoOnClick?: boolean;
+  /** Clicking the already selected feature zooms to it, like the infobox
+   * zoom action (default: false) */
+  zoomOnSelectedFeatureClick?: boolean;
+  /** Skip the engine's built-in feature creation and context push on click.
+   * Visual selection (setFeatureState) and onSelectionChanged still fire, so
+   * a host can drive its own infobox flow without LibreMap also running
+   * createFeature against a registered infoboxMapping and competing for the
+   * MapSelectionContext. Default: false (engine handles selection). */
+  disableInternalSelection?: boolean;
+  /** Raster paint overrides applied to all background raster layers (night mode, etc.) */
+  backgroundRasterPaint?: RasterPaintOverrides;
+  /** Runtime parameters for 3D layers (e.g. radiusMix, useLoft) */
+  threeRuntimeParams?: Record<string, number | string>;
+  /**
+   * Colour correction per 3D Tiles tileset URL, for tilesets whose style
+   * declares none; a style's own `carmaConf["3d"].colorCorrection` wins.
+   */
+  tilesetColorCorrections?: Readonly<Record<string, TextureColorCorrection>>;
+  /** Hosts can forbid diagnostics requested by a layer style. */
+  tilesDiagnosticsEnabled?: boolean;
+  /** Ref for 3D layer performance data */
+  threePerfRef?: React.MutableRefObject<ThreePerfData>;
+  /** Maximum tilt (pitch) in degrees. Defaults to 60 (MapLibre's stock cap). */
+  maxPitch?: number;
+  minZoom?: number;
+  maxZoom?: number;
+  restrictCamera?: boolean;
+  forceRestrictCamera?: boolean;
+}
+
+/**
+ * Query rendered features with a terrain workaround.
+ * When terrain is active, MapLibre's queryRenderedFeatures fails for fill-extrusion
+ * layers because internal matrices are terrain-biased. This helper temporarily
+ * suppresses terrain state, re-projects the click point, queries, then restores.
+ */
+function queryFeaturesWithTerrainFix(
+  map: maplibregl.Map,
+  clickPoint: maplibregl.Point
+): maplibregl.MapGeoJSONFeature[] {
+  const mapTerrain = (map as any).terrain;
+  if (!mapTerrain) {
+    return map.queryRenderedFeatures(clickPoint);
+  }
+
+  const transform = (map as any).transform;
+  type TerrainRef = { terrain: unknown };
+
+  // Step 1: Get terrain-aware lnglat BEFORE suppression
+  const clickLngLat = map.unproject(clickPoint);
+
+  // Step 2: Suppress terrain state
+  const savedElevation: number = transform._helper._elevation;
+  const savedScreenPointToMerc = transform.screenPointToMercatorCoordinate;
+  const savedTileManagers: TerrainRef[] = [];
+
+  try {
+    transform._helper._elevation = 0;
+    transform._calcMatrices();
+
+    (map as any).terrain = null;
+
+    const style = (map as any).style;
+    if (style?.tileManagers) {
+      for (const id in style.tileManagers) {
+        const tm = style.tileManagers[id];
+        if (tm.terrain) {
+          savedTileManagers.push(tm);
+          tm.terrain = null;
+        }
+      }
+    }
+
+    transform.screenPointToMercatorCoordinate = function (
+      p: unknown,
+      _terrain?: unknown
+    ) {
+      return this.screenPointToMercatorCoordinateAtZ(p);
+    };
+
+    // Step 3: Re-project and query
+    const projected = map.project(clickLngLat);
+    const queryPoint = new maplibregl.Point(projected.x, projected.y);
+    return map.queryRenderedFeatures(queryPoint);
+  } finally {
+    // Restore all terrain state
+    transform.screenPointToMercatorCoordinate = savedScreenPointToMerc;
+    (map as any).terrain = mapTerrain;
+    for (const tm of savedTileManagers) {
+      tm.terrain = mapTerrain;
+    }
+    transform._helper._elevation = savedElevation;
+    transform._calcMatrices();
+  }
+}
+
+/**
+ * Calls back once the current style is on screen: the map idles, or its
+ * style and tiles report loaded. A repaint loop (animated layers) keeps the
+ * map from idling, so a timeout bounds the wait.
+ */
+const whenStyleShown = (mapInstance: maplibregl.Map, done: () => void) => {
+  let settled = false;
+  const finish = () => {
+    if (settled) return;
+    cancel();
+    done();
+  };
+  const check = () => {
+    if (mapInstance.isStyleLoaded() && mapInstance.areTilesLoaded()) finish();
+  };
+  const timer = setTimeout(finish, 5_000);
+  const cancel = () => {
+    settled = true;
+    clearTimeout(timer);
+    mapInstance.off(MAPLIBRE_EVENT.IDLE, finish);
+    mapInstance.off(MAPLIBRE_EVENT.SOURCE_DATA, check);
+  };
+  mapInstance.on(MAPLIBRE_EVENT.IDLE, finish);
+  mapInstance.on(MAPLIBRE_EVENT.SOURCE_DATA, check);
+  return cancel;
+};
+
+const applyGeoJsonFeatureFilter = (
+  style: StyleSpecification,
+  filter: LibreMapProps["geoJsonFeatureFilter"]
+): StyleSpecification => {
+  if (!filter) return style;
+  const sources = { ...style.sources };
+  for (const [sourceId, source] of Object.entries(sources)) {
+    if (source.type !== "geojson" || typeof source.data !== "object") {
+      continue;
+    }
+    const data = source.data as GeoJSON.GeoJSON;
+    if (data.type !== "FeatureCollection") continue;
+    sources[sourceId] = {
+      ...source,
+      data: { ...data, features: filter(sourceId, data.features) },
+    };
+  }
+  return { ...style, sources };
+};
+
+// Bakes the raster paint overrides (e.g. night mode) into a freshly built
+// style, so a style rebuild doesn't drop what the imperative effect applied
+const applyRasterPaint = (
+  style: StyleSpecification,
+  paint: RasterPaintOverrides | undefined
+): StyleSpecification => {
+  if (!paint || !style.layers) return style;
+  return {
+    ...style,
+    layers: style.layers.map((layer) =>
+      layer.type === "raster"
+        ? { ...layer, paint: { ...layer.paint, ...paint } }
+        : layer
+    ),
+  };
+};
+
+// FeatureInfobox (and its zoom action) reads the feature properties from
+// properties.info
+const toInfoboxFeature = <T extends { properties?: unknown }>(feature: T) => ({
+  ...feature,
+  properties: {
+    info: { ...(feature.properties as Record<string, unknown>) },
+  },
+});
+
+export const LibreMap = ({
+  backgroundLayers,
+  backgroundColor,
+  layers,
+  setLibreMap,
+  onProgressUpdate,
+  filterFunction,
+  geoJsonFeatureFilter,
+  overrideGlyphs,
+  markerSymbolSize: markerSymbolSizeProp,
+  useRouting = false,
+  interactive = true,
+  preserveDrawingBuffer = false,
+  maxCanvasSize,
+  deferInitialStyle = false,
+  selectionEnabled = true,
+  layerMode = "merged",
+  onFeatureSelect,
+  onSelectionChanged,
+  selectFromHits,
+  debugLog = false,
+  logErrors = false,
+  exposeMapToWindow = false,
+  refreshExpiredTiles = true,
+  hashWriteEnabled = true,
+  overrideSelectedFeature,
+  gazetteerInfoOnClick = true,
+  zoomOnSelectedFeatureClick = false,
+  disableInternalSelection = false,
+  backgroundRasterPaint,
+  threeRuntimeParams,
+  tilesetColorCorrections,
+  tilesDiagnosticsEnabled,
+  threePerfRef,
+  maxPitch = DEFAULT_MAX_PITCH,
+  minZoom,
+  maxZoom = DEFAULT_MAX_ZOOM_256,
+  restrictCamera = false,
+  forceRestrictCamera = false,
+}: LibreMapProps) => {
+  const mapContainer = useRef<HTMLDivElement>(null);
+  const map = useRef<maplibregl.Map | null>(null);
+  const mapStyleLayers = useMemo(
+    () => layers?.filter((layer) => layer.type !== THREE_TILES_LAYER_TYPE),
+    [layers]
+  );
+  const threeTilesLayers = useMemo(
+    () =>
+      (layers ?? []).filter(
+        (layer): layer is ThreeTilesLayer =>
+          layer.type === THREE_TILES_LAYER_TYPE
+      ),
+    [layers]
+  );
+  const hidingManagerRef = useRef<HidingForwardingManager | null>(null);
+  const detachNonTiledRef = useRef<(() => void) | null>(null);
+  const selectedFeaturesRef = useRef<
+    Set<{
+      source: string;
+      sourceLayer?: string;
+      id?: string | number;
+      selectionLayerId?: string;
+      forwardedTo?: FeatureIdentifier[]; // Track forwarded selections for cleanup
+    }>
+  >(new Set());
+  const mappingRef = useRef({});
+  const onFeatureSelectRef = useRef(onFeatureSelect);
+  onFeatureSelectRef.current = onFeatureSelect;
+  const onSelectionChangedRef = useRef(onSelectionChanged);
+  onSelectionChangedRef.current = onSelectionChanged;
+  const selectFromHitsRef = useRef(selectFromHits);
+  selectFromHitsRef.current = selectFromHits;
+  const useRoutingRef = useRef(useRouting);
+  useRoutingRef.current = useRouting;
+  const gazetteerInfoOnClickRef = useRef(gazetteerInfoOnClick);
+  gazetteerInfoOnClickRef.current = gazetteerInfoOnClick;
+  const zoomOnSelectedFeatureClickRef = useRef(zoomOnSelectedFeatureClick);
+  zoomOnSelectedFeatureClickRef.current = zoomOnSelectedFeatureClick;
+  const isIdleRef = useRef(false);
+  const vectorSourcesReadyRef = useRef(false);
+  const [selectedFeature, setSelectedFeature] = useState(null);
+  const [detectedCarma3dConfigs, setDetectedCarma3dConfigs] = useState<
+    Carma3dConfig[]
+  >([]);
+  // The instance as React state: effects that subscribe to the map read it
+  // through this, so they also run when the map is created after their first
+  // pass (`deferInitialStyle` creates it once the composed style is ready).
+  const [mountedMap, setMountedMap] = useState<maplibregl.Map | null>(null);
+  const [detectedTiles3dConfigs, setDetectedTiles3dConfigs] = useState<
+    Array<Tiles3dConfig & { layerOpacity: number }>
+  >([]);
+  const renderedTiles3dConfigs = useMemo(
+    () =>
+      detectedTiles3dConfigs.map((config) =>
+        withTilesetColorCorrection(
+          tilesDiagnosticsEnabled === false
+            ? { ...config, diagnostics: false }
+            : config,
+          tilesetColorCorrections
+        )
+      ),
+    [detectedTiles3dConfigs, tilesetColorCorrections, tilesDiagnosticsEnabled]
+  );
+  const geoJsonMetadataRef = useRef<
+    Array<{ sourceId: string; uniqueColors: string[] }>
+  >([]);
+  const isInitialGeoJsonLoad = useRef(true);
+  const baseStyleLayersRef = useRef<LayerSpecification[]>([]);
+
+  // Both react-cismap contexts are optional: a playground mounts the map
+  // without the topic-map providers of the portals.
+  const { clusteringEnabled = false } =
+    useContext<typeof FeatureCollectionContext>(FeatureCollectionContext) ?? {};
+  const { markerSymbolSize: markerSymbolSizeFromContext } =
+    useContext<typeof TopicMapStylingContext>(TopicMapStylingContext) ?? {};
+  const markerSymbolSize = markerSymbolSizeProp ?? markerSymbolSizeFromContext;
+  const markerSymbolSizeRef = useRef(markerSymbolSize);
+  markerSymbolSizeRef.current = markerSymbolSize;
+  const backgroundRasterPaintRef = useRef(backgroundRasterPaint);
+  backgroundRasterPaintRef.current = backgroundRasterPaint;
+  const {
+    setMapStyle,
+    geoJsonMetadata,
+    setGeoJsonMetadata,
+    setMap: setContextMap,
+    filterPresentation,
+    selectionOnTop,
+  } = useLibreContext();
+
+  const { selection } = useSelection();
+  const selectionRef = useRef(selection);
+
+  // Keep selectionRef in sync with selection
+  useEffect(() => {
+    selectionRef.current = selection;
+  }, [selection]);
+
+  // MapSelectionContext: provides programmatic selection API.
+  // When no MapSelectionProvider exists, the default no-op context is returned
+  // and LibreMap falls back to its local state behavior.
+  const mapSelectionCtx = useMapSelection();
+  const mapSelectionCtxRef = useRef(mapSelectionCtx);
+  mapSelectionCtxRef.current = mapSelectionCtx;
+  const lastHandledVersionRef = useRef(0);
+
+  // Mirror selectionEnabled into a ref so the click handler (registered once
+  // inside a [] -deps useEffect below) can honor live prop changes — e.g. an
+  // app toggling selection off while a draw mode is active. Without this the
+  // handler would hold the value at mount and never react.
+  const selectionEnabledRef = useRef(selectionEnabled);
+  selectionEnabledRef.current = selectionEnabled;
+
+  const disableInternalSelectionRef = useRef(disableInternalSelection);
+  disableInternalSelectionRef.current = disableInternalSelection;
+
+  // DatasheetContext: when a DatasheetProvider is mounted, isEnabled is true
+  // and openDatasheet is a real function. Otherwise createFeature gets undefined.
+  const { isEnabled: datasheetEnabled, openDatasheet } = useDatasheet();
+  const openDatasheetRef = useRef(datasheetEnabled ? openDatasheet : undefined);
+  openDatasheetRef.current = datasheetEnabled ? openDatasheet : undefined;
+
+  // Helper: clear all visual selection state on the map
+  const clearVisualSelection = useCallback((mapInstance: maplibregl.Map) => {
+    selectedFeaturesRef.current.forEach((feature) => {
+      try {
+        if (
+          feature.selectionLayerId &&
+          mapInstance.getLayer(feature.selectionLayerId)
+        ) {
+          mapInstance.setFilter(feature.selectionLayerId, [
+            "==",
+            "__selected__",
+            "true",
+          ]);
+        } else if (feature.id != null) {
+          mapInstance.setFeatureState(
+            buildFeatureStateTarget(mapInstance, feature),
+            { selected: false }
+          );
+        }
+
+        // Also clear forwarded selections
+        if (feature.forwardedTo) {
+          for (const forwarded of feature.forwardedTo) {
+            try {
+              mapInstance.setFeatureState(
+                buildFeatureStateTarget(mapInstance, forwarded),
+                { selected: false }
+              );
+            } catch {
+              // Forwarded feature may not exist
+            }
+          }
+        }
+      } catch (error) {
+        console.error("Error clearing feature selection:", error);
+      }
+    });
+    selectedFeaturesRef.current.clear();
+  }, []);
+
+  useEffect(() => {
+    const mapInstance = map.current;
+    if (!mapInstance) {
+      return;
+    }
+    const handlers = [
+      mapInstance.scrollZoom,
+      mapInstance.boxZoom,
+      mapInstance.dragRotate,
+      mapInstance.dragPan,
+      mapInstance.keyboard,
+      mapInstance.doubleClickZoom,
+      mapInstance.touchZoomRotate,
+      mapInstance.touchPitch,
+    ];
+    for (const handler of handlers) {
+      if (interactive) {
+        handler.enable();
+      } else {
+        handler.disable();
+      }
+    }
+    // the class carries the grab cursor styling
+    mapInstance
+      .getCanvasContainer()
+      .classList.toggle("maplibregl-interactive", interactive);
+
+    setCameraRestrictionBase(mapInstance, {
+      restricted: restrictCamera,
+      forced: forceRestrictCamera,
+      maxPitch,
+      interactive,
+    });
+  }, [interactive, restrictCamera, forceRestrictCamera, maxPitch, mountedMap]);
+
+  // Mirror the layer list onto the instance for consumers that hold the map
+  // but not this component's props. See utils/mapLayers.
+  useEffect(() => {
+    const mapInstance = map.current;
+    if (!mapInstance) {
+      return;
+    }
+    publishMapLayers(mapInstance, layers);
+  }, [layers, mountedMap]);
+
+  // Same for the three.js switch: a consumer building a second view of this
+  // map's content has to know whether the original draws its 3D layers as
+  // geometry, or the copy silently comes out flat. See utils/mapThreeParams.
+  useEffect(() => {
+    const mapInstance = map.current;
+    if (!mapInstance) {
+      return;
+    }
+    publishMapThreeRuntimeParams(mapInstance, threeRuntimeParams);
+  }, [threeRuntimeParams, mountedMap]);
+
+  // Keep the zoom bounds in sync when a host changes them after construction.
+  useEffect(() => {
+    const mapInstance = map.current;
+    if (!mapInstance) {
+      return;
+    }
+    mapInstance.setMinZoom(
+      minZoom !== undefined ? zoom256as512(minZoom) : null
+    );
+    mapInstance.setMaxZoom(zoom256as512(maxZoom));
+  }, [minZoom, maxZoom, mountedMap]);
+
+  // Helper: apply visual selection highlighting for a feature
+  const applyVisualSelection = useCallback(
+    (
+      mapInstance: maplibregl.Map,
+      featureId: { source: string; sourceLayer?: string; id?: string | number }
+    ) => {
+      try {
+        if (featureId.id != null) {
+          mapInstance.setFeatureState(
+            buildFeatureStateTarget(mapInstance, featureId),
+            { selected: true }
+          );
+        }
+        selectedFeaturesRef.current.add({
+          source: featureId.source,
+          sourceLayer: featureId.sourceLayer,
+          id: featureId.id,
+        });
+      } catch (error) {
+        console.error("Error applying feature selection:", error);
+      }
+    },
+    []
+  );
+
+  useClusterMarkers({
+    map: map.current,
+    geoJsonMetadata: clusteringEnabled ? geoJsonMetadata : [],
+  });
+
+  useHoverTooltip({
+    map: mountedMap,
+    layers: mapStyleLayers,
+    enabled: interactive,
+  });
+
+  const defaultLng = 7.150764;
+  const defaultLat = 51.256;
+  const defaultZoom = 15;
+
+  // Helper function to build WMS tile URL from layer config
+  const buildWMSTileUrl = (layerConfig: any): string => {
+    const {
+      url,
+      layers,
+      version = "1.1.1",
+      format = "image/png",
+      styles = "",
+    } = layerConfig;
+    const baseUrl = url.endsWith("?") ? url : url + "?";
+    return `${baseUrl}SERVICE=WMS&REQUEST=GetMap&VERSION=${version}&LAYERS=${layers}&FORMAT=${format}&styles=${styles}&TRANSPARENT=true&WIDTH=256&HEIGHT=256&crs=EPSG:3857&&srs=EPSG:3857&BBOX={bbox-epsg-3857}`;
+  };
+
+  // Helper function to build WMTS tile URL from layer config
+  const buildWMTSTileUrl = (layerConfig: any): string => {
+    const { url, layers } = layerConfig;
+    const baseUrl = url.endsWith("?") ? url : url + "?";
+    return `${baseUrl}SERVICE=WMTS&REQUEST=GetTile&VERSION=1.0.0&LAYER=${layers}&STYLE=default&FORMAT=image/png&TILEMATRIXSET=webmercator_hq&TILEMATRIX={z}&TILEROW={y}&TILECOL={x}`;
+  };
+
+  // Parse backgroundLayers string and build style.
+  // Returns { style, vectorBackgroundLayers } where vectorBackgroundLayers
+  // are vector-type backgrounds that need to be prepended to libreLayers.
+  const buildBackgroundStyle = (): {
+    style: StyleSpecification | null;
+    vectorBackgroundLayers: LibreLayer[];
+  } => {
+    if (backgroundLayers === undefined) {
+      // Prop not provided: use default background for backwards compat
+      return { style: WUPPERTAL_DEFAULT_STYLE, vectorBackgroundLayers: [] };
+    }
+    if (backgroundLayers === null || backgroundLayers === "") {
+      // Explicitly null or empty: no background layer. The terrain source is
+      // still included so the terrain toggle works without a background style.
+      return {
+        style: {
+          version: 8 as const,
+          sources: createTerrainSources(WUPPERTAL_CONFIG),
+          layers: backgroundColor
+            ? [
+                {
+                  id: "__carma-background",
+                  type: "background",
+                  paint: { "background-color": backgroundColor },
+                },
+              ]
+            : [],
+        },
+        vectorBackgroundLayers: [],
+      };
+    }
+
+    const layerSpecs = backgroundLayers.split("|");
+    const sources: Record<string, any> = {
+      ...createTerrainSources(WUPPERTAL_CONFIG),
+    };
+    const vectorBgLayers: LibreLayer[] = [];
+    const styleLayers: any[] = [];
+
+    layerSpecs.forEach((spec, index) => {
+      const [layerName, opacityStr] = spec.split("@");
+      const layerConfig = defaultLayerConf.namedLayers[layerName];
+
+      if (!layerConfig) {
+        console.warn(`Layer "${layerName}" not found in defaultLayerConf`);
+        return;
+      }
+
+      const opacity = opacityStr ? parseInt(opacityStr, 10) / 100 : 1.0;
+
+      // Vector backgrounds get handled as libreLayers (prepended before data layers)
+      if (layerConfig.type === "vector") {
+        vectorBgLayers.push({
+          type: "vector",
+          name: `bg-${layerName}`,
+          style: layerConfig.style,
+          opacity,
+        });
+        return;
+      }
+      const sourceId = `source-${layerName}-${index}`;
+      const layerId = `layer-${layerName}-${index}`;
+
+      // Build source based on layer type
+      let nonTiledMetadata: Record<string, unknown> | undefined;
+      if (layerConfig.type === "tiles") {
+        sources[sourceId] = {
+          type: "raster",
+          tiles: [layerConfig.url],
+          tileSize: 256,
+        };
+      } else if (layerConfig.type === "wmts") {
+        sources[sourceId] = {
+          type: "raster",
+          tiles: [buildWMTSTileUrl(layerConfig)],
+          tileSize: 256,
+        };
+      } else if (layerConfig.type === "wms") {
+        sources[sourceId] = {
+          type: "raster",
+          tiles: [buildWMSTileUrl(layerConfig)],
+          tileSize: 256,
+        };
+      } else if (
+        layerConfig.type === "wms-nt" ||
+        layerConfig.type === "wmts-nt"
+      ) {
+        // One GetMap per viewport, like Leaflet's NonTiledWMSLayer.
+        sources[sourceId] = createNonTiledImageSource();
+        nonTiledMetadata = createNonTiledMetadata({
+          url: layerConfig.url,
+          layers: layerConfig.layers,
+          version: layerConfig.version,
+          format: layerConfig.format,
+          transparent: true,
+          isWmts: layerConfig.type === "wmts-nt",
+        });
+      } else {
+        console.warn(
+          `Layer type "${layerConfig.type}" not supported for MapLibre`
+        );
+        return;
+      }
+
+      // Add layer
+      styleLayers.push({
+        id: layerId,
+        type: "raster",
+        source: sourceId,
+        paint: { "raster-opacity": opacity },
+        ...(nonTiledMetadata ? { metadata: nonTiledMetadata } : {}),
+      });
+    });
+
+    // If only vector backgrounds and no raster layers, use an empty style
+    // so the vector background becomes the sole base layer
+    if (styleLayers.length === 0 && vectorBgLayers.length > 0) {
+      return {
+        style: { version: 8 as const, sources, layers: [] },
+        vectorBackgroundLayers: vectorBgLayers,
+      };
+    }
+
+    // If no valid layers were parsed at all, return default style
+    if (styleLayers.length === 0) {
+      return { style: WUPPERTAL_DEFAULT_STYLE, vectorBackgroundLayers: [] };
+    }
+
+    return {
+      style: { version: 8, sources, layers: styleLayers },
+      vectorBackgroundLayers: vectorBgLayers,
+    };
+  };
+
+  const { style: backgroundStyle, vectorBackgroundLayers } = useMemo(
+    () => buildBackgroundStyle(),
+    [backgroundLayers, backgroundColor]
+  );
+  // With `deferInitialStyle` the merged-mode effect below composes this
+  // before the map exists; the mount effect then creates the map with it.
+  const {
+    initialStyle: deferredInitialStyle,
+    completeInitialStyle: setDeferredInitialStyle,
+  } = useInitialMapStyle({
+    backgroundStyle,
+    defer: deferInitialStyle && !map.current,
+    layerMode,
+  });
+
+  // Imperatively apply/clear raster paint overrides on background layers
+  // so that toggling night mode doesn't rebuild the entire style (which
+  // would reset vector layer visibility, selection state, etc.).
+  // Also updates the context mapStyle so the preview map stays in sync.
+  useEffect(() => {
+    if (!map.current || !map.current.isStyleLoaded()) return;
+
+    const defaults: Required<RasterPaintOverrides> = {
+      "raster-brightness-min": 0,
+      "raster-brightness-max": 1,
+      "raster-saturation": 0,
+      "raster-contrast": 0,
+      "raster-hue-rotate": 0,
+    };
+    const paint = backgroundRasterPaint ?? defaults;
+
+    for (const layer of map.current.getStyle().layers ?? []) {
+      if (layer.type !== "raster") continue;
+      for (const [key, value] of Object.entries(paint)) {
+        map.current.setPaintProperty(layer.id, key, value);
+      }
+    }
+
+    // Push the updated style into context so PreviewLibreMap picks it up
+    setMapStyle(map.current.getStyle());
+  }, [backgroundRasterPaint, setMapStyle]);
+
+  // Stable callbacks for useImperativeStyle
+  const handleImperativeMappingUpdate = useCallback(
+    (mapping: Record<string, string[] | string>) => {
+      mappingRef.current = mapping;
+    },
+    []
+  );
+  const handleImperativeGeoJsonMeta = useCallback(
+    (meta: Array<{ sourceId: string; uniqueColors: string[] }>) => {
+      geoJsonMetadataRef.current = meta;
+      setGeoJsonMetadata(meta);
+    },
+    [setGeoJsonMetadata]
+  );
+  const handleImperativeStyleReady = useCallback(
+    (style: StyleSpecification) => {
+      setMapStyle(style);
+    },
+    [setMapStyle]
+  );
+  const handleImperativeHidingRefresh = useCallback(() => {
+    hidingManagerRef.current?.refresh();
+    hidingManagerRef.current?.start();
+  }, []);
+
+  useImperativeStyle({
+    enabled: layerMode === "imperative",
+    map: map.current,
+    layers: mapStyleLayers,
+    backgroundStyle,
+    vectorBackgroundLayers,
+    clusteringEnabled,
+    markerSymbolSize,
+    overrideGlyphs,
+    filterFunction,
+    onMappingUpdate: handleImperativeMappingUpdate,
+    onGeoJsonMetadataUpdate: handleImperativeGeoJsonMeta,
+    onStyleReady: handleImperativeStyleReady,
+    onHidingManagerRefresh: handleImperativeHidingRefresh,
+    debugLog,
+  });
+
+  useEffect(() => {
+    // Deferred: the merged-mode effect delivers the first composed style.
+    if (deferInitialStyle && !deferredInitialStyle) return;
+    // Only initialize if we have a container and no map yet
+    if (mapContainer.current && !map.current) {
+      const hashParams = getHashParams();
+
+      const lng =
+        hashParams["lng"] !== undefined
+          ? parseFloat(hashParams["lng"])
+          : defaultLng;
+
+      const lat =
+        hashParams["lat"] !== undefined
+          ? parseFloat(hashParams["lat"])
+          : defaultLat;
+
+      const zoom =
+        hashParams["zoom"] !== undefined
+          ? zoom256as512(parseFloat(hashParams["zoom"])) // -1: hash stores 256px tile zoom, MapLibre uses 512px
+          : defaultZoom;
+
+      // orientation is written under the short url aliases (b/p); the canonical
+      // names are accepted too. Absent means flat, and the camera restriction
+      // (when active) clamps whatever comes in anyway.
+      const readHashAngle = (alias: string, name: string) => {
+        const raw = hashParams[alias] ?? hashParams[name];
+        if (raw === undefined) return 0;
+        const parsed = parseFloat(raw);
+        return Number.isFinite(parsed) ? parsed : 0;
+      };
+      const bearing = readHashAngle("b", "bearing");
+      const pitch = readHashAngle("p", "pitch");
+
+      const forceAllRequests = isPageCacheForced();
+      const mapInstance = new maplibregl.Map({
+        container: mapContainer.current,
+        style: deferredInitialStyle ?? backgroundStyle,
+        center: [lng, lat],
+        zoom: zoom,
+        bearing,
+        pitch,
+        minZoom: minZoom !== undefined ? zoom256as512(minZoom) : undefined,
+        maxZoom: zoom256as512(maxZoom),
+        maxPitch: restrictCamera || forceRestrictCamera ? 0 : maxPitch,
+        attributionControl: false,
+        interactive,
+        refreshExpiredTiles,
+        ...(maxCanvasSize ? { maxCanvasSize } : {}),
+        canvasContextAttributes: preserveDrawingBuffer
+          ? { preserveDrawingBuffer: true }
+          : undefined,
+        // `cache=forced` in the url: every request from the http cache
+        // whatever its age, for a show that cycles through the same views; a
+        // style marked `carmaConf.cache: "forced"` asks the same for its own
+        // sources (`forcedCache.ts`)
+        transformRequest: (url: string) =>
+          forceAllRequests || isForcedCacheUrl(url)
+            ? { url, cache: "force-cache" as const }
+            : { url },
+      });
+      map.current = mapInstance;
+
+      setCameraRestrictionBase(mapInstance, {
+        restricted: restrictCamera,
+        forced: forceRestrictCamera,
+        maxPitch,
+        interactive,
+      });
+      // published here as well as in the effect below, so a consumer that gets
+      // the instance through setLibreMap can read the layers straight away
+      // instead of waiting a render for the effect
+      publishMapLayers(mapInstance, layers);
+      publishMapThreeRuntimeParams(mapInstance, threeRuntimeParams);
+      setLibreMap?.(mapInstance);
+      setContextMap(mapInstance);
+      setMountedMap(mapInstance);
+      if (exposeMapToWindow || import.meta.env?.DEV) {
+        // Always exposed in dev builds: the perf and shadow debugging flows
+        // drive the map from the console.
+        (window as unknown as Record<string, unknown>).__carmaMap = mapInstance;
+      }
+
+      // Surface MapLibre-internal errors (style validation, tile loading, worker
+      // failures, etc.) so they are never silently swallowed. This listener is
+      // unconditional on purpose: MapLibre only falls back to its own
+      // console.error while *nothing* listens for "error", and
+      // LayerLoadingTracker always listens (it reads sourceId off the event).
+      // Gating this on logErrors therefore made errors it does not own — a
+      // rejected style above all — vanish without a trace. logErrors now only
+      // decides how much of the event is printed.
+      mapInstance.on("error", (e) => {
+        const sourceId = (e as unknown as { sourceId?: string }).sourceId ?? "";
+        const error = (e as unknown as { error?: Error }).error;
+        console.error("[MAPLIBRE]", sourceId, error ?? e);
+        if (logErrors) {
+          console.error("[MAPLIBRE] full event", e);
+        }
+      });
+
+      mapInstance.on("click", async (e) => {
+        // Selection fully disabled (e.g. host app is in a custom interaction
+        // mode like terra-draw measurement). Skip everything: 3D raycast,
+        // visual selection, gazetteer info, context updates. Other click
+        // listeners (terra-draw etc.) still fire — maplibre fires events to
+        // all registered handlers regardless of order.
+        if (!selectionEnabledRef.current) return;
+
+        // an addon that draws its own pickable things has answered this
+        // click before it reached MapLibre; see clickClaims.ts
+        if (isClickClaimed(e.originalEvent)) return;
+
+        // ── 3D raycast: check 3D layers before 2D ─────────────
+        const threeLayers = get3dLayers(mapInstance);
+        if (threeLayers.length > 0) {
+          console.log(
+            "[3D-SELECT] click at",
+            e.lngLat,
+            "3D layers:",
+            threeLayers.length
+          );
+
+          // Raycast ALL layers and pick the closest hit by distance
+          let bestHitLayer: (typeof threeLayers)[0] | null = null;
+          let bestResult: ReturnType<(typeof threeLayers)[0]["raycast"]> = null;
+          let bestDist = Infinity;
+
+          for (const threeLayer of threeLayers) {
+            const result = threeLayer.raycast(e.point.x, e.point.y);
+            // [3D-SELECT] per-layer raycast log suppressed
+            if (result && result.resolvedSourceIndex != null) {
+              const dist = result.hitDistance ?? Infinity;
+              if (dist < bestDist) {
+                bestDist = dist;
+                bestHitLayer = threeLayer;
+                bestResult = result;
+              }
+            }
+          }
+
+          if (
+            bestHitLayer &&
+            bestResult &&
+            bestResult.resolvedSourceIndex != null
+          ) {
+            // Before accepting the 3D hit, check if there's a 2D symbol
+            // feature at the click point. Symbol layers (POI icons/text)
+            // render visually above 3D layers, so they should win clicks.
+            const hits2d = mapInstance.queryRenderedFeatures(e.point);
+            // queryRenderedFeatures returns hits in visual order (top first).
+            // If the topmost hit has a layerMapping, it's a selectable feature
+            // rendered above the 3D layer, so let the 2D path handle the click.
+            // If the topmost 2D hit is from a LIBRE_LAYERS sub-style (has
+            // layer-id metadata) but NOT from a source that has a 3D layer,
+            // it renders above the 3D objects, so let 2D selection win.
+            // Check if any 2D hit comes from a layer positioned after all
+            // 3D source layers in the style stack. Such layers render visually
+            // above the 3D objects and should win the click.
+            const styleLayers = mapInstance.getStyle()?.layers ?? [];
+            const threeSources = new Set(
+              threeLayers.map((l) => l._config.sourceId)
+            );
+            let lastThreeSourceIdx = -1;
+            for (let i = 0; i < styleLayers.length; i++) {
+              const src = (styleLayers[i] as { source?: string }).source;
+              if (src && threeSources.has(src)) lastThreeSourceIdx = i;
+            }
+            const hitAbove3d =
+              lastThreeSourceIdx >= 0 &&
+              hits2d.some((f) => {
+                const idx = styleLayers.findIndex((sl) => sl.id === f.layer.id);
+                return idx > lastThreeSourceIdx;
+              });
+            if (hitAbove3d) {
+              // Let the 2D selection path handle this click
+              threeLayers.forEach((l) => l.unhighlight());
+            }
+
+            if (!hitAbove3d) {
+              const threeLayer = bestHitLayer;
+              const result = bestResult;
+              // [3D-SELECT] closest hit log suppressed
+
+              // 3D hit detected: takes priority over 2D
+              clearVisualSelection(mapInstance);
+              setSelectedFeature(null);
+              mapSelectionCtxRef.current.clearSelection();
+
+              // Unhighlight all 3D layers, then highlight the hit one
+              threeLayers.forEach((l) => l.unhighlight());
+              threeLayer.highlight(result.resolvedSourceIndex);
+
+              if (result.sourceFeature) {
+                const sf = result.sourceFeature;
+                const featureId = {
+                  source: sf.source,
+                  sourceLayer: sf.sourceLayer,
+                  id: sf.id,
+                };
+                // [3D-SELECT] forwarding + properties logs suppressed
+
+                if (sf.id != null) {
+                  applyVisualSelection(mapInstance, featureId);
+                }
+
+                // Build synthetic MapGeoJSONFeature for createFeature
+                const carmaConf3d = getCarmaConfFromStyle(
+                  mapInstance,
+                  sf.sourceLayer
+                );
+                const syntheticFeature = {
+                  type: "Feature" as const,
+                  geometry: sf.geometry ?? {
+                    type: "Point" as const,
+                    coordinates: [0, 0],
+                  },
+                  properties: { ...sf.properties },
+                  id: sf.id,
+                  source: sf.source,
+                  sourceLayer: sf.sourceLayer,
+                  layer: {
+                    id: threeLayer.id,
+                    metadata: carmaConf3d ? { carmaConf: carmaConf3d } : {},
+                  },
+                  state: {},
+                } as maplibregl.MapGeoJSONFeature;
+
+                // Find layerMapping using the same keys as the 2D handler
+                const layerId3d = (carmaConf3d as Record<string, unknown>)?.[
+                  "layer-id"
+                ] as string | undefined;
+
+                // Fallback: scan style layers with matching source for a layer-id
+                let fallbackLayerId: string | undefined;
+                if (!layerId3d) {
+                  const style = mapInstance.getStyle();
+                  if (style?.layers) {
+                    for (const sl of style.layers) {
+                      if ("source" in sl && sl.source === sf.source) {
+                        const slMeta = sl.metadata as
+                          | Record<string, unknown>
+                          | undefined;
+                        const lid = slMeta?.["layer-id"] as string | undefined;
+                        if (lid && mappingRef.current[lid]) {
+                          fallbackLayerId = lid;
+                          break;
+                        }
+                      }
+                    }
+                  }
+                }
+
+                // [3D-SELECT] mapping lookup log suppressed
+                const layerMapping3d =
+                  mappingRef.current[layerId3d ?? ""] ||
+                  mappingRef.current[fallbackLayerId ?? ""] ||
+                  mappingRef.current[sf.source] ||
+                  mappingRef.current[sf.sourceLayer ?? ""];
+
+                if (disableInternalSelectionRef.current) {
+                  // Host owns selection, so the engine builds no feature and
+                  // pushes no context. The hit still has to reach the host, or
+                  // clicking a 3D object stays silent while the same click on
+                  // the flat footprint opens an info box: hand it over in the
+                  // shape a 2D hit arrives in, carrying the style layer id the
+                  // host resolves its layer mapping from.
+                  const hostLayerId = layerId3d ?? fallbackLayerId;
+                  const hostFeature = {
+                    ...syntheticFeature,
+                    layer: {
+                      ...syntheticFeature.layer,
+                      metadata: {
+                        ...((syntheticFeature.layer.metadata ?? {}) as Record<
+                          string,
+                          unknown
+                        >),
+                        ...(hostLayerId ? { "layer-id": hostLayerId } : {}),
+                      },
+                    },
+                  } as maplibregl.MapGeoJSONFeature;
+                  // The click cleared the shared selection context further up,
+                  // and the watcher on that context reacts to the cleared
+                  // version by wiping the visual selection this handler has
+                  // just applied. Claiming the version keeps the highlight:
+                  // the host's own selection push bumps it again afterwards,
+                  // which is what the 2D path relies on too.
+                  lastHandledVersionRef.current =
+                    mapSelectionCtxRef.current.selectionVersion + 1;
+                  enrichHitsWithCarmaInfo(mapInstance, [hostFeature]);
+                  onSelectionChangedRef.current?.({
+                    hits: [hostFeature],
+                    hit: hostFeature,
+                    latlng: e.lngLat,
+                  });
+                } else if (layerMapping3d) {
+                  const feature = await createFeature(
+                    syntheticFeature,
+                    layerMapping3d,
+                    mapInstance,
+                    useRouting,
+                    openDatasheetRef.current
+                  );
+                  if (feature) {
+                    setSelectedFeature(feature);
+                    mapSelectionCtxRef.current.setSelectedFeature(feature);
+                    mapSelectionCtxRef.current.selectFeature(
+                      featureId,
+                      syntheticFeature
+                    );
+                    lastHandledVersionRef.current =
+                      mapSelectionCtxRef.current.selectionVersion + 1;
+                    onFeatureSelect?.(feature, featureId);
+                  }
+                } else {
+                  console.log(
+                    "[3D-SELECT] no layerMapping found, infobox skipped"
+                  );
+                }
+              } else {
+                console.log(
+                  "[3D-SELECT] 3D hit but source feature not resolved"
+                );
+              }
+              return; // skip 2D selection
+            } // end if (!hitAbove3d)
+          }
+        }
+        // ── end 3D raycast ────────────────────────────────────
+
+        // No 3D hit: clear any 3D highlights
+        const threeLayers2d = get3dLayers(mapInstance);
+        threeLayers2d.forEach((l) => l.unhighlight());
+
+        // Query with terrain fix (suppresses terrain state so fill-extrusion features
+        // are returned correctly, then restores)
+        const hasTerrain = !!(mapInstance as any).terrain;
+        const hits = queryFeaturesWithTerrainFix(mapInstance, e.point);
+        const queryPoint = hasTerrain
+          ? new maplibregl.Point(e.point.x, e.point.y)
+          : e.point;
+
+        const filteredHits = hits.filter((hit) => {
+          return (
+            !ownLayerId(hit).includes("selection") &&
+            !ownLayerId(hit).includes("cluster") &&
+            !SELECTION_OVERLAY_LAYER_IDS.includes(hit.layer.id) &&
+            !isNonSelectable(hit)
+          );
+        });
+
+        const clusterHit = hits.find((hit) => hit.properties?.cluster === true);
+        if (
+          clusterHit &&
+          clusterHit.geometry.type === "Point" &&
+          (filteredHits.length === 0 ||
+            hits.indexOf(clusterHit) < hits.indexOf(filteredHits[0]))
+        ) {
+          const clusterSource = mapInstance.getSource(clusterHit.source);
+          if (clusterSource && "getClusterExpansionZoom" in clusterSource) {
+            try {
+              const expansionZoom = await (
+                clusterSource as maplibregl.GeoJSONSource
+              ).getClusterExpansionZoom(clusterHit.properties.cluster_id);
+              mapInstance.easeTo({
+                center: clusterHit.geometry.coordinates as [number, number],
+                zoom: Math.min(expansionZoom, mapInstance.getMaxZoom()),
+              });
+              return;
+            } catch (error) {
+              console.warn("[CLUSTER CLICK] expansion zoom failed", error);
+            }
+          }
+        }
+
+        // Stamp effective sourceLayer on geojson hits whose native
+        // sourceLayer is undefined; the convention for FCs that mirror a
+        // vector-tile schema is properties._sourceLayer. Downstream
+        // selection code, sidebar lookups, and forwarding all read
+        // feature.sourceLayer.
+        for (const hit of filteredHits) stampSourceLayerFromProperty(hit);
+        enrichHitsWithCarmaInfo(mapInstance, filteredHits);
+        onSelectionChangedRef.current?.({
+          hits: filteredHits,
+          hit: filteredHits[0],
+          latlng: e.lngLat,
+        });
+
+        console.log(
+          "[TERRAIN CLICK]",
+          JSON.stringify({
+            screenPoint: { x: e.point.x, y: e.point.y },
+            queryPoint: { x: queryPoint.x, y: queryPoint.y },
+            hasTerrain,
+            camera: {
+              zoom: mapInstance.getZoom(),
+              pitch: mapInstance.getPitch(),
+              bearing: mapInstance.getBearing(),
+              center: mapInstance.getCenter(),
+            },
+            rawHits: hits.length,
+            rawHitLayers: hits.map((h) => h.layer.id),
+            filteredHits: filteredHits.length,
+            filteredHitLayers: filteredHits.map((h) => ({
+              layer: h.layer.id,
+              type: h.layer.type,
+              source: h.source,
+              id: h.id,
+            })),
+          })
+        );
+
+        // Remember what was selected before this click, so a click on the
+        // same feature can zoom to it instead of only reselecting it
+        const previousSelection = Array.from(selectedFeaturesRef.current);
+
+        // Clear previous visual selection
+        clearVisualSelection(mapInstance);
+        setSelectedFeature(null);
+        mapSelectionCtxRef.current.clearSelection();
+
+        if (filteredHits.length > 0) {
+          // Honor the selectFromHits contract: when a handler is supplied it
+          // decides what (if anything) to select. Returning undefined means
+          // "clear selection" — do NOT fall back to filteredHits[0], or a
+          // click that the app deliberately rejected (e.g. a basemap-only hit)
+          // would still select the topmost background feature. The default
+          // (first hit) only applies when no handler is provided.
+          const selectedVectorFeature = selectFromHitsRef.current
+            ? selectFromHitsRef.current(filteredHits)
+            : filteredHits[0];
+          if (!selectedVectorFeature) {
+            // Selection was already cleared above; nothing to select.
+            return;
+          }
+          const featureId = {
+            source: selectedVectorFeature.source,
+            sourceLayer: selectedVectorFeature.sourceLayer,
+            id: selectedVectorFeature.id,
+          };
+
+          // Try to get layer ID from metadata (for vector layers)
+          const layerId = selectedVectorFeature.layer?.metadata?.["layer-id"];
+
+          // Try to get mapping by layer ID first, then by source (for geojson layers)
+          let layerMapping =
+            mappingRef.current[layerId] ||
+            mappingRef.current[selectedVectorFeature.source];
+
+          // Resolve property target if configured in carmaConf
+          const carmaConf = getCarmaConf(selectedVectorFeature);
+          console.debug(
+            "[LibreMap] Click on layer:",
+            selectedVectorFeature.layer?.id
+          );
+          console.debug("[LibreMap] carmaConf:", carmaConf);
+          console.debug(
+            "[LibreMap] feature.id:",
+            selectedVectorFeature.id,
+            "type:",
+            typeof selectedVectorFeature.id
+          );
+
+          if (carmaConf?.propertyTarget && selectedVectorFeature.id != null) {
+            console.debug(
+              "[LibreMap] Resolving propertyTarget:",
+              carmaConf.propertyTarget
+            );
+            const targetProps = resolvePropertyTarget(
+              mapInstance,
+              selectedVectorFeature.id,
+              carmaConf.propertyTarget
+            );
+            console.debug("[LibreMap] targetProps result:", targetProps);
+            if (targetProps) {
+              selectedVectorFeature.properties = {
+                ...selectedVectorFeature.properties,
+                targetProperties: targetProps,
+              };
+
+              // If no mapping found for this layer, try to use mapping from target layer
+              if (!layerMapping) {
+                const [targetSource, targetSourceLayer] =
+                  carmaConf.propertyTarget.split(".");
+                console.debug("[LibreMap] Looking for mapping in:", {
+                  targetSource,
+                  targetSourceLayer,
+                  mappingKeys: Object.keys(mappingRef.current),
+                });
+                // Try various mapping lookups for the target
+                layerMapping =
+                  mappingRef.current[targetSourceLayer] || // e.g., "landparcel"
+                  mappingRef.current[targetSource] || // e.g., "alkis"
+                  mappingRef.current[carmaConf.propertyTarget]; // e.g., "alkis.landparcel"
+              }
+            }
+          } else if (!carmaConf) {
+            console.debug("[LibreMap] No carmaConf found in layer metadata");
+          } else if (!carmaConf.propertyTarget) {
+            console.debug("[LibreMap] No propertyTarget in carmaConf");
+          }
+
+          let feature = null;
+          if (!disableInternalSelectionRef.current && layerMapping) {
+            feature = await createFeature(
+              selectedVectorFeature,
+              layerMapping,
+              mapInstance,
+              useRouting,
+              openDatasheetRef.current
+            );
+          }
+
+          // Apply visual selection if we have a mapping OR if selectionEnabled is true
+          if (layerMapping || selectionEnabled) {
+            applyVisualSelection(mapInstance, featureId);
+
+            // Apply selection forwarding to related layers (if configured in carmaConf)
+            const forwardedTo = applySelectionForwarding(
+              mapInstance,
+              featureId as FeatureIdentifier,
+              true,
+              selectedVectorFeature
+            );
+            // Track forwarded features for cleanup
+            if (forwardedTo.length > 0) {
+              selectedFeaturesRef.current.forEach((f) => {
+                if (f.source === featureId.source && f.id === featureId.id) {
+                  f.forwardedTo = forwardedTo;
+                }
+              });
+            }
+          }
+
+          if (feature) {
+            setSelectedFeature(feature);
+            mapSelectionCtxRef.current.setSelectedFeature(feature);
+            mapSelectionCtxRef.current.selectFeature(
+              featureId,
+              selectedVectorFeature
+            );
+            lastHandledVersionRef.current =
+              mapSelectionCtxRef.current.selectionVersion + 1;
+            onFeatureSelect?.(feature, featureId);
+
+            const wasSelected =
+              featureId.id != null &&
+              previousSelection.some(
+                (f) => f.source === featureId.source && f.id === featureId.id
+              );
+            if (zoomOnSelectedFeatureClickRef.current && wasSelected) {
+              utils.zoomToFeature({
+                selectedFeature: toInfoboxFeature(feature),
+                libreMap: mapInstance,
+              });
+            }
+          } else if (selectionEnabled && !disableInternalSelectionRef.current) {
+            // No feature/mapping but selection enabled: still update context
+            mapSelectionCtxRef.current.selectFeature(
+              featureId,
+              selectedVectorFeature
+            );
+            lastHandledVersionRef.current =
+              mapSelectionCtxRef.current.selectionVersion + 1;
+            onFeatureSelect?.(null, featureId);
+          }
+        } else {
+          if (
+            gazetteerInfoOnClickRef.current &&
+            useRoutingRef.current &&
+            selectionRef.current
+          ) {
+            const pos = proj4(proj4crs3857def, proj4crs4326def, [
+              selectionRef.current.x,
+              selectionRef.current.y,
+            ]);
+            setSelectedFeature(
+              buildGazetteerRouteInfobox(pos, selectionRef.current.string)
+            );
+          }
+        }
+      });
+
+      const checkVectorSourcesReady = () => {
+        const style = mapInstance.getStyle();
+        if (!style || !style.sources) {
+          vectorSourcesReadyRef.current = false;
+          return;
+        }
+
+        const vectorSources = Object.entries(style.sources).filter(
+          ([_, source]: [string, any]) => source.type === "vector"
+        );
+
+        if (vectorSources.length === 0) {
+          vectorSourcesReadyRef.current = false;
+          return;
+        }
+
+        const allLoaded = vectorSources.every(([sourceId]) =>
+          mapInstance.isSourceLoaded(sourceId)
+        );
+
+        vectorSourcesReadyRef.current = allLoaded;
+      };
+
+      mapInstance.on("sourcedata", (e) => {
+        if (e.isSourceLoaded && e.source.type === "vector") {
+          checkVectorSourcesReady();
+        }
+      });
+
+      mapInstance.on("idle", () => {
+        isIdleRef.current = true;
+      });
+
+      // Initialize HidingForwardingManager for collision-based visibility sync
+      hidingManagerRef.current = new HidingForwardingManager(mapInstance);
+
+      detachNonTiledRef.current = attachNonTiledWmsUpdater(mapInstance);
+
+      mapInstance.on("move", () => {
+        if (layers?.find((layer) => layer.type === "vector")) {
+          vectorSourcesReadyRef.current = false;
+        } else {
+          vectorSourcesReadyRef.current = true;
+        }
+        isIdleRef.current = false;
+      });
+    }
+
+    return () => {
+      hidingManagerRef.current?.destroy();
+      hidingManagerRef.current = null;
+      detachNonTiledRef.current?.();
+      detachNonTiledRef.current = null;
+      if (map.current) {
+        map.current.remove();
+        map.current = null;
+        setContextMap(null);
+        setMountedMap(null);
+      }
+    };
+    // `deferredInitialStyle` is set once; the guard above keeps the map alive.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [deferredInitialStyle]);
+
+  useEffect(() => {
+    const composingInitialStyle =
+      deferInitialStyle && !map.current && !deferredInitialStyle;
+    if (!map.current && !composingInitialStyle) return;
+    // Skip merged-mode style updates when imperative mode is active
+    if (layerMode === "imperative") {
+      if (debugLog)
+        console.log(
+          "[LAYER_MODE] merged-mode effect SKIPPED (imperative active)"
+        );
+      return;
+    }
+    if (debugLog) console.log("[LAYER_MODE] merged-mode effect RUNNING");
+
+    let aborted = false;
+    let cancelTilesetRemoval: (() => void) | undefined;
+    // Layers flagged busy for the style rebuild. Kept outside the try so the
+    // catch below can release them; otherwise an unexpected throw leaves every
+    // layer button spinning forever.
+    let preparedLayerIds: string[] = [];
+    const trackerRef = {
+      current: null as ReturnType<typeof ensureLayerLoadingTracker> | null,
+    };
+
+    const updateMapStyle = async () => {
+      try {
+        // Prepend vector background layers before data layers
+        const effectiveLayers =
+          vectorBackgroundLayers.length > 0
+            ? [...vectorBackgroundLayers, ...(mapStyleLayers || [])]
+            : mapStyleLayers;
+
+        if (effectiveLayers) {
+          // The style (re)build below refetches vector styles before any source
+          // exists, so flag the affected layers as busy for that window.
+          const loadingTracker = map.current
+            ? ensureLayerLoadingTracker(map.current)
+            : null;
+          trackerRef.current = loadingTracker;
+          preparedLayerIds = effectiveLayers
+            .map((layer) => layer.carmaLayerId)
+            .filter((id): id is string => Boolean(id));
+          for (const carmaLayerId of preparedLayerIds) {
+            loadingTracker?.markPreparing(carmaLayerId);
+          }
+
+          // Show initial progress only on first load or when layers change
+          const geoJsonLayers = effectiveLayers.filter(
+            (layer) => layer.type === "geojson"
+          );
+
+          // Check if geojson layers have changed by comparing with previous metadata
+          const hasGeoJsonLayersChanged =
+            geoJsonLayers.length !== geoJsonMetadataRef.current.length;
+
+          if (hasGeoJsonLayersChanged) {
+            isInitialGeoJsonLoad.current = true;
+          }
+
+          if (
+            geoJsonLayers.length > 0 &&
+            onProgressUpdate &&
+            isInitialGeoJsonLoad.current
+          ) {
+            onProgressUpdate({ current: 0, total: geoJsonLayers.length });
+          }
+
+          // Update with vector styles and background layers
+          const {
+            style: baseStyle,
+            geoJsonMetadata,
+            layerSources,
+            failedLayerIds,
+          } = await vectorStylesToMapLibreStyle({
+            layers: effectiveLayers,
+            backgroundStyle,
+            clusteringEnabled,
+            overrideGlyphs,
+            filterPresentation,
+            selectionOnTop,
+          });
+
+          // Bail out if effect was cleaned up during async work (StrictMode double-fire)
+          if (aborted) return;
+
+          // Store unscaled layers for live symbol-size updates
+          baseStyleLayersRef.current = baseStyle.layers
+            ? JSON.parse(JSON.stringify(baseStyle.layers))
+            : [];
+
+          // Apply marker symbol size scaling and raster paint (use refs for
+          // current values since this is async)
+          const style = applyRasterPaint(
+            applyGeoJsonFeatureFilter(
+              styleManipulation(markerSymbolSizeRef.current, baseStyle),
+              geoJsonFeatureFilter
+            ),
+            backgroundRasterPaintRef.current
+          );
+
+          // Store geojson metadata for pie chart rendering (local ref and context)
+          geoJsonMetadataRef.current = geoJsonMetadata;
+          setGeoJsonMetadata(geoJsonMetadata);
+
+          // Save terrain state before setting style
+          const currentTerrain = map.current?.getTerrain();
+
+          // Terrain must not show up as a change in the style diff. MapLibre
+          // 5.18.0 applies that one operation with the Style as `this` instead
+          // of the Map (`Style._getOperationsToPerform`, case 'setTerrain'),
+          // so it throws on `this.style._checkLoaded()`, `setState` gives up,
+          // and `setStyle` falls back to rebuilding the whole style: every
+          // source reloaded, the map repainted from nothing, for what would
+          // otherwise be a single `setPaintProperty`. The styles built here
+          // never name a terrain while the map may well have one on, which put
+          // that command into every single diff. The map's terrain is what
+          // counts anyway, restored further down, so the style is handed
+          // exactly what the map already has.
+          let styleForMap = style;
+          if (currentTerrain) {
+            styleForMap = { ...style, terrain: currentTerrain };
+          } else if (style.terrain) {
+            const { terrain: _unusedTerrain, ...withoutTerrain } = style;
+            styleForMap = withoutTerrain as StyleSpecification;
+          }
+
+          const mapInstance = map.current;
+          if (!mapInstance && composingInitialStyle) {
+            // The mount effect creates the map with exactly this style; the
+            // effect re-runs once the map exists and finds nothing to change.
+            setDeferredInitialStyle(styleForMap);
+          }
+          if (mapInstance) {
+            notifyMapLibreStyleCompositionStarted(mapInstance);
+            mapInstance.setStyle(styleForMap);
+            // setStyle installs the complete layer graph synchronously. Mesh
+            // integrations may already be mounted from the previous style,
+            // or mount just after detectedTiles3dConfigs updates below; the
+            // revision signal handles both without a styledata feedback loop.
+            notifyMapLibreStyleCompositionReady(mapInstance);
+          }
+          if (debugLog)
+            console.log("[LAYER_MODE] merged: derived style", style);
+
+          loadingTracker?.reset();
+          preparedLayerIds = [];
+          for (const registration of layerSources) {
+            loadingTracker?.registerSources(
+              registration.carmaLayerId,
+              registration.sourceIds
+            );
+          }
+          // Layers whose data could not be fetched contributed no sources, so
+          // they need an explicit failed state instead of looking idle.
+          for (const carmaLayerId of failedLayerIds) {
+            loadingTracker?.markFailed(carmaLayerId);
+          }
+
+          // Update context with the full map style
+          setMapStyle(style);
+
+          // Detect carma3d configs from style metadata and explicit layer props
+          {
+            const configs: Carma3dConfig[] = [];
+            const sourceToIdx = new Map<string, number>();
+
+            // Tilesets are collected in the same pass over the layers below.
+            // They carry their own geometry and their own level of detail, so
+            // unlike the three.js configs they name no source, and the layer
+            // they hang on exists only to carry them through the style merge,
+            // which keeps layers and sources and drops everything else.
+            const tiles3dConfigs: Array<
+              Tiles3dConfig & { layerOpacity: number }
+            > = [];
+
+            // What opacity the host asked of each source's layer. A three.js
+            // layer has no paint properties, so the layer bar's slider cannot
+            // reach it the way it reaches a 2D layer; carrying the number here
+            // is what lets the 3D layer honour the same slider. `layerSources`
+            // already maps a host layer id to the sources it produced, so this
+            // only has to turn that around.
+            const opacityBySource = new Map<string, number>();
+            for (const registration of layerSources) {
+              const owner = (effectiveLayers ?? []).find(
+                (candidate) =>
+                  candidate.carmaLayerId === registration.carmaLayerId
+              );
+              const opacity =
+                owner && "opacity" in owner ? owner.opacity : undefined;
+              if (typeof opacity !== "number") {
+                continue;
+              }
+              for (const sourceId of registration.sourceIds) {
+                opacityBySource.set(sourceId, opacity);
+              }
+            }
+
+            for (const layer of style.layers ?? []) {
+              const meta = (layer as any).metadata?.carmaConf?.["3d"];
+              if (!meta) continue;
+
+              if (meta.renderMode === "tiles3d") {
+                if (
+                  meta.tilesetUrl &&
+                  !tiles3dConfigs.some(
+                    (existing) => existing.tilesetUrl === meta.tilesetUrl
+                  )
+                ) {
+                  // A tileset names no source, so the opacity cannot be looked
+                  // up the way the three.js configs look theirs up. The style
+                  // merge writes it onto every layer it produces.
+                  const carried = (layer as any).metadata?.["layer-opacity"];
+                  tiles3dConfigs.push({
+                    ...(meta as Tiles3dConfig),
+                    layerOpacity: typeof carried === "number" ? carried : 1,
+                  });
+                }
+                continue;
+              }
+
+              // A layer that says nothing but `skipIn2D` asks to be hidden
+              // while the 3D layer is up; it does not describe one. Letting it
+              // define the config would hand the whole source a configuration
+              // with no render mode, and the layer that really carries one
+              // would be passed over as already known. The markers are
+              // collected in a second pass below, which also frees a style
+              // from having to list its configuration layer first.
+              if (!Object.keys(meta).some((key) => key !== "skipIn2D")) {
+                continue;
+              }
+
+              const sourceId = meta.sourceId ?? (layer as any).source;
+              const sourceLayer =
+                meta.sourceLayer ?? (layer as any)["source-layer"];
+              if (!sourceId) continue;
+
+              if (!sourceToIdx.has(sourceId)) {
+                sourceToIdx.set(sourceId, configs.length);
+                configs.push({
+                  ...meta,
+                  sourceId,
+                  sourceLayer,
+                  layerOpacity: opacityBySource.get(sourceId) ?? 1,
+                  skipIn2DLayerIds: [],
+                });
+              }
+            }
+
+            // Which layers step aside while the 3D layer draws. Separate from
+            // the pass above so a marker counts wherever it sits in the style,
+            // before its source's configuration as well as after it.
+            for (const layer of style.layers ?? []) {
+              const meta = (layer as any).metadata?.carmaConf?.["3d"];
+              if (!meta?.skipIn2D) continue;
+              const sourceId = meta.sourceId ?? (layer as any).source;
+              const idx =
+                sourceId === undefined ? undefined : sourceToIdx.get(sourceId);
+              if (idx === undefined) continue;
+              configs[idx].skipIn2DLayerIds!.push((layer as any).id);
+            }
+
+            for (const l of effectiveLayers ?? []) {
+              const propConfig = (l as any).carma3d;
+              if (
+                propConfig?.sourceId &&
+                !sourceToIdx.has(propConfig.sourceId)
+              ) {
+                sourceToIdx.set(propConfig.sourceId, configs.length);
+                configs.push(propConfig);
+              }
+            }
+
+            setDetectedCarma3dConfigs(configs);
+            // A tileset that left the style stays mounted until the map has
+            // shown the restored style once. Removing the last mesh would
+            // otherwise blank the view while the basemap tiles are loading.
+            setDetectedTiles3dConfigs((previous) => {
+              const leaving = previous.filter(
+                (config) =>
+                  !tiles3dConfigs.some(
+                    (next) => next.tilesetUrl === config.tilesetUrl
+                  )
+              );
+              return [...tiles3dConfigs, ...leaving];
+            });
+            // Register once per composition, never from a React state updater.
+            cancelTilesetRemoval?.();
+            if (map.current) {
+              cancelTilesetRemoval = whenStyleShown(map.current, () => {
+                if (aborted) return;
+                setDetectedTiles3dConfigs((current) =>
+                  current.filter((config) =>
+                    tiles3dConfigs.some(
+                      (next) => next.tilesetUrl === config.tilesetUrl
+                    )
+                  )
+                );
+              });
+            }
+          }
+
+          // Refresh hiding forwarding manager with new style (after style is fully loaded)
+          // Use 'idle' event to ensure style is completely processed, not 'styledata' which fires early
+          const startHidingManager = () => {
+            hidingManagerRef.current?.refresh();
+            hidingManagerRef.current?.start();
+          };
+          map.current?.once("idle", startHidingManager);
+
+          // Add COG layers after style is loaded (requires addSource/addLayer, not setStyle).
+          // Use beforeId to insert at correct z-position based on effectiveLayers order.
+          const cogEntries = effectiveLayers
+            .map((l, i) => ({ layer: l, index: i }))
+            .filter((e) => e.layer.type === "cog");
+          if (cogEntries.length > 0 && map.current) {
+            const addCogLayers = () => {
+              if (!map.current) return;
+              const styleLayers = map.current.getStyle().layers || [];
+              cogEntries.forEach(({ layer, index: cogIndex }) => {
+                if (layer.type !== "cog" || !map.current) return;
+                const sourceId = `cog-source-${layer.name}`;
+                if (map.current.getSource(sourceId)) {
+                  map.current.removeLayer(`cog-layer-${layer.name}`);
+                  map.current.removeSource(sourceId);
+                }
+                // Find first style layer with z-index > cogIndex to insert before
+                let beforeId: string | undefined;
+                for (const sl of styleLayers) {
+                  const meta = (sl as any).metadata;
+                  if (
+                    meta &&
+                    typeof meta["z-index"] === "number" &&
+                    meta["z-index"] >= cogIndex
+                  ) {
+                    beforeId = sl.id;
+                    break;
+                  }
+                }
+                map.current.addSource(sourceId, {
+                  type: "raster",
+                  url: `cog://${layer.url}`,
+                  tileSize: 256,
+                });
+                map.current.addLayer(
+                  {
+                    id: `cog-layer-${layer.name}`,
+                    source: sourceId,
+                    type: "raster",
+                    paint: {
+                      "raster-opacity": layer.opacity ?? 1,
+                      ...layer.rasterPaint,
+                    },
+                  },
+                  beforeId
+                );
+              });
+            };
+            if (map.current.isStyleLoaded()) {
+              addCogLayers();
+            } else {
+              map.current.once("styledata", addCogLayers);
+            }
+          }
+
+          // Restore terrain after style is loaded if it was previously set
+          if (currentTerrain && map.current) {
+            const restoreTerrain = () => {
+              // Only when it was actually lost. Setting the same terrain again
+              // builds a new Terrain and RenderToTexture and fires `terrain`,
+              // which every 3D layer takes as a reason to rebuild.
+              if (map.current?.getTerrain()) return;
+              const terrainSrcId = WUPPERTAL_TERRAIN_SOURCE_ID;
+              if (terrainSrcId && map.current?.getSource(terrainSrcId)) {
+                map.current.setTerrain(currentTerrain);
+              }
+            };
+
+            if (map.current.isStyleLoaded()) {
+              restoreTerrain();
+            } else {
+              map.current.once("styledata", restoreTerrain);
+            }
+          }
+
+          // Get mapping for vector layers (only from user-provided layers, not backgrounds)
+          const vectorLayers = (mapStyleLayers || []).filter(
+            (layer) => layer.type === "vector"
+          );
+          let mapping = {};
+          if (vectorLayers.length > 0) {
+            mapping = await getVectorMapping(vectorLayers);
+          }
+
+          // Bail out if effect was cleaned up during async mapping fetch
+          if (aborted) return;
+
+          // Add mapping for geojson layers
+          geoJsonLayers.forEach((layer) => {
+            if (layer.infoboxMapping && layer.infoboxMapping.length > 0) {
+              // Mirror the name-based source id produced by styleBuilder so the
+              // by-source-id mapping key stays in sync (position-independent).
+              const sourceId = getGeoJsonSourceId(layer.name);
+              mapping[layer.name] = layer.infoboxMapping;
+              // Also map by source ID for easier lookup
+              mapping[sourceId] = layer.infoboxMapping;
+            }
+          });
+
+          mappingRef.current = mapping;
+
+          // Apply filter function after style is loaded
+          if (filterFunction && map.current) {
+            const applyFilter = () => {
+              if (map.current) {
+                filterFunction(map.current, mapStyleLayers);
+                // The style pushed above is unfiltered; push the filtered one
+                // so PreviewLibreMap doesn't show filtered-out features
+                setMapStyle(map.current.getStyle());
+              }
+            };
+
+            if (map.current.isStyleLoaded()) {
+              applyFilter();
+            } else {
+              map.current.once("styledata", applyFilter);
+            }
+          }
+
+          // Track progress for geojson layers
+          if (map.current && geoJsonMetadata.length > 0 && onProgressUpdate) {
+            const loadedSources = new Set<string>();
+
+            const handleStyleLoad = () => {
+              const trackSource = (sourceId: string) => {
+                if (loadedSources.has(sourceId)) return;
+                loadedSources.add(sourceId);
+                if (isInitialGeoJsonLoad.current) {
+                  onProgressUpdate({
+                    current: loadedSources.size,
+                    total: geoJsonMetadata.length,
+                  });
+
+                  if (loadedSources.size === geoJsonMetadata.length) {
+                    isInitialGeoJsonLoad.current = false;
+                  }
+                }
+              };
+
+              const handleData = (e: any) => {
+                const meta = geoJsonMetadata.find(
+                  ({ sourceId }) => e.sourceId === sourceId
+                );
+                if (!meta || !e.isSourceLoaded) return;
+                trackSource(meta.sourceId);
+              };
+
+              map.current!.on("data", handleData);
+
+              // Check sources that may have loaded before the listener was attached
+              for (const { sourceId } of geoJsonMetadata) {
+                if (map.current!.isSourceLoaded(sourceId)) {
+                  trackSource(sourceId);
+                }
+              }
+            };
+
+            if (map.current!.isStyleLoaded()) {
+              handleStyleLoad();
+            } else {
+              map.current!.once("styledata", handleStyleLoad);
+            }
+          } else if (onProgressUpdate && geoJsonMetadata.length === 0) {
+            onProgressUpdate({ current: 1, total: 1 });
+          }
+        } else {
+          // Only update background layers
+          if (aborted) return;
+          const paintedBackgroundStyle = applyRasterPaint(
+            backgroundStyle,
+            backgroundRasterPaintRef.current
+          );
+          if (composingInitialStyle) {
+            setDeferredInitialStyle(paintedBackgroundStyle);
+          }
+          map.current?.setStyle(paintedBackgroundStyle);
+          setMapStyle(paintedBackgroundStyle);
+          geoJsonMetadataRef.current = [];
+        }
+      } catch (error) {
+        if (aborted) return;
+        if (composingInitialStyle) setDeferredInitialStyle(backgroundStyle);
+        console.error("Error updating map style:", error);
+        // Release anything still flagged busy, so a failed rebuild shows the
+        // layers as failed rather than permanently loading.
+        for (const carmaLayerId of preparedLayerIds) {
+          trackerRef.current?.markFailed(carmaLayerId);
+        }
+        preparedLayerIds = [];
+      }
+    };
+
+    updateMapStyle();
+
+    return () => {
+      aborted = true;
+      cancelTilesetRemoval?.();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- markerSymbolSize handled by dedicated effect below
+  }, [
+    backgroundStyle,
+    vectorBackgroundLayers,
+    mapStyleLayers,
+    clusteringEnabled,
+    filterFunction,
+    geoJsonFeatureFilter,
+    layerMode,
+    deferInitialStyle,
+    deferredInitialStyle,
+    setDeferredInitialStyle,
+    filterPresentation,
+    selectionOnTop,
+  ]);
+
+  useEffect(() => {
+    if (
+      !map.current ||
+      layerMode === "imperative" ||
+      baseStyleLayersRef.current.length === 0
+    )
+      return;
+    applySymbolScalingToMap(
+      map.current,
+      markerSymbolSize,
+      baseStyleLayersRef.current
+    );
+
+    // Push the rescaled style into context so PreviewLibreMap picks it up
+    setMapStyle(map.current.getStyle());
+  }, [markerSymbolSize, layerMode, setMapStyle]);
+
+  const getLeafletMap = useCallback(() => {
+    const m = map.current;
+    if (!m) return null;
+    return {
+      setView: (center: { lat: number; lng: number }, zoom?: number) => {
+        if (typeof zoom === "number") m.setZoom(zoom256as512(zoom));
+        m.setCenter([center.lng, center.lat]);
+      },
+      panTo: (center: { lat: number; lng: number }) =>
+        m.panTo([center.lng, center.lat]),
+      setZoom: (zoom: number) => m.setZoom(zoom256as512(zoom)),
+      getCenter: () => m.getCenter(),
+      getBearing: () => m.getBearing(),
+      getPitch: () => m.getPitch(),
+      setBearing: (bearing: number) => m.setBearing(bearing),
+      setPitch: (pitch: number) => m.setPitch(pitch),
+      once: (type: string, fn: (...args: unknown[]) => void) =>
+        m.once(type, fn),
+    };
+  }, []);
+
+  const getLeafletZoom = useCallback(() => {
+    const m = map.current;
+    return m ? zoom512as256(m.getZoom()) : 12;
+  }, []);
+
+  const hashRoutingLabels = useMemo(
+    () => ({
+      writeLeafletLike: "LGM:2D:writeLocation",
+      topicMapLocation: "LGM:2D:location",
+    }),
+    []
+  );
+
+  // read through a ref so toggling the flag does not re-create the routing
+  // callback and with it the moveend subscription below
+  const hashWriteEnabledRef = useRef(hashWriteEnabled);
+  hashWriteEnabledRef.current = hashWriteEnabled;
+  const isHashWriteEnabled = useCallback(() => hashWriteEnabledRef.current, []);
+
+  const { handleTopicMapLocationChange } = useMapHashRouting({
+    getLeafletMap,
+    getLeafletZoom,
+    labels: hashRoutingLabels,
+    isHashWriteEnabled,
+  });
+
+  useEffect(() => {
+    const mapInstance = map.current;
+    if (!mapInstance) return;
+    const handleMoveEnd = () => {
+      const center = mapInstance.getCenter();
+      const zoom = zoom512as256(mapInstance.getZoom());
+      handleTopicMapLocationChange({
+        lat: center.lat,
+        lng: center.lng,
+        zoom,
+        bearing: mapInstance.getBearing(),
+        pitch: mapInstance.getPitch(),
+      });
+    };
+    mapInstance.on("moveend", handleMoveEnd);
+    return () => {
+      mapInstance && mapInstance.off("moveend", handleMoveEnd);
+    };
+  }, [handleTopicMapLocationChange, mountedMap]);
+
+  // Watch for external selection changes from MapSelectionContext
+  // (e.g., a list component calling selectFeature())
+  const {
+    selectionVersion,
+    selectedFeatureId: ctxSelectedFeatureId,
+    rawFeature: ctxRawFeature,
+  } = mapSelectionCtx;
+
+  useEffect(() => {
+    const mapInstance = map.current;
+    if (!mapInstance) return;
+
+    // Skip if we already handled this version (it was our own update)
+    if (selectionVersion <= lastHandledVersionRef.current) {
+      return;
+    }
+    lastHandledVersionRef.current = selectionVersion;
+
+    // If selection was cleared externally
+    if (!ctxSelectedFeatureId) {
+      clearVisualSelection(mapInstance);
+      setSelectedFeature(null);
+      return;
+    }
+
+    // Apply visual selection for the externally selected feature
+    clearVisualSelection(mapInstance);
+    setSelectedFeature(null);
+    applyVisualSelection(mapInstance, ctxSelectedFeatureId);
+
+    // If a raw feature was provided, run createFeature to get the processed result
+    if (ctxRawFeature) {
+      const layerId = ctxRawFeature.layer?.metadata?.["layer-id"];
+      // Try layer-id metadata first, then full source, then source prefix
+      // (namespaced sources use "prefix::originalSource" but mapping keys use just "prefix")
+      const source = ctxSelectedFeatureId.source;
+      const sourcePrefix = source?.includes("::")
+        ? source.split("::")[0]
+        : undefined;
+      const layerMapping =
+        mappingRef.current[layerId] ||
+        mappingRef.current[source] ||
+        (sourcePrefix ? mappingRef.current[sourcePrefix] : undefined);
+
+      console.log("[AA-DEBUG] LibreMap external watcher: layerMapping found", {
+        layerMapping: !!layerMapping,
+        source: ctxSelectedFeatureId?.source,
+        sourceLayer: ctxSelectedFeatureId?.sourceLayer,
+        hasOpenDatasheet: !!openDatasheetRef.current,
+      });
+      if (layerMapping && !disableInternalSelectionRef.current) {
+        void createFeature(
+          ctxRawFeature,
+          layerMapping,
+          mapInstance,
+          useRoutingRef.current,
+          openDatasheetRef.current
+        ).then((feature) => {
+          console.log(
+            "[AA-DEBUG] LibreMap external watcher: createFeature result",
+            { hasFeature: !!feature, datasheet: feature?.properties?.datasheet }
+          );
+          if (feature) {
+            setSelectedFeature(feature);
+            mapSelectionCtxRef.current.setSelectedFeature(feature);
+            onFeatureSelectRef.current?.(feature, ctxSelectedFeatureId);
+          }
+        });
+      }
+    }
+  }, [
+    selectionVersion,
+    ctxSelectedFeatureId,
+    ctxRawFeature,
+    clearVisualSelection,
+    applyVisualSelection,
+    mountedMap,
+  ]);
+
+  const waitForVectorSources = (
+    maxAttempts = 150,
+    interval = 20
+  ): Promise<boolean> => {
+    return new Promise((resolve) => {
+      let attempts = 0;
+      const check = () => {
+        if (vectorSourcesReadyRef.current || isIdleRef.current) {
+          resolve(true);
+        } else if (attempts < maxAttempts) {
+          attempts++;
+          setTimeout(check, interval);
+        } else {
+          console.warn("Vector sources did not load in time");
+          resolve(false);
+        }
+      };
+      check();
+    });
+  };
+
+  // The gazetteer jump changes the zoom right before onComplete. Until the
+  // tiles of the new zoom are rendered, clustered geojson sources still show
+  // the overzoomed parent tile, so a query at the hit position finds the
+  // cluster (or nothing) instead of the feature. Waits for a rendered frame
+  // with all tiles loaded rather than "idle", which never fires while an
+  // animated layer repaints every frame.
+  const waitForRenderedTiles = (
+    mapInstance: maplibregl.Map,
+    timeoutMs = 3000
+  ): Promise<void> => {
+    return new Promise((resolve) => {
+      const done = () => {
+        window.clearTimeout(timeoutId);
+        mapInstance.off("render", check);
+        resolve();
+      };
+      const check = () => {
+        if (mapInstance.areTilesLoaded()) {
+          done();
+        }
+      };
+      const timeoutId = window.setTimeout(done, timeoutMs);
+      mapInstance.on("render", check);
+      mapInstance.triggerRepaint();
+    });
+  };
+
+  /** bumped per gazetteer completion, so a slower one never overrides a newer one */
+  const gazetteerRunRef = useRef(0);
+
+  const onComplete = async (selection: SelectionItem) => {
+    if (isAreaType(selection.type as ENDPOINT)) return;
+
+    const mapInstance = map.current;
+    if (!mapInstance) return;
+
+    const selectedPos = proj4(proj4crs3857def, proj4crs4326def, [
+      selection.x,
+      selection.y,
+    ]);
+
+    const run = ++gazetteerRunRef.current;
+    const startVersion = mapSelectionCtxRef.current.selectionVersion;
+
+    const ready = await waitForVectorSources();
+    await waitForRenderedTiles(mapInstance);
+
+    // Something selected while the tiles loaded (a click, an app selecting
+    // the hit by id, a newer gazetteer hit): that selection wins.
+    if (
+      run !== gazetteerRunRef.current ||
+      mapSelectionCtxRef.current.selectionVersion !== startVersion
+    ) {
+      return;
+    }
+
+    clearVisualSelection(mapInstance);
+    setSelectedFeature(null);
+    mapSelectionCtxRef.current.clearSelection();
+
+    let featureInfoboxShown = false;
+
+    if (ready) {
+      // Query rendered features at the gazetteer position (no synthetic click needed)
+      const point = mapInstance.project([selectedPos[0], selectedPos[1]]);
+      const hits = mapInstance.queryRenderedFeatures(point);
+      const filteredHits = hits.filter(
+        (hit) =>
+          !ownLayerId(hit).includes("selection") &&
+          !ownLayerId(hit).includes("cluster") &&
+          !SELECTION_OVERLAY_LAYER_IDS.includes(hit.layer.id) &&
+          !isNonSelectable(hit)
+      );
+
+      // Stamp effective sourceLayer on geojson hits (same convention as
+      // the click handler above).
+      for (const hit of filteredHits) stampSourceLayerFromProperty(hit);
+      enrichHitsWithCarmaInfo(mapInstance, filteredHits);
+
+      if (disableInternalSelectionRef.current) {
+        onSelectionChangedRef.current?.({
+          hits: filteredHits,
+          hit: filteredHits[0],
+          latlng: new maplibregl.LngLat(selectedPos[0], selectedPos[1]),
+          semanticIdentifier: selection.semanticIdentifier ?? undefined,
+        });
+        return;
+      }
+
+      if (filteredHits.length > 0) {
+        const selectedVectorFeature = selectFromHitsRef.current
+          ? selectFromHitsRef.current(filteredHits) ?? filteredHits[0]
+          : filteredHits[0];
+        const featureId = {
+          source: selectedVectorFeature.source,
+          sourceLayer: selectedVectorFeature.sourceLayer,
+          id: selectedVectorFeature.id,
+        };
+
+        const layerId = selectedVectorFeature.layer?.metadata?.["layer-id"];
+        const layerMapping =
+          mappingRef.current[layerId] ||
+          mappingRef.current[selectedVectorFeature.source];
+
+        let feature = null;
+        if (!disableInternalSelectionRef.current && layerMapping) {
+          feature = await createFeature(
+            selectedVectorFeature,
+            layerMapping,
+            mapInstance,
+            useRouting,
+            openDatasheetRef.current
+          );
+        }
+
+        if (feature) {
+          if (layerMapping) {
+            applyVisualSelection(mapInstance, featureId);
+          }
+          setSelectedFeature(feature);
+          featureInfoboxShown = true;
+
+          mapSelectionCtxRef.current.selectFeature(
+            featureId,
+            selectedVectorFeature
+          );
+          mapSelectionCtxRef.current.setSelectedFeature(feature);
+          lastHandledVersionRef.current =
+            mapSelectionCtxRef.current.selectionVersion + 1;
+
+          onFeatureSelect?.(feature, featureId);
+        }
+      }
+    }
+
+    if (
+      !featureInfoboxShown &&
+      gazetteerInfoOnClickRef.current &&
+      useRoutingRef.current
+    ) {
+      setSelectedFeature(
+        buildGazetteerRouteInfobox(selectedPos, selection.string)
+      );
+      lastHandledVersionRef.current =
+        mapSelectionCtxRef.current.selectionVersion + 1;
+    }
+  };
+
+  useSelectionLibreMap({
+    map: map.current,
+    onComplete,
+  });
+
+  return (
+    <>
+      {interactive && (
+        <>
+          <FeatureInfobox
+            selectedFeature={
+              selectedFeature
+                ? toInfoboxFeature(selectedFeature)
+                : overrideSelectedFeature
+                ? toInfoboxFeature(overrideSelectedFeature)
+                : null
+            }
+            libreMap={map.current}
+            versionData={{
+              version: "0.1.0",
+            }}
+          />
+          <PhotoLightBox />
+          <LibreMapSelectionContent map={map.current} />
+        </>
+      )}
+
+      <div className="map-wrap">
+        <div ref={mapContainer} className="map" />
+      </div>
+
+      {/* Auto-detect carma3d configs from style metadata + explicit layer props */}
+      {threeRuntimeParams &&
+        detectedCarma3dConfigs.map((config) => (
+          <ThreeLayerManager
+            key={config.sourceId}
+            config={config}
+            runtimeParams={threeRuntimeParams}
+            perfRef={threePerfRef}
+          />
+        ))}
+      {/* Tilesets named by a style's own metadata, see Tiles3dLayerManager */}
+      {renderedTiles3dConfigs.map((config) => (
+        <Tiles3dLayerManager
+          key={config.tilesetUrl}
+          config={config}
+          layerOpacity={config.layerOpacity}
+        />
+      ))}
+      <SharedThreeTilesLayerManager layers={threeTilesLayers} />
+    </>
+  );
+};
+
+export default LibreMap;

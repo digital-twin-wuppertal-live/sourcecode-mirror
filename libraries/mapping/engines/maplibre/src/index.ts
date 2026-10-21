@@ -1,0 +1,438 @@
+// @carma-mapping/engines/maplibre
+// MapLibre GL JS integration for CARMA mapping framework
+
+export const MAPLIBRE_ENGINE_VERSION = "0.0.1";
+export type {
+  CarmaConf3DModel,
+  CarmaConf3DClippingPolygon,
+  CarmaConf3D,
+  CarmaMapLibreStyleMetadata,
+  CarmaMapLibreStyleData,
+  CarmaMapLibreFeatureProperties,
+} from "./lib/contracts/maplibre-style.d";
+export { useMapLoadingProgress } from "./lib/runtime/hooks/use-map-loading-progress";
+
+// Components
+export { LibreMap } from "./components/LibreMap";
+export type {
+  LibreMapProps,
+  GeoJsonData,
+  VectorStyle,
+  LibreLayer,
+  RasterPaintOverrides,
+} from "./components/LibreMap";
+export { RASTER_PAINT_PRESETS } from "./utils/rasterPaintPresets";
+export {
+  DEFAULT_MAX_PITCH,
+  getCameraRestriction,
+  setCameraRestrictionOverride,
+  subscribeCameraRestriction,
+  useCameraRestriction,
+} from "./utils/cameraRestriction";
+export type { CameraRestriction } from "./utils/cameraRestriction";
+export {
+  getMapLayers,
+  publishMapLayers,
+  subscribeMapLayers,
+  useMapLayers,
+} from "./utils/mapLayers";
+export {
+  getMapThreeRuntimeParams,
+  publishMapThreeRuntimeParams,
+  subscribeMapThreeRuntimeParams,
+  useMapThreeRuntimeParams,
+  type ThreeRuntimeParams,
+} from "./utils/mapThreeParams";
+export { LibreMapSelectionContent } from "./components/LibreMapSelectionContent";
+export { PreviewLibreMap } from "./components/PreviewLibreMap";
+export { DatasheetMiniMap } from "./components/DatasheetMiniMap";
+export type { DatasheetMiniMapProps } from "./components/DatasheetMiniMap";
+
+// Context
+export {
+  LibreContext,
+  LibreContextProvider,
+  useLibreContext,
+} from "./contexts/LibreContext";
+export type {
+  LibreContextType,
+  GeoJsonMetadata,
+  FilterPresentation,
+} from "./contexts/LibreContext";
+
+export {
+  MapSelectionContext,
+  MapSelectionProvider,
+  useMapSelection,
+} from "./contexts/MapSelectionContext";
+export type {
+  MapSelectionContextType,
+  SelectedFeatureIdentifier,
+} from "./contexts/MapSelectionContext";
+
+export {
+  DatasheetContext,
+  DatasheetProvider,
+  useDatasheet,
+} from "./contexts/DatasheetContext";
+export type { DatasheetContextType } from "./contexts/DatasheetContext";
+
+export {
+  MapHighlightContext,
+  MapHighlightProvider,
+  useMapHighlight,
+} from "./contexts/MapHighlightContext";
+export type {
+  MapHighlightContextType,
+  HighlightCriteria,
+  PropertyMatcher,
+  QueryId,
+  ToggledFeature,
+} from "./contexts/MapHighlightContext";
+
+// Hooks
+export { useClusterMarkers } from "./hooks/useClusterMarkers";
+export { useSelectionLibreMap } from "./hooks/useSelectionLibreMap";
+export { useDatasheetMiniMap } from "./hooks/useDatasheetMiniMap";
+export type {
+  UseDatasheetMiniMapOptions,
+  UseDatasheetMiniMapResult,
+} from "./hooks/useDatasheetMiniMap";
+export { useMapHighlighting } from "./hooks/useMapHighlighting";
+export type { UseMapHighlightingOptions } from "./hooks/useMapHighlighting";
+export { useLayerFilter } from "./hooks/useLayerFilter";
+export type {
+  FilterCategory,
+  UseLayerFilterOptions,
+  UseLayerFilterResult,
+} from "./hooks/useLayerFilter";
+export { useSelectionNeighborhood } from "./hooks/useSelectionNeighborhood";
+export type {
+  NeighborPredicate,
+  UseSelectionNeighborhoodOptions,
+} from "./hooks/useSelectionNeighborhood";
+export { useLassoHighlight } from "./hooks/useLassoHighlight";
+export type { LassoOperation } from "./hooks/useLassoHighlight";
+export type {
+  UseLassoHighlightOptions,
+  UseLassoHighlightResult,
+} from "./hooks/useLassoHighlight";
+
+// Style utilities
+export {
+  vectorStylesToMapLibreStyle,
+  styleManipulation,
+  getVectorMapping,
+  getPaintProperty,
+  getGeoJsonSourceId,
+  type GeoJsonStyleMetadata,
+  type VectorStylesToMapLibreStyleOptions,
+  type VectorStylesToMapLibreStyleResult,
+} from "./utils/styleBuilder";
+export {
+  resolveSpriteNamespace,
+  prefixImageExpression,
+  type SpriteNamespace,
+  type SpriteRegistration,
+} from "./utils/spriteNamespace";
+
+// Imperative style composition
+export {
+  StyleComposer,
+  slugifyUrl,
+  getCarmaLayerIdMap,
+} from "./utils/styleComposer";
+export type {
+  CarmaLayerIdMap,
+  GeoJsonSubStyleMeta,
+  AddVectorSubStyleOptions,
+  AddGeoJsonSubStyleOptions,
+  AddRasterSubStyleOptions,
+} from "./utils/styleComposer";
+export { useImperativeStyle } from "./hooks/useImperativeStyle";
+export type { UseImperativeStyleOptions } from "./hooks/useImperativeStyle";
+
+// Feature utilities
+export {
+  createFeature,
+  getCoordinates,
+  truncateString,
+  type FeatureInfo,
+  type LayerMappingEntry,
+} from "./utils/featureUtils";
+
+export {
+  NON_TILED_METADATA_KEY,
+  buildNonTiledWmsUrl,
+  createNonTiledImageSource,
+  createNonTiledMetadata,
+  updateNonTiledSources,
+  attachNonTiledWmsUpdater,
+} from "./utils/nonTiledWms";
+export type { NonTiledWmsRequest } from "./utils/nonTiledWms";
+
+// Zoom utilities
+export { zoom512as256, zoom256as512 } from "./utils/zoomUtils";
+
+// Cluster utilities
+export { createPieChart } from "./utils/clusterUtils";
+
+// "dimmed unless it matches" opacity expressions
+export { buildDimExpression, presentsFilterAsDim } from "./utils/dimExpression";
+
+// setFeatureState/getFeatureState target builder (geojson-aware)
+export { buildFeatureStateTarget } from "./utils/featureStateTarget";
+export type { FeatureStateRef } from "./utils/featureStateTarget";
+
+// Stamp feature.sourceLayer from properties._sourceLayer (geojson FCs)
+export { stampSourceLayerFromProperty } from "@carma-mapping/utils";
+
+// Lasso drawing
+export { LassoDrawingManager } from "./lib/LassoDrawingManager";
+export type {
+  LassoDrawingManagerOptions,
+  DrawnShape,
+  DrawShape,
+  RectSize,
+} from "./lib/LassoDrawingManager";
+export {
+  shapePositions,
+  toTurfShape,
+  DEFAULT_CIRCLE_RADIUS,
+  DEFAULT_CIRCLE_RADIUS_STEP,
+  DEFAULT_RECT_WIDTH,
+  DEFAULT_RECT_HEIGHT,
+  DEFAULT_SHAPE_BUFFER,
+  DEFAULT_CLEAR_DELAY,
+  LASSO_LAYER_ID_PREFIX,
+} from "./lib/LassoDrawingManager";
+
+// Selection management
+export { SelectionManager } from "./lib/SelectionManager";
+export { HidingForwardingManager } from "./lib/HidingForwardingManager";
+export {
+  getCarmaConf,
+  getCarmaConfFromStyle,
+  isNonSelectable,
+  ownLayerId,
+  applySelectionForwarding,
+  resolvePropertyTarget,
+  enrichHitsWithCarmaInfo,
+} from "./lib/SelectionManager";
+export type {
+  CarmaConf,
+  CarmaInfo,
+  EnrichedFeature,
+  FeatureIdentifier,
+  SelectionManagerOptions,
+  SelectionResult,
+} from "./lib/selectionTypes";
+
+// Default styles and city configuration
+export {
+  createDefaultStyle,
+  createPreviewStyle,
+  WUPPERTAL_CONFIG,
+  WUPPERTAL_TERRAIN_SOURCE_ID,
+  WUPPERTAL_DEFAULT_STYLE,
+  WUPPERTAL_PREVIEW_STYLE,
+  type CityMapConfig,
+} from "./constants/wuppertalDefaultStyle";
+
+export {
+  DEFAULT_MAPLIBRE_FOV_DEG,
+  DEFAULT_MAPLIBRE_PITCH_MAX_DEG,
+  DEFAULT_MAPLIBRE_PITCH_MIN_DEG,
+} from "./constants/cameraDefaults";
+export { MAPLIBRE_EVENT, type MapLibreEventName } from "./constants/mapEvents";
+
+// Three.js layer management
+export { ThreeLayerManager } from "./components/ThreeLayerManager";
+export { getGenericThreeLayers as get3dLayers } from "./lib/runtime/integrations/generic-three-layer-registry";
+export {
+  add3dPresence,
+  has3dLayers,
+  remove3dPresence,
+} from "./utils/threeDPresence";
+export type { ThreeLayerManagerProps } from "./components/ThreeLayerManager";
+
+export { buildSharedThreeSceneLayer } from "./lib/runtime/integrations/shared-three-scene-layer";
+export {
+  readMapLibreLayerDepthRange,
+  type MapLibreLayerDepthRange,
+} from "./lib/runtime/integrations/maplibre-depth-range";
+export {
+  createCameraFlightPlayer,
+  createCameraLensClip,
+  type CameraFlightPath,
+} from "./lib/core/camera-flight-path";
+export { sampleCameraPathGroundHeights } from "./lib/runtime/integrations/camera-flight-terrain";
+export { createCylinderCameraRig } from "./lib/core/cylinder-camera-rig";
+export { createSpineCameraRig, sampleSpine } from "./lib/core/spine-camera-rig";
+export { type CameraRigView } from "./lib/core/camera-rig-contract";
+export { createSharedSceneCameraStrip } from "./lib/runtime/integrations/shared-scene-camera-strip";
+export {
+  createSharedScenePointLights,
+  sampleOrbitLightPosition,
+} from "./lib/runtime/integrations/shared-scene-point-lights";
+export {
+  observeMapVectorPoints,
+  type MapVectorPoint,
+} from "./lib/runtime/integrations/map-vector-point-source";
+export { createSharedSceneNightLightAtlas } from "./lib/runtime/integrations/shared-scene-night-light-atlas";
+export { createSharedSceneNightTraffic } from "./lib/runtime/integrations/shared-scene-night-traffic";
+export {
+  NIGHT_TRAFFIC_KIND,
+  type NightTrafficRoute,
+} from "./lib/core/night-traffic";
+export type { NightLightAtlasInput } from "./lib/core/night-light-atlas";
+export { buildRasterDemTerrainRuntime } from "./lib/runtime/integrations/raster-dem-terrain-runtime";
+export {
+  TILE_CAMERA_ROLE,
+  TILE_CAMERA_PRIORITY,
+  createTileCameraDemand,
+  snapshotTileCameraViews,
+} from "./lib/core/tile-camera-demand";
+export type {
+  TileCameraView,
+  TileCameraSnapshot,
+} from "./lib/core/tile-camera-demand";
+export { getSharedThreeShadowViewSignature } from "./lib/core/shared-three-shadow-view";
+export type {
+  SharedThreeSceneFrame,
+  SharedThreeSceneLayer,
+  SharedThreeSceneRuntime,
+  SharedThreeSceneShadowView,
+  SharedThreeSceneTileVolume,
+  SharedThreeShadowRegionDiagnostics,
+} from "./lib/core/shared-three-scene-types";
+export {
+  MAP_STYLE_PROJECTION_BLEND,
+  type MapStyleProjectionBlend,
+} from "./lib/core/shared-three-scene-types";
+export {
+  TILE_VOLUME_LOAD_REASON,
+  TILE_VOLUME_STATE,
+  type TileVolumeLoadReason,
+  type TileVolumeState,
+} from "./lib/core/tile-volume";
+export {
+  createSharedThreeSceneCameraPreview,
+  type SharedThreeSceneCameraPreview,
+} from "./lib/runtime/integrations/shared-three-scene-camera-preview";
+export { acquireSharedThreeScene } from "./lib/runtime/integrations/shared-three-scene-registry";
+export { createMapViewSyncGroup } from "./lib/runtime/integrations/map-view-sync";
+export {
+  TERRAIN_MAP_STYLE,
+  isTerrainShadingStyleLayer,
+  prepareTerrainDrapeStyle,
+} from "./lib/core/terrain-map-style";
+export {
+  getSharedThreeSceneRuntimes,
+  notifySharedThreeSceneContentChanged,
+  notifySharedThreeSceneRequestStateChanged,
+  registerSharedThreeSceneRuntime,
+  subscribeSharedThreeSceneContent,
+  subscribeSharedThreeSceneRequestState,
+  hasSharedThreeShadedPresentation,
+  subscribeSharedThreeShadedPresentation,
+} from "./lib/runtime/integrations/shared-three-scene-content-registry";
+export {
+  getGenericThreeLayers,
+  notifyGenericThreeLayerContentChanged,
+  registerGenericThreeLayer,
+  subscribeGenericThreeLayers,
+  unregisterGenericThreeLayer,
+} from "./lib/runtime/integrations/generic-three-layer-registry";
+export type { ThreeTilesLayer } from "./lib/runtime/integrations/three-tiles-layer";
+export { meshShadowStageError } from "./lib/core/mesh-error-policy";
+export {
+  THREE_TILES_LAYER_TYPE,
+  THREE_TILES_SHADER_KIND,
+} from "./lib/runtime/integrations/three-tiles-layer";
+export { buildThreeTilesRuntime } from "./lib/runtime/integrations/three-tiles-runtime";
+export {
+  TILES_ERROR_TARGET_DEFAULT_PIXELS,
+  TILES_MESH_ERROR_TARGET_DEFAULT_PIXELS,
+  TILES_MESH_QUALITY_PROFILES,
+  TILES_ERROR_TARGET_MAX_PIXELS,
+  TILES_ERROR_TARGET_MIN_PIXELS,
+  TILESET_MIN_RESOLUTION_DEFAULT_PX,
+} from "./lib/runtime/integrations/three-tiles-runtime-config";
+export type {
+  ImageProjector,
+  ThreeTilesRuntime,
+} from "./lib/runtime/integrations/three-tiles-runtime-types";
+export {
+  TILES3D_BASEMAP,
+  type Tiles3dBasemap,
+} from "./lib/core/tiles3d-basemap";
+export {
+  isSharedThreeTerrainLoading,
+  subscribeSharedThreeTerrainLoading,
+  claimStandaloneTerrain,
+  hasStandaloneTerrain,
+  subscribeSharedThreeTerrain,
+} from "./lib/runtime/integrations/shared-three-terrain-registry";
+export {
+  acquireMapLibreTerrainMeshComposition,
+  isMapStyleContourLineLayer,
+  MAPLIBRE_TERRAIN_MESH_BASE_OPACITY,
+  suppressMapLibreRegularStyleLayers,
+} from "./lib/runtime/integrations/map-style-layer-suppression";
+
+// Styles (CSS should be imported by consumers)
+// import '@carma-mapping/engines/maplibre/styles/map.css';
+
+// Clicks an addon answers before the engine does
+export { claimClick, isClickClaimed } from "./utils/clickClaims";
+export {
+  loadTileDiagnostics,
+  type TileDiagnostics,
+} from "./lib/runtime/diagnostics/load-tile-diagnostics";
+export type {
+  QueueRow as TileDiagnosticQueueRow,
+  CoverageSummary as TileDiagnosticSummary,
+} from "./lib/runtime/diagnostics/tile-diagnostic-metrics";
+export {
+  TILE_DIAGNOSTIC_KIND,
+  TILE_DIAGNOSTIC_QUEUE_STATE,
+  TILE_STEPS as TILE_DIAGNOSTIC_STEPS,
+} from "./lib/core/diagnostics/tile-diagnostic-model";
+export type {
+  Kind as TileDiagnosticKind,
+  OverlayRect as TileDiagnosticRect,
+  OverlayModel as TileDiagnosticModel,
+  TileDiagnosticQueueState,
+} from "./lib/core/diagnostics/tile-diagnostic-model";
+export {
+  TILE_DIAGNOSTIC_CAMERA_FOCUS,
+  TILE_DIAGNOSTIC_EXTENTS_MODE,
+  TILE_DIAGNOSTIC_LABEL_MODE,
+  TILE_DIAGNOSTIC_OVERVIEW_UP,
+  TILE_DIAGNOSTIC_OVERVIEW_VIEW,
+  TILE_DIAGNOSTIC_PROJECTION,
+  type TileDiagnosticExtentsMode,
+  type TileDiagnosticLabelMode,
+  type TileDiagnosticOverviewUp,
+  type TileDiagnosticOverviewView,
+  type TileDiagnosticProjection,
+} from "./lib/core/diagnostics/tile-diagnostic-options";
+export {
+  TILE_PRESENTATION_MODE,
+  type TilePresentationMode,
+} from "./lib/core/tile-presentation-mode";
+export { formatTileResidentBytes } from "./lib/core/diagnostics/tile-diagnostic-labels";
+export type {
+  DiagnosticView as TileDiagnosticView,
+  DiagnosticLegendEntry as TileDiagnosticLegendEntry,
+} from "./lib/core/diagnostics/tile-diagnostic-scene";
+export type { TileDiagnosticOverlayInput } from "./lib/runtime/diagnostics/tile-diagnostic-overlay";
+export type {
+  RuntimeTile as DiagnosticRuntimeTile,
+  TilesRuntimeDebugState,
+} from "./lib/runtime/diagnostics/tile-diagnostic-state";
+export {
+  getTiles3dRuntimeHandles,
+  subscribeTiles3dRuntimeHandles,
+} from "./lib/runtime/integrations/tiles3d-runtime-handles";

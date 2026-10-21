@@ -1,0 +1,376 @@
+/* Tailwind <-> Bootstrap class-name collision fix.
+ *
+ * Bootstrap 4 (loaded by the HelpModal, see help-modal-vendor.css) ships its own
+ * `!important` utility classes whose names overlap Tailwind's: `.mx-3`, `.mb-4`,
+ * `.border`, `.shadow`, ... With Bootstrap in `layer(vendor)`, a *layered
+ * !important* rule still beats an *unlayered non-important* Tailwind utility, so
+ * once the modal CSS loaded, Bootstrap's `.mx-3` (1rem) overrode Tailwind's
+ * `.mx-3` (0.75rem) and the whole app shell inflated.
+ *
+ * Fix: declare the layer order `tw` before `vendor`, put Tailwind's utilities in
+ * the `tw` layer, and make them `!important` (`important: true` in the Tailwind
+ * config). For *!important* declarations the cascade order is reversed, so the
+ * EARLIER layer (`tw`) wins over `vendor` -> Tailwind's utilities beat
+ * Bootstrap's. `@tailwind base` (preflight) deliberately stays UNLAYERED: as a
+ * normal declaration, unlayered already outranks Bootstrap's layered reboot, and
+ * keeping it out of `tw` lets the modal's `.modal *{ border:revert-layer }` hooks
+ * still restore Bootstrap's component borders inside the dialog. */
+@tailwind base;
+@layer tw, vendor;
+@layer tw {
+  @tailwind components;
+  @tailwind utilities;
+}
+
+.leaflet-control * img {
+  display: initial;
+}
+
+.ant-tooltip-arrow {
+  display: none !important;
+}
+
+/* Bootstrap's reboot (loaded by the HelpModal) adds `label { margin-bottom: .5rem }`.
+   antd renders real <label> elements inside components like Segmented, DatePicker
+   and Form, so that stray margin leaks in and breaks their layout (e.g. the
+   "Erweiterte Suche" tabs). Tailwind's preflight doesn't touch <label>, so nothing
+   competes with Bootstrap's layered rule. Reset it back to 0 (the browser/Tailwind
+   default) inside the app subtree; scoped to #root so the help modal — which is
+   portaled outside #root — keeps Bootstrap's own label spacing. */
+#root label {
+  margin-bottom: 0;
+}
+
+.modal-footer img[alt="Logo DigiTal Zwilling"] {
+  max-height: 60px;
+}
+
+/* Make lists look good again */
+ul:not(.ant-list-items) {
+  list-style: disc !important;
+  display: block;
+  list-style-type: disc;
+  margin-block-start: 1em;
+  margin-block-end: 1em;
+  margin-inline-start: 0px;
+  margin-inline-end: 0px;
+  padding-inline-start: 40px;
+  unicode-bidi: isolate;
+}
+/* You can add global styles to this file, and also import other style files */
+.custom-left-control {
+  position: absolute;
+  z-index: 1000;
+  left: 0;
+  bottom: 0;
+  margin-left: 14px;
+  margin-bottom: 5px;
+}
+
+.modal-content svg,
+.modal-content img {
+  display: inline;
+}
+
+.selectedfeature {
+  background-color: #7aa8f666;
+  /* opacity: 0.2; */
+  border-radius: 8px;
+  width: 28px;
+  height: 28px;
+}
+
+.brightMode {
+  border-color: rgb(0, 0, 0, 0.75);
+}
+
+.belis-custom-marker {
+  /* background: red; */
+  z-index: 1 !important;
+}
+
+.darkMode {
+  border-color: rgb(255, 255, 255, 0.75) !important;
+}
+.belisiconclass_tdta_leuchten {
+  border: 2px solid;
+  border-radius: 100%;
+  position: relative;
+  width: 14px;
+  height: 14px;
+  transform: translate(7px, 7px); /*28-14=14 ; 14/2=7*/
+}
+
+.belisiconclass_tdta_standort_mast {
+  border: 2px solid;
+  border-radius: 100%;
+  position: relative;
+  width: 12px;
+  height: 12px;
+  transform: translate(8px, 8px); /*28-12=16 ; 16/2=8 */
+}
+
+.belisiconclass_tdta_leuchten::before {
+  content: "";
+  display: block;
+  position: absolute;
+  width: 5px;
+  height: 5px;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  background: rgb(0, 0, 0, 0.5);
+  border-radius: 100%;
+}
+
+.belisiconclass_mauerlasche {
+  border: 1px solid;
+  position: relative;
+  width: 8px;
+  height: 8px;
+  transform: translate(10px, 10px); /*28-8=20 ; 20/2=10*/
+}
+
+.belisiconclass_abzweigdose {
+  border: 1px solid;
+  position: relative;
+  width: 8px;
+  height: 8px;
+  transform: translate(10px, 10px); /*28-8=20 ; 20/2=10*/
+}
+
+.belisiconclass_abzweigdose::before {
+  content: "";
+  display: block;
+  border-top: 2px solid;
+  position: absolute;
+  left: -6px;
+  top: 2px;
+  width: 6px;
+  height: 0px;
+}
+
+.belisiconclass_abzweigdose_inner {
+  border-left: 2px solid;
+  position: absolute;
+  left: 2px;
+  top: 6px;
+  width: 6px;
+  height: 5px;
+}
+
+.belisiconclass_abzweigdose::after {
+  content: "";
+  display: block;
+  border-top: 2px solid;
+  position: absolute;
+  left: 6px;
+  top: 2px;
+  width: 6px;
+  height: 0px;
+  transform: translate(0%, 0%);
+}
+
+.belisiconclass_schaltstelle {
+  border: 3px solid;
+  position: relative;
+  width: 12px;
+  height: 12px;
+  transform: translate(8px, 8px); /*28-12=16 ; 16/2=8*/
+}
+
+.belisiconclass_schaltstelle::before {
+  content: "";
+  display: block;
+  position: absolute;
+  border-left: 3px solid;
+  width: 3px;
+  height: 9px;
+  left: 50%;
+  transform: translate(-50%, 0%);
+}
+
+.marquee {
+  margin: 0 auto;
+  white-space: nowrap;
+  overflow: hidden;
+  box-sizing: border-box;
+}
+
+.marquee span {
+  display: inline-block;
+  padding-left: 10%;
+  padding-right: 90%;
+  animation: marquee 2s linear infinite;
+  -webkit-animation: marquee 2s linear infinite alternate;
+}
+
+@-webkit-keyframes marquee {
+  0% {
+    transform: translate(0%, 0);
+  }
+  100% {
+    transform: translate(-50%, 0);
+  }
+}
+
+@keyframes marquee {
+  0% {
+    transform: translate(0%, 0);
+  }
+  100% {
+    transform: translate(-50%, 0);
+  }
+}
+/* 
+iframe {
+  display: none;
+} */
+
+/* Map card body holds a fixed-pixel-sized map; clip any sub-pixel rounding
+   so it never produces a horizontal scrollbar. */
+.belis-map-card > .ant-card-body {
+  overflow-x: hidden;
+}
+
+.ant-select-dropdown {
+  z-index: 40000000 !important;
+}
+
+.ant-picker-dropdown {
+  z-index: 40000000 !important;
+}
+.belis-custom-marker {
+  /* background: red; */
+  z-index: 1 !important;
+}
+
+.map-info-box-belis-wrapper * div {
+  pointer-events: none !important;
+}
+
+.belis-hide-infobox-zoom [data-test-id="info-box"] a[title*="zoomen"] {
+  display: none;
+}
+
+/* Prevent Tailwind from breaking Leaflet */
+.leaflet-pane,
+.leaflet-tile,
+.leaflet-marker-icon,
+.leaflet-marker-shadow,
+.leaflet-tile-container,
+.leaflet-pane > svg,
+.leaflet-pane > canvas,
+.leaflet-zoom-box,
+.leaflet-image-layer,
+.leaflet-layer {
+  position: absolute;
+  left: 0;
+  top: 0;
+}
+
+.leaflet-container {
+  overflow: hidden;
+}
+
+.leaflet-tile,
+.leaflet-marker-icon,
+.leaflet-marker-shadow {
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.leaflet-tile::selection {
+  background: transparent;
+}
+
+/* Fix map styles. Proper z-index stacking for Leaflet panes */
+.leaflet-pane {
+  z-index: 400;
+}
+.leaflet-tile-pane {
+  z-index: 200;
+}
+.leaflet-overlay-pane {
+  z-index: 400;
+}
+.leaflet-shadow-pane {
+  z-index: 500;
+}
+.leaflet-marker-pane {
+  z-index: 600;
+}
+.leaflet-tooltip-pane {
+  z-index: 650;
+}
+.leaflet-popup-pane {
+  z-index: 700;
+}
+.leaflet-map-pane canvas {
+  z-index: 100;
+}
+.leaflet-map-pane svg {
+  z-index: 200;
+}
+
+/* Ensure SVG paths (lines/polylines) are clickable and show selection */
+.leaflet-overlay-pane svg path {
+  pointer-events: auto;
+}
+
+/* Ensure stroke color is visible on selection */
+.leaflet-interactive {
+  pointer-events: auto;
+}
+
+/* Straßenschlüssel Tree styling */
+.strassen-tree .ant-tree-treenode-selected .ant-tree-node-content-wrapper {
+  background-color: #e6f4ff !important;
+  border-left: 3px solid #1677ff;
+  margin-left: -3px;
+  padding-left: 7px;
+  border-radius: 0 !important;
+}
+
+.strassen-tree .ant-tree-node-content-wrapper:hover {
+  background-color: #f5f5f5 !important;
+}
+
+.strassen-tree .ant-tree-node-content-wrapper {
+  padding: 4px 8px;
+  border-radius: 0 !important;
+}
+
+.strassen-tree .ant-tree-title {
+  font-size: 14px;
+  font-weight: 400;
+  color: #262626;
+}
+
+/* Straßenschlüssel grouping selector */
+.strassen-grouping-select .ant-select-selector {
+  font-size: 12px !important;
+}
+
+.strassen-grouping-select .ant-select-selection-item {
+  font-size: 12px !important;
+}
+
+.strassen-grouping-select-dropdown .ant-select-item {
+  font-size: 12px !important;
+}
+
+/* Keep selected Protokolle row blue on hover */
+.ant-table-tbody > tr.bg-blue-50 > td,
+.ant-table-tbody > tr.bg-blue-50:hover > td {
+  background-color: #eff6ff !important;
+}
+
+/* Fix input background to be white in production */
+.ant-input {
+  background-color: #ffffff !important;
+}
+
+.ant-input:not(:disabled) {
+  background-color: #ffffff !important;
+}

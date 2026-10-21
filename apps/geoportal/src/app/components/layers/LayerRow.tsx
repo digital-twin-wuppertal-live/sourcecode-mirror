@@ -1,0 +1,280 @@
+/* eslint-disable jsx-a11y/no-noninteractive-element-interactions */
+/* eslint-disable jsx-a11y/click-events-have-key-events */
+import { useCallback, useState } from "react";
+import { useDispatch, useSelector } from "react-redux";
+
+import { arrayMove, useSortable } from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
+import {
+  faChevronDown,
+  faChevronUp,
+  faGripVertical,
+  faLayerGroup,
+  faTrash,
+} from "@fortawesome/free-solid-svg-icons";
+import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
+
+import { entryHasInfoView, isLayerGroup } from "@carma-mapping/layers";
+import type {
+  BackgroundLayer,
+  Layer,
+  LayerStackEntry,
+} from "@carma-mapping/layers";
+
+import {
+  changeBackgroundVisibility,
+  changeVisibility,
+  getLayerStack,
+  removeLayer,
+  setLayers,
+  setPermanentLayerHidden,
+  setSelectedLayerIndex,
+} from "../../store/slices/mapping";
+import OpacitySlider from "./OpacitySlider";
+import VisibilityToggle from "./VisibilityToggle";
+import DynamicStylingLayerIcon from "./DynamicStylingLayerIcon";
+import { useAdhocFeatureDisplay } from "@carma-appframeworks/portals";
+import { useAddonState } from "@carma-mapping/addons";
+import { MODEL_COLLECTION_LAYER_ID } from "../../hooks/useModelCollectionLayerButton";
+import { isAdhocVectorLayer } from "../../helper/adhoc-feature-utils";
+import {
+  selectedFeatureBelongsToLayer,
+  type LayerVisibilityToggleProps,
+} from "./layer-visibility-toggle-props";
+import {
+  getSelectedFeature,
+  setSelectedFeature,
+} from "../../store/slices/features";
+
+interface LayerRowProps extends LayerVisibilityToggleProps {
+  layer: LayerStackEntry | BackgroundLayer;
+  id: string;
+  displayTitle?: string;
+  isBackgroundLayer?: boolean;
+  index: number;
+}
+
+const getLayerRowFallbackIcon = (layer: LayerStackEntry | BackgroundLayer) =>
+  isLayerGroup(layer)
+    ? undefined
+    : (layer?.layerInfo?.icon as string) || layer?.other?.icon;
+
+const isPinnedLayer = (layer: LayerStackEntry | BackgroundLayer): boolean =>
+  !!(layer as Layer).pinned;
+
+/** the app owns this row: it can be hidden, not removed, like the background */
+const isPermanentLayer = (layer: LayerStackEntry | BackgroundLayer): boolean =>
+  !!(layer as Layer).permanent;
+
+const LayerRow = ({
+  layer,
+  id,
+  displayTitle,
+  isBackgroundLayer,
+  index,
+  onToggleVisibility,
+  visibilityToggleDisabled,
+  visibilityToggleLabels,
+}: LayerRowProps) => {
+  const [expanded, setExpanded] = useState(false);
+  const dispatch = useDispatch();
+  const [modelState, setModelState] = useAddonState("modelCollection");
+  const selectedFeature = useSelector(getSelectedFeature);
+  const layers = useSelector(getLayerStack);
+  const { clearFeatureCollections } = useAdhocFeatureDisplay();
+  const isGroup = isLayerGroup(layer);
+  const icon = getLayerRowFallbackIcon(layer);
+  const isPinned = isPinnedLayer(layer);
+  const isPermanent = isPermanentLayer(layer);
+  const skipSelection = !isGroup && !!(layer as Layer).skipSelection;
+  // Whether clicking the title has anywhere to go. `entryHasInfoView` is the
+  // same predicate the store selects by, so a row can only offer a click the
+  // store will honour: asked for a selection it refuses, it resets to
+  // NO_SELECTION and the click reads as the info view closing itself. That
+  // covers the addon rows (`skipSelection`, unless they declare `hasInfoView`)
+  // as well as the groups this used to ask about on its own. The background
+  // layer stays out through its `index` of -1, which is how `BaseLayerInfo`
+  // marks the row that is not part of the stack.
+  const isSelectable = index !== -1 && entryHasInfoView(layer as LayerStackEntry);
+  const opacity = skipSelection ? 1 : layer.opacity ?? 1;
+
+  const { attributes, listeners, setNodeRef, transform, transition } =
+    useSortable({
+      id,
+      disabled: isPinned,
+    });
+
+  const style = { transform: CSS.Translate.toString(transform) };
+  const clearLayerSelection = useCallback(() => {
+    if (selectedFeatureBelongsToLayer(selectedFeature, id)) {
+      dispatch(setSelectedFeature(null));
+    }
+  }, [dispatch, id, selectedFeature]);
+  const handleSelectLayer = useCallback(() => {
+    if (isSelectable) {
+      dispatch(setSelectedLayerIndex(index));
+    }
+  }, [dispatch, index, isSelectable]);
+  const handleToggleVisibility = useCallback(
+    (nextVisible: boolean) => {
+      if (id === MODEL_COLLECTION_LAYER_ID && modelState) {
+        setModelState({ ...modelState, visible: nextVisible });
+        dispatch(changeVisibility({ id, visible: nextVisible }));
+      } else if (isPermanent) {
+        // the addon owns this row and hands it over again on every readout
+        // change, so the choice is recorded next to the stack instead of on it
+        dispatch(setPermanentLayerHidden({ id, hidden: !nextVisible }));
+      } else if (onToggleVisibility) {
+        onToggleVisibility(nextVisible);
+      } else if (isBackgroundLayer) {
+        dispatch(changeBackgroundVisibility(nextVisible));
+      } else {
+        dispatch(changeVisibility({ id, visible: nextVisible }));
+      }
+
+      if (!nextVisible) {
+        clearLayerSelection();
+      }
+    },
+    [
+      clearLayerSelection,
+      dispatch,
+      id,
+      isBackgroundLayer,
+      isPermanent,
+      modelState,
+      onToggleVisibility,
+      setModelState,
+    ]
+  );
+  const handleRemoveLayer = useCallback(() => {
+    dispatch(removeLayer(id));
+    if (!isGroup && isAdhocVectorLayer(layer)) {
+      clearFeatureCollections([id]);
+      console.debug("[ADHOC|REMOVE] row clearFeatureCollections", {
+        collectionId: id,
+      });
+    }
+  }, [clearFeatureCollections, dispatch, id, isGroup, layer]);
+
+  const getMoveTarget = (direction: 1 | -1) => {
+    let target = index + direction;
+    while (
+      target >= 0 &&
+      target < layers.length &&
+      (layers[target] as Layer).pinned
+    ) {
+      target += direction;
+    }
+    return target >= 0 && target < layers.length ? target : null;
+  };
+
+  const moveLayer = (direction: 1 | -1) => {
+    const target = getMoveTarget(direction);
+    if (target !== null) {
+      dispatch(setLayers(arrayMove(layers, index, target)));
+    }
+  };
+
+  const transparencyPercent = Math.round((1 - opacity) * 100);
+
+  return (
+    <div ref={setNodeRef} style={style} className="w-full flex flex-col px-1">
+      <div className="w-full flex items-center gap-2">
+        <button
+          {...listeners}
+          {...attributes}
+          className={`flex items-center justify-center !cursor-grab touch-none ${
+            isBackgroundLayer || isPinned ? "invisible" : ""
+          }`}
+        >
+          <FontAwesomeIcon icon={faGripVertical} />
+        </button>
+        {isGroup ? (
+          <FontAwesomeIcon icon={faLayerGroup} className="text-gray-700" />
+        ) : (
+          <DynamicStylingLayerIcon
+            layer={layer}
+            fallbackIcon={icon}
+            isBackgroundLayer={isBackgroundLayer}
+            indicatorClassName="ml-1 sm:mr-[8px] lg:mr-0 text-[8px]"
+          />
+        )}
+        <p
+          className={`mb-0 text-lg flex-1 min-w-0 truncate ${
+            isSelectable ? "hover:underline cursor-pointer" : ""
+          }`}
+          onClick={handleSelectLayer}
+        >
+          {displayTitle ?? layer.title}
+        </p>
+        <VisibilityToggle
+          visible={layer.visible}
+          // an addon row is otherwise not toggled from here; a permanent one is
+          // the exception, hiding it is the only handle the visitor has on it
+          disabled={(skipSelection && !isPermanent) || visibilityToggleDisabled}
+          labels={visibilityToggleLabels}
+          onToggleVisibility={handleToggleVisibility}
+        />
+        <button
+          className="hover:text-gray-500 text-gray-600 flex items-center justify-center"
+          onClick={() => setExpanded(!expanded)}
+        >
+          <FontAwesomeIcon icon={expanded ? faChevronUp : faChevronDown} />
+        </button>
+      </div>
+      {expanded && (
+        <div className="w-full flex flex-col gap-2 rounded-lg bg-gray-100 p-2 mt-1">
+          <div className="flex items-center gap-3">
+            <span className="text-base whitespace-nowrap">Transparenz</span>
+            <OpacitySlider
+              isBackgroundLayer={isBackgroundLayer}
+              opacity={opacity}
+              id={layer.id}
+              isVisible={layer.visible}
+              disabled={skipSelection}
+            />
+            <span className="text-base whitespace-nowrap w-10 text-right">
+              {transparencyPercent}%
+            </span>
+          </div>
+          {!isBackgroundLayer && (
+            <div className="flex items-center gap-2">
+              {!isPinned && (
+                <>
+                  <button
+                    className="flex items-center gap-1.5 rounded-full border border-gray-300 bg-white px-3 py-1 text-sm hover:bg-gray-50 disabled:text-gray-400 disabled:hover:bg-white"
+                    disabled={getMoveTarget(1) === null}
+                    onClick={() => moveLayer(1)}
+                  >
+                    <FontAwesomeIcon icon={faChevronUp} className="text-xs" />
+                    Höher
+                  </button>
+                  <button
+                    className="flex items-center gap-1.5 rounded-full border border-gray-300 bg-white px-3 py-1 text-sm hover:bg-gray-50 disabled:text-gray-400 disabled:hover:bg-white"
+                    disabled={getMoveTarget(-1) === null}
+                    onClick={() => moveLayer(-1)}
+                  >
+                    <FontAwesomeIcon icon={faChevronDown} className="text-xs" />
+                    Tiefer
+                  </button>
+                </>
+              )}
+              {!isPermanent && (
+                <button
+                  className="ml-auto flex items-center gap-1.5 rounded-full border border-gray-300 bg-white px-3 py-1 text-sm hover:bg-gray-50"
+                  onClick={handleRemoveLayer}
+                >
+                  <FontAwesomeIcon icon={faTrash} />
+                  Entfernen
+                </button>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+};
+
+export default LayerRow;

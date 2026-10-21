@@ -1,0 +1,22 @@
+.ant-tabs-content-holder {
+  margin-top: 8px;
+  overflow: auto;
+  height: 100%;
+}
+
+.ant-tabs {
+  height: 100%;
+  overflow: auto;
+}
+
+.hide-tabs {
+  .ant-tabs-nav-operations {
+    display: none !important;
+  }
+}
+
+.hide-tabs .ant-tabs {
+  font-family: inherit;
+  font-size: inherit;
+  color: inherit;
+}

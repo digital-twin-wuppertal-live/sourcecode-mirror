@@ -1,0 +1,65 @@
+/* off: the scene stays, excalidraw's own chrome goes */
+.carma-annotation-overlay[data-drawing="false"] .layer-ui__wrapper {
+  display: none;
+}
+
+/* the canvas paints viewBackgroundColor; the container must not paint at all */
+.carma-annotation-overlay .excalidraw {
+  background: transparent;
+}
+
+.carma-annotation-overlay .App-menu_top__left {
+  translate: 56px 0;
+}
+
+.carma-annotation-overlay .layer-ui__wrapper__footer-left {
+  translate: 56px -52px;
+}
+
+.carma-annotation-overlay[data-hide-menu="true"] .main-menu-trigger {
+  display: none;
+}
+
+.carma-annotation-overlay[data-hide-zoom="true"] .zoom-actions {
+  display: none;
+}
+
+.carma-annotation-overlay[data-hide-tools="true"] .shapes-section,
+.carma-annotation-overlay[data-hide-tools="true"] .HintViewer {
+  visibility: hidden;
+}
+
+.carma-annotation-overlay[data-hide-help="true"] .help-icon {
+  display: none;
+}
+
+.carma-annotation-overlay[data-hide-history="true"] .undo-redo-buttons {
+  display: none;
+}
+
+.carma-annotation-overlay[data-hide-library="true"] .default-sidebar-trigger {
+  display: none;
+}
+
+/* the scene rides the map, so excalidraw's "scroll back to content" would
+   fight the camera; the drawing list's zoom button does that job */
+.carma-annotation-overlay .scroll-back-to-content {
+  display: none;
+}
+
+/* The plane hangs past the map area on every side, which is what a rotation
+   turns into the corners. What is drawn out there is clipped back to the map
+   area, so it never covers the app's own chrome and never takes a pointer
+   event meant for it. */
+.carma-annotation-overlay[data-plane="true"] {
+  clip-path: inset(var(--carma-plane-y, 0) var(--carma-plane-x, 0));
+}
+
+/* excalidraw pins its chrome to the box it is given, and that box is now
+   bigger than the map area; the chrome belongs over the map area */
+.carma-annotation-overlay[data-plane="true"] .layer-ui__wrapper {
+  top: var(--carma-plane-y, 0);
+  left: var(--carma-plane-x, 0);
+  width: calc(100% - 2 * var(--carma-plane-x, 0px));
+  height: calc(100% - 2 * var(--carma-plane-y, 0px));
+}

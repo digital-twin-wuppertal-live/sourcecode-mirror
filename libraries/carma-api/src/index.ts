@@ -1,0 +1,59 @@
+/// <reference path="./global.d.ts" />
+import { config } from "./lib/config";
+import { gazetteer } from "./lib/gazetteer";
+import { mapping, mapping2D, mapping3D } from "./lib/mapping";
+import { nuke } from "./lib/nuke";
+import { ui } from "./lib/ui";
+
+export const carma = {
+  config,
+  gazetteer,
+  mapping,
+  mapping2D,
+  mapping3D,
+  nuke,
+  ui,
+} as const;
+
+export { registerConfig } from "./lib/config";
+export type {
+  ConfigAdapter,
+  ConfigFacade,
+  MappingConfig,
+  MappingConfigBackgroundLayer,
+  MappingConfigLayer,
+} from "./lib/config";
+
+export { registerMapping } from "./lib/mapping";
+export type {
+  MapAdapter,
+  MappingFacade,
+  Mapping2DFacade,
+  Mapping3DFacade,
+  MapMode,
+  HomeView,
+  Position2D,
+  CameraPosition3D,
+  BackgroundLayerInfo,
+} from "./lib/mapping";
+
+export { registerNuke } from "./lib/nuke";
+export type {
+  NukeAdapter,
+  NukeCommand,
+  NukeFacade,
+  NukeInventory,
+  NukeOptions,
+} from "./lib/nuke";
+
+export { registerUi } from "./lib/ui";
+export type { UiAdapter, UiFacade } from "./lib/ui";
+
+export { registerGazetteer } from "./lib/gazetteer";
+export type {
+  GazetteerAdapter,
+  GazetteerContribution,
+  GazetteerFacade,
+  GazetteerMode,
+  GazetteerSource,
+} from "./lib/gazetteer";

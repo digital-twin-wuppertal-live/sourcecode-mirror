@@ -1,0 +1,874 @@
+import { MercatorCoordinate } from "maplibre-gl";
+import type {
+  CustomLayerInterface,
+  CustomRenderMethodInput,
+  Map as MapLibreMap,
+} from "maplibre-gl";
+import * as THREE from "three";
+
+import {
+  add3dPresence,
+  readMapLibreLayerDepthRange,
+  remove3dPresence,
+} from "@carma-mapping/engines/maplibre";
+
+import { buildCar, type CarModel } from "./car-model";
+import {
+  createFleet,
+  createSelectionReporter,
+  type FleetTimetable,
+  type SelectedCar,
+  type VehicleMode,
+  type VehicleSchedule,
+} from "./fleet";
+import { createFleetLoop } from "./fleet-loop";
+import {
+  structureSegments,
+  type Segment3,
+  type StructureAsset,
+} from "./geruest";
+import { poseAt, type CarShape, type Track } from "./track";
+import type { VehicleLayerHandle } from "./vehicle-layer";
+import { placeFleet } from "./vehicle-placement";
+import {
+  createSpotlightLayer,
+  spotCentres,
+  spotlightReach,
+  type VehicleSpotlight,
+} from "./vehicle-spotlight";
+
+/**
+ * The fleet in three dimensions: the structure as instanced box members, the
+ * vehicles as low-poly bodies hanging under the rail, all in one MapLibre
+ * custom layer.
+ *
+ * The scene lives in a local metre frame around the structure's origin, three
+ * X east, Y up, Z south, and is projected with MapLibre's own matrix every
+ * frame, the same way the engine's tree and building layers do it. Heights
+ * are the model's: with terrain on they are absolute, without it the ground
+ * under the track (read off the supports' feet) is subtracted so the girder
+ * stands its real height over a flat map.
+ *
+ * The layer registers itself as a 3D layer on the map, which is what lets
+ * the host unlock the camera tilt and offer terrain while it is on.
+ *
+ * A `spotlight` is the flat renderer's (`vehicle-spotlight.ts`), lit around
+ * each body where it hangs rather than on the ground under it, so the spot
+ * stays on the vehicle when the map is tilted.
+ */
+
+export type VehicleThreeLayerOptions = {
+  map: MapLibreMap;
+  track: Track;
+  shape: CarShape;
+  speedKmh: number;
+  mode: VehicleMode;
+  schedule: VehicleSchedule | null;
+  /** with one, the vehicles run to its departures by the clock instead */
+  timetable?: FleetTimetable | null;
+  bodyColor: string;
+  jointColor: string;
+  opacity: number;
+  /** the girders, bracing and supports; without one only the vehicles show */
+  structure: StructureAsset | null;
+  /**
+   * Whether the layer reports itself as a 3D layer on the map, which is what
+   * lifts the camera restriction and, with it, the terrain. Default: true, the
+   * right answer for an animation someone asked for in three dimensions.
+   *
+   * A variant that appears *because* the camera is already free passes false:
+   * it needs to unlock nothing, and counting itself would make it the reason
+   * the camera stays free, so it could never go back to the flat variant.
+   */
+  claims3d?: boolean;
+  /** the map dimmed and the vehicles lit, over everything; see the flat renderer */
+  spotlight?: VehicleSpotlight | null;
+  beforeId?: string;
+  /** the stack layer whose style launched the fleet; see the flat renderer */
+  anchorLayerId?: string;
+  id?: string;
+  onFleetSize?: (count: number) => void;
+  /** told about the selected vehicle, refreshed as it runs; null when there is none */
+  onSelection?: (car: SelectedCar | null) => void;
+};
+
+const DEFAULT_ID = "vehicle-animation-3d";
+const METERS_PER_LAT = 111320;
+/**
+ * How far beyond the track a vehicle can still be in view: it hangs a girder's
+ * height over the ground, and a tilted camera sees it from well past the
+ * ground point under it.
+ */
+const VIEW_PAD_METERS = 100;
+
+/** the painted steel of the Gerüst, and the rust of the bare rail on top */
+const STEEL_COLOR = new THREE.Color("#93ad98");
+const RAIL_COLOR = new THREE.Color("#8a5a3c");
+/** the blue a selected feature gets in the vector styles */
+const HIGHLIGHT_COLOR = new THREE.Color("#4892F0");
+/** how far a click may miss a car's centre line on screen and still hit it */
+const PICK_TOLERANCE_PX = 20;
+/** the body's centre hangs about this far under the rail */
+const CAR_PICK_DEPTH = 2.5;
+
+/** member thickness in metres: the girder chords, the bracing, the support bars */
+const GIRDER_THICKNESS = 0.25;
+const BRACING_THICKNESS = 0.15;
+const SUPPORT_THICKNESS = 0.3;
+/**
+ * The rail beam: the rust plate girder the Laufwerke run on, hung under the
+ * lattice. Its top is the bottom chord of the model, so the plate hangs
+ * down from there.
+ */
+const RAIL_PLATE_HEIGHT = 0.95;
+const RAIL_PLATE_WIDTH = 0.3;
+/** how far a member may be from the track and still take its ground from it */
+const GROUND_SEARCH_METERS = 120;
+/** without supports, the rail is assumed this high over the flat map */
+const FALLBACK_RAIL_HEIGHT = 12;
+
+type LocalFrame = {
+  origin: [number, number];
+  metersPerLon: number;
+};
+
+/** lon/lat to metres east and north of the frame's origin */
+const toLocal = (
+  frame: LocalFrame,
+  lon: number,
+  lat: number
+): [number, number] => [
+  (lon - frame.origin[0]) * frame.metersPerLon,
+  (lat - frame.origin[1]) * METERS_PER_LAT,
+];
+
+/** a coarse grid over points in the local frame, for nearest lookups */
+class PointGrid<T> {
+  private readonly cells = new Map<
+    string,
+    { x: number; y: number; value: T }[]
+  >();
+
+  constructor(private readonly cellSize: number) {}
+
+  add(x: number, y: number, value: T): void {
+    const key = this.keyOf(x, y);
+    const cell = this.cells.get(key);
+    if (cell) cell.push({ x, y, value });
+    else this.cells.set(key, [{ x, y, value }]);
+  }
+
+  /** the nearest entry within `radius`, or null */
+  nearest(x: number, y: number, radius: number): T | null {
+    const reach = Math.ceil(radius / this.cellSize);
+    const cx = Math.floor(x / this.cellSize);
+    const cy = Math.floor(y / this.cellSize);
+    let best: T | null = null;
+    let bestDistance = radius;
+    for (let dx = -reach; dx <= reach; dx++) {
+      for (let dy = -reach; dy <= reach; dy++) {
+        for (const entry of this.cells.get(`${cx + dx},${cy + dy}`) ?? []) {
+          const d = Math.hypot(entry.x - x, entry.y - y);
+          if (d < bestDistance) {
+            bestDistance = d;
+            best = entry.value;
+          }
+        }
+      }
+    }
+    return best;
+  }
+
+  /** the smallest value among the entries within `radius`, or null */
+  lowest(x: number, y: number, radius: number): T | null {
+    const reach = Math.ceil(radius / this.cellSize);
+    const cx = Math.floor(x / this.cellSize);
+    const cy = Math.floor(y / this.cellSize);
+    let best: T | null = null;
+    for (let dx = -reach; dx <= reach; dx++) {
+      for (let dy = -reach; dy <= reach; dy++) {
+        for (const entry of this.cells.get(`${cx + dx},${cy + dy}`) ?? []) {
+          if (Math.hypot(entry.x - x, entry.y - y) > radius) continue;
+          if (best === null || entry.value < best) best = entry.value;
+        }
+      }
+    }
+    return best;
+  }
+
+  private keyOf(x: number, y: number): string {
+    return `${Math.floor(x / this.cellSize)},${Math.floor(y / this.cellSize)}`;
+  }
+}
+
+/**
+ * The ground under the track, one value per track vertex.
+ *
+ * The model's heights are absolute, and a flat map has no ground to be
+ * absolute against, so something has to say how high the rail is over it.
+ * The supports do: their feet stand on the ground. Every vertex takes the
+ * base of the nearest support, and stretches between supports interpolate
+ * along the track.
+ */
+const groundProfile = (
+  track: Track,
+  frame: LocalFrame,
+  structure: StructureAsset | null
+): number[] => {
+  const known: (number | null)[] = track.points.map(() => null);
+  if (structure) {
+    const supports = new PointGrid<number>(50);
+    for (const [x, y, zBase] of structure.supports) supports.add(x, y, zBase);
+    track.points.forEach((point, index) => {
+      const [x, y] = toLocal(frame, point[0], point[1]);
+      known[index] = supports.nearest(x, y, 60);
+    });
+  }
+  if (known.every((value) => value === null)) {
+    return track.points.map((point) => (point[2] ?? 0) - FALLBACK_RAIL_HEIGHT);
+  }
+  // fill the gaps: interpolate between neighbours that know their ground,
+  // and hold the nearest one at either end
+  const ground = known.map((value) => value ?? Number.NaN);
+  let previous = -1;
+  for (let index = 0; index < ground.length; index++) {
+    if (Number.isNaN(ground[index])) continue;
+    if (previous === -1) {
+      for (let fill = 0; fill < index; fill++) ground[fill] = ground[index];
+    } else {
+      for (let fill = previous + 1; fill < index; fill++) {
+        const t = (fill - previous) / (index - previous);
+        ground[fill] =
+          ground[previous] + (ground[index] - ground[previous]) * t;
+      }
+    }
+    previous = index;
+  }
+  for (let fill = previous + 1; fill < ground.length; fill++) {
+    ground[fill] = ground[previous];
+  }
+  return ground;
+};
+
+/** index of the segment containing `distance`, by binary search */
+const segmentAt = (cumulative: number[], distance: number): number => {
+  let low = 0;
+  let high = cumulative.length - 1;
+  while (high - low > 1) {
+    const middle = (low + high) >> 1;
+    if (cumulative[middle] <= distance) low = middle;
+    else high = middle;
+  }
+  return low;
+};
+
+/** whether the ring runs counter-clockwise, by its signed area */
+const isCounterClockwise = (track: Track, frame: LocalFrame): boolean => {
+  let area = 0;
+  for (let index = 1; index < track.points.length; index++) {
+    const [ax, ay] = toLocal(
+      frame,
+      track.points[index - 1][0],
+      track.points[index - 1][1]
+    );
+    const [bx, by] = toLocal(
+      frame,
+      track.points[index][0],
+      track.points[index][1]
+    );
+    area += ax * by - bx * ay;
+  }
+  return area > 0;
+};
+
+const UNIT_X = new THREE.Vector3(1, 0, 0);
+
+/**
+ * Straight members as one instanced box: every segment becomes a unit cube
+ * stretched to its length, turned to its direction and set on its midpoint.
+ * `heightOf` turns the model's absolute z into a scene height.
+ */
+type MemberSize = {
+  /** across, in metres */
+  thickness: number;
+  /** tall, in metres. Default: `thickness` */
+  height?: number;
+  /** shift up (+) or down (-) from the member's line, e.g. to hang a plate under it */
+  lift?: number;
+};
+
+const buildMembers = (
+  segments: Segment3[],
+  size: MemberSize,
+  material: THREE.Material,
+  heightOf: (x: number, y: number, z: number) => number,
+  colorOf?: (segment: Segment3) => THREE.Color
+): THREE.InstancedMesh => {
+  const { thickness, height = thickness, lift = 0 } = size;
+  const mesh = new THREE.InstancedMesh(
+    new THREE.BoxGeometry(1, 1, 1),
+    material,
+    segments.length
+  );
+  const position = new THREE.Vector3();
+  const direction = new THREE.Vector3();
+  const quaternion = new THREE.Quaternion();
+  const scale = new THREE.Vector3();
+  const matrix = new THREE.Matrix4();
+  segments.forEach((segment, index) => {
+    const [x1, y1, z1, x2, y2, z2] = segment;
+    const h1 = heightOf(x1, y1, z1);
+    const h2 = heightOf(x2, y2, z2);
+    // local (east, north, up) to three (east, up, south)
+    direction.set(x2 - x1, h2 - h1, -(y2 - y1));
+    const length = direction.length();
+    if (length > 0) direction.divideScalar(length);
+    quaternion.setFromUnitVectors(UNIT_X, direction);
+    position.set((x1 + x2) / 2, (h1 + h2) / 2 + lift, -(y1 + y2) / 2);
+    scale.set(Math.max(length, thickness), height, thickness);
+    matrix.compose(position, quaternion, scale);
+    mesh.setMatrixAt(index, matrix);
+    if (colorOf) mesh.setColorAt(index, colorOf(segment));
+  });
+  mesh.instanceMatrix.needsUpdate = true;
+  if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+  mesh.frustumCulled = false;
+  return mesh;
+};
+
+export const createVehicleThreeLayer = (
+  options: VehicleThreeLayerOptions
+): VehicleLayerHandle => {
+  const {
+    map,
+    track,
+    shape,
+    mode,
+    schedule,
+    timetable = null,
+    structure,
+    claims3d = true,
+    spotlight = null,
+    beforeId,
+    anchorLayerId,
+    id = DEFAULT_ID,
+    onFleetSize,
+    onSelection,
+  } = options;
+
+  let opacity = options.opacity;
+  let paused = false;
+  let visible = true;
+  let destroyed = false;
+  /** whether a frame has set the camera yet; picking needs its matrix */
+  let rendered = false;
+
+  const fleet = createFleet({
+    track,
+    mode,
+    schedule,
+    timetable,
+    speedKmh: options.speedKmh,
+  });
+
+  const visibleCount = (): number =>
+    fleet.cars.reduce((count, car) => count + (car.visible ? 1 : 0), 0);
+
+  /** tells the host how many vehicles are out, whenever that number changes */
+  let reportedCount = -1;
+  const reportFleet = (): void => {
+    const count = visibleCount();
+    if (count === reportedCount) return;
+    reportedCount = count;
+    onFleetSize?.(count);
+  };
+
+  const selection = createSelectionReporter(track, fleet, (car) =>
+    onSelection?.(car)
+  );
+
+  const frame: LocalFrame = structure
+    ? { origin: structure.origin, metersPerLon: structure.metersPerLon }
+    : {
+        origin: [track.points[0][0], track.points[0][1]],
+        metersPerLon: track.metersPerLon,
+      };
+  const originMercator = MercatorCoordinate.fromLngLat(
+    { lng: frame.origin[0], lat: frame.origin[1] },
+    0
+  );
+  const meterScale = originMercator.meterInMercatorCoordinateUnits();
+
+  /** the vehicles hang on the outer rail; the inner side has the bracing */
+  const outerSign = isCounterClockwise(track, frame) ? 1 : -1;
+
+  const ground = groundProfile(track, frame, structure);
+  const trackVertices = new PointGrid<number>(100);
+  track.points.forEach((point, index) => {
+    const [x, y] = toLocal(frame, point[0], point[1]);
+    trackVertices.add(x, y, index);
+  });
+
+  const members = structure ? structureSegments(structure) : null;
+
+  /** the lowest girder point within a few metres of (x, y), or null */
+  const lowestGirderNear = ((): ((x: number, y: number) => number | null) => {
+    const grid = new PointGrid<number>(10);
+    for (const [x1, y1, z1, x2, y2, z2] of members?.girder ?? []) {
+      grid.add(x1, y1, z1);
+      grid.add(x2, y2, z2);
+    }
+    return (x, y) => grid.lowest(x, y, 6);
+  })();
+
+  let hasTerrain = map.getTerrain() !== null && map.getTerrain() !== undefined;
+
+  /** ground under a point in the local frame, from the nearest track vertex */
+  const groundNear = (x: number, y: number): number => {
+    const index = trackVertices.nearest(x, y, GROUND_SEARCH_METERS);
+    return ground[index ?? 0] ?? 0;
+  };
+  /** the model's absolute z as a scene height */
+  const heightOf = (x: number, y: number, z: number): number =>
+    hasTerrain ? z : z - groundNear(x, y);
+  /** ground under the track at `distance`, interpolated */
+  const groundAt = (distance: number): number => {
+    const index = segmentAt(track.cumulative, distance);
+    const span = track.cumulative[index + 1] - track.cumulative[index];
+    const t = span > 0 ? (distance - track.cumulative[index]) / span : 0;
+    const from = ground[index];
+    const to = ground[index + 1] ?? from;
+    return from + (to - from) * t;
+  };
+
+  /* ---------------------------------------------------------------- *
+   *  Scene
+   * ---------------------------------------------------------------- */
+
+  const scene = new THREE.Scene();
+  // bright and flat, like an overcast day: Lambert shading with a strong
+  // sun turns the sky blue into slate, and the photos are lit from all sides
+  scene.add(new THREE.AmbientLight(0xffffff, 1.0));
+  const sun = new THREE.DirectionalLight(0xfff4e0, 0.9);
+  sun.position.set(100, 300, 150);
+  scene.add(sun);
+  const fill = new THREE.DirectionalLight(0xdde8ff, 0.5);
+  fill.position.set(-80, 100, -60);
+  scene.add(fill);
+
+  const materials: THREE.Material[] = [];
+  const material = (color: THREE.Color | string): THREE.MeshLambertMaterial => {
+    const created = new THREE.MeshLambertMaterial({ color });
+    materials.push(created);
+    return created;
+  };
+
+  const structureGroup = new THREE.Group();
+  scene.add(structureGroup);
+
+  const buildStructure = (): void => {
+    structureGroup.clear();
+    if (!members) return;
+    const steel = material(STEEL_COLOR);
+    // The rail is the bottom chord. A chord follows the track's gradient, so
+    // "bottom" is judged against the lowest girder point next to the member
+    // rather than against a level: the diagonals and verticals reach it too,
+    // but only a chord stays within a hand's breadth of it along its length.
+    const isRail = ([x1, y1, z1, x2, y2, z2]: Segment3): boolean => {
+      const length = Math.hypot(x2 - x1, y2 - y1);
+      if (length < 0.5 || Math.abs(z2 - z1) > 0.05 * length + 0.05)
+        return false;
+      // judged at both ends: a chord can be 200 m long, and its middle is far
+      // from every other girder point
+      const floorA = lowestGirderNear(x1, y1);
+      const floorB = lowestGirderNear(x2, y2);
+      return (
+        floorA !== null &&
+        floorB !== null &&
+        z1 - floorA < 0.35 &&
+        z2 - floorB < 0.35
+      );
+    };
+    structureGroup.add(
+      buildMembers(
+        members.girder,
+        { thickness: GIRDER_THICKNESS },
+        steel,
+        heightOf,
+        (segment) => (isRail(segment) ? RAIL_COLOR : STEEL_COLOR)
+      ),
+      buildMembers(
+        members.bracing,
+        { thickness: BRACING_THICKNESS },
+        steel,
+        heightOf
+      ),
+      buildMembers(
+        members.supports,
+        { thickness: SUPPORT_THICKNESS },
+        steel,
+        heightOf
+      )
+    );
+    // the plate girder hangs under the bottom chord; the Laufwerke run on its top
+    const rails = members.girder.filter(isRail);
+    structureGroup.add(
+      buildMembers(
+        rails,
+        {
+          thickness: RAIL_PLATE_WIDTH,
+          height: RAIL_PLATE_HEIGHT,
+          lift: -RAIL_PLATE_HEIGHT / 2,
+        },
+        material(RAIL_COLOR),
+        heightOf
+      )
+    );
+  };
+  buildStructure();
+
+  /* ---------------------------------------------------------------- *
+   *  Vehicles
+   * ---------------------------------------------------------------- */
+
+  const geometries: THREE.BufferGeometry[] = [];
+  const keep = <T extends THREE.BufferGeometry | THREE.Material>(
+    resource: T
+  ): T => {
+    if (resource instanceof THREE.Material) materials.push(resource);
+    else geometries.push(resource);
+    return resource;
+  };
+
+  const cars: CarModel[] = fleet.cars.map(() => {
+    const model = buildCar({
+      shape,
+      bodyColor: options.bodyColor,
+      bellowsColor: options.jointColor,
+      outerSign,
+      keep,
+    });
+    for (const piece of model.pieces) scene.add(piece.group);
+    return model;
+  });
+
+  /** the scene height of the rail's bottom chord at `distance`, wrapped onto the track */
+  const railHeightAt = (distance: number): number => {
+    const wrapped = track.closed
+      ? ((distance % track.length) + track.length) % track.length
+      : distance;
+    const bottomChord = poseAt(track, wrapped).height ?? 0;
+    return hasTerrain ? bottomChord : bottomChord - groundAt(wrapped);
+  };
+
+  const spotlightId = `${id}-spotlight`;
+  const spotlightLayer = spotlight
+    ? createSpotlightLayer({ id: spotlightId, spotlight, opacity })
+    : null;
+
+  const placeCars = (): void => {
+    const selected = selection.get();
+    fleet.cars.forEach((car, carIndex) => {
+      cars[carIndex].body.color.set(
+        carIndex === selected ? HIGHLIGHT_COLOR : options.bodyColor
+      );
+      for (const { group, offset } of cars[carIndex].pieces) {
+        group.visible = car.visible;
+        if (!car.visible) continue;
+        let distance = car.distance + offset * car.direction;
+        if (track.closed) {
+          distance = ((distance % track.length) + track.length) % track.length;
+        }
+        const pose = poseAt(track, distance);
+        const [x, y] = toLocal(frame, pose.lon, pose.lat);
+        const bottomChord = pose.height ?? 0;
+        const height = hasTerrain
+          ? bottomChord
+          : bottomChord - groundAt(distance);
+        group.position.set(x, height, -y);
+        group.rotation.y = pose.heading;
+        // a pingpong vehicle runs backwards on the way home; its cab does not
+        group.scale.x = car.direction;
+      }
+    });
+    // each spot at the middle of its body, which hangs under the rail
+    spotlightLayer?.setSpots(
+      spotCentres(
+        track,
+        fleet.cars,
+        (distance) => railHeightAt(distance) - CAR_PICK_DEPTH
+      )
+    );
+  };
+  placeCars();
+
+  scene.traverse((object) => {
+    object.frustumCulled = false;
+  });
+
+  /* ---------------------------------------------------------------- *
+   *  Picking: the cars projected to the screen with the last frame's camera
+   * ---------------------------------------------------------------- */
+
+  const clip = new THREE.Vector4();
+  /** the body under the rail at `distance`, on screen in CSS pixels; null behind the camera */
+  const screenOf = (distance: number): [number, number] | null => {
+    const wrapped = track.closed
+      ? ((distance % track.length) + track.length) % track.length
+      : distance;
+    const pose = poseAt(track, wrapped);
+    const [x, y] = toLocal(frame, pose.lon, pose.lat);
+    const height = railHeightAt(wrapped) - CAR_PICK_DEPTH;
+    clip.set(x, height, -y, 1).applyMatrix4(camera.projectionMatrix);
+    if (clip.w <= 0) return null;
+    const canvas = map.getCanvas();
+    return [
+      ((clip.x / clip.w + 1) / 2) * canvas.clientWidth,
+      ((1 - clip.y / clip.w) / 2) * canvas.clientHeight,
+    ];
+  };
+
+  const distanceToSegment = (
+    point: { x: number; y: number },
+    a: [number, number],
+    b: [number, number]
+  ): number => {
+    const dx = b[0] - a[0];
+    const dy = b[1] - a[1];
+    const squared = dx * dx + dy * dy;
+    const t =
+      squared > 0
+        ? Math.max(
+            0,
+            Math.min(
+              1,
+              ((point.x - a[0]) * dx + (point.y - a[1]) * dy) / squared
+            )
+          )
+        : 0;
+    return Math.hypot(point.x - (a[0] + dx * t), point.y - (a[1] + dy * t));
+  };
+
+  /**
+   * The car nearest to a screen point, judged by its centre line from nose
+   * to nose: a car is long and thin, so its middle alone would miss most
+   * clicks on it.
+   */
+  const pickCarAt = (point: { x: number; y: number }): number | null => {
+    if (!rendered) return null;
+    const half = shape.lengthMeters / 2;
+    let best: number | null = null;
+    let bestDistance = PICK_TOLERANCE_PX;
+    fleet.cars.forEach((car, index) => {
+      if (!car.visible) return;
+      const points = [
+        car.distance - half,
+        car.distance,
+        car.distance + half,
+      ].map(screenOf);
+      for (let step = 0; step + 1 < points.length; step++) {
+        const a = points[step];
+        const b = points[step + 1];
+        if (!a || !b) continue;
+        const distance = distanceToSegment(point, a, b);
+        if (distance < bestDistance) {
+          bestDistance = distance;
+          best = index;
+        }
+      }
+    });
+    return best;
+  };
+
+  /* ---------------------------------------------------------------- *
+   *  The MapLibre layer
+   * ---------------------------------------------------------------- */
+
+  const camera = new THREE.Camera();
+  let renderer: THREE.WebGLRenderer | null = null;
+  const rotationX = new THREE.Matrix4().makeRotationAxis(
+    new THREE.Vector3(1, 0, 0),
+    Math.PI / 2
+  );
+
+  const layer: CustomLayerInterface = {
+    id,
+    type: "custom",
+    renderingMode: "3d",
+    onAdd(_map, gl) {
+      renderer?.dispose();
+      renderer = new THREE.WebGLRenderer({
+        canvas: map.getCanvas(),
+        context: gl,
+        antialias: true,
+      });
+      renderer.autoClear = false;
+    },
+    render(
+      gl: WebGLRenderingContext | WebGL2RenderingContext,
+      args: CustomRenderMethodInput
+    ) {
+      if (destroyed || !renderer) return;
+
+      const projection = new THREE.Matrix4().fromArray(
+        args.defaultProjectionData.mainMatrix as unknown as number[]
+      );
+      const model = new THREE.Matrix4()
+        .makeTranslation(originMercator.x, originMercator.y, originMercator.z)
+        .scale(new THREE.Vector3(meterScale, -meterScale, meterScale))
+        .multiply(rotationX);
+      camera.projectionMatrix = projection.multiply(model);
+      camera.projectionMatrixInverse.copy(camera.projectionMatrix).invert();
+      rendered = true;
+
+      // MapLibre's depth range must survive three's state reset, or the
+      // symbol layers after this one test against the wrong depth space;
+      // read from MapLibre's state cache, a GL query would wait for the GPU
+      const savedDepthRange = readMapLibreLayerDepthRange(map, gl);
+      renderer.resetState();
+      renderer.render(scene, camera);
+      gl.depthRange(savedDepthRange[0], savedDepthRange[1]);
+    },
+  };
+
+  // The fleet moves on in the loop, not here: a layer that asked for the
+  // next frame from inside `render` would redraw the whole map sixty times a
+  // second, and end every one of those frames in an `idle` event.
+  const loop = createFleetLoop({
+    map,
+    track,
+    fleet,
+    padMeters: Math.max(
+      VIEW_PAD_METERS,
+      spotlight ? spotlightReach(spotlight) : 0
+    ),
+    onAdvance: () => {
+      selection.tick();
+      reportFleet();
+    },
+    onDraw: () => {
+      placeCars();
+      map.triggerRepaint();
+    },
+  });
+
+  /** the loop runs while there is a fleet on the map that is not held */
+  const run = (): void => {
+    if (destroyed || paused || !visible) loop.stop();
+    else loop.start();
+  };
+
+  const attach = (): void => {
+    if (destroyed || !visible || !map.getStyle()) return;
+    if (!map.getLayer(id)) {
+      // before the layer goes on: the host reads the presence on the style
+      // event that addLayer fires
+      if (claims3d) {
+        add3dPresence(map, id);
+      }
+      const insertBefore =
+        beforeId && map.getLayer(beforeId) ? beforeId : undefined;
+      map.addLayer(layer, insertBefore);
+      map.triggerRepaint();
+    }
+    // over the whole style, after the fleet, as on the flat map
+    if (spotlightLayer && !map.getLayer(spotlightId)) {
+      map.addLayer(spotlightLayer.layer);
+      map.triggerRepaint();
+    }
+    placeFleet(map, { anchorLayerId, fleetIds: [id], spotlightId });
+  };
+
+  const detach = (): void => {
+    remove3dPresence(map, id);
+    if (!map.getStyle()) return;
+    if (map.getLayer(spotlightId)) map.removeLayer(spotlightId);
+    if (map.getLayer(id)) map.removeLayer(id);
+  };
+
+  const applyOpacity = (): void => {
+    for (const entry of materials) {
+      entry.opacity = opacity;
+      entry.transparent = opacity < 1;
+      entry.needsUpdate = true;
+    }
+  };
+  applyOpacity();
+
+  // a basemap swap throws every layer away, so it has to go back on afterwards
+  const onStyleData = (): void => attach();
+  map.on("styledata", onStyleData);
+  // terrain on or off changes what a height means; the members are rebuilt
+  const onTerrain = (): void => {
+    const next = map.getTerrain() !== null && map.getTerrain() !== undefined;
+    if (next === hasTerrain) return;
+    hasTerrain = next;
+    buildStructure();
+    placeCars();
+    map.triggerRepaint();
+  };
+  map.on("terrain", onTerrain);
+
+  attach();
+  reportFleet();
+  run();
+
+  return {
+    setSpeed: fleet.setSpeed,
+    setPaused: (next) => {
+      if (paused === next) return;
+      paused = next;
+      run();
+    },
+    setOpacity: (next) => {
+      opacity = Math.max(0, Math.min(1, next));
+      applyOpacity();
+      spotlightLayer?.setOpacity(opacity);
+      map.triggerRepaint();
+    },
+    /**
+     * The whole custom layer goes off the style rather than its members being
+     * hidden: that stops the render loop with it, and it hands back the 3D
+     * presence, so a hidden fleet no longer holds the camera free.
+     */
+    setVisible: (next) => {
+      if (visible === next) return;
+      visible = next;
+      spotlightLayer?.setVisible(visible);
+      if (visible) {
+        attach();
+      } else {
+        detach();
+      }
+      run();
+      map.triggerRepaint();
+    },
+    getFleetSize: visibleCount,
+    pickCarAt,
+    selectCar: (index) => {
+      selection.set(index);
+      placeCars();
+      map.triggerRepaint();
+    },
+    getSelectedCar: selection.get,
+    pickNearestCar: (lon, lat) => {
+      const pose = fleet.pickNearest(lon, lat);
+      return pose ? { lon: pose.lon, lat: pose.lat } : null;
+    },
+    destroy: () => {
+      destroyed = true;
+      loop.destroy();
+      map.off("styledata", onStyleData);
+      map.off("terrain", onTerrain);
+      detach();
+      for (const geometry of geometries) geometry.dispose();
+      for (const entry of materials) entry.dispose();
+      structureGroup.traverse((object) => {
+        if (object instanceof THREE.InstancedMesh) object.geometry.dispose();
+      });
+      renderer?.dispose();
+      renderer = null;
+      spotlightLayer?.dispose();
+    },
+  };
+};

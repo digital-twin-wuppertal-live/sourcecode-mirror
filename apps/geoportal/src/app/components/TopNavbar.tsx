@@ -1,0 +1,365 @@
+import {
+  type CSSProperties,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import { useDispatch, useSelector } from "react-redux";
+import { Link, useLocation } from "react-router-dom";
+import { faCircleQuestion } from "@fortawesome/free-regular-svg-icons";
+import {
+  faBars,
+  faChevronLeft,
+  faChevronRight,
+  faImages,
+  faLayerGroup,
+  faPlane,
+} from "@fortawesome/free-solid-svg-icons";
+import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
+import { Button, Radio, type RadioChangeEvent, Tooltip } from "antd";
+
+import { UIDispatchContext } from "react-cismap/contexts/UIContextProvider";
+
+import { geoElements } from "@carma-collab/wuppertal/geoportal";
+import { getCollabedHelpComponentConfig as getCollabedHelpElementsConfig } from "@carma-collab/wuppertal/helper-overlay";
+import {
+  useOverlayHelper,
+  useOverlayTourContext,
+} from "@carma-commons/ui/helper-overlay";
+import { cn } from "@carma-commons/utils";
+import { useMapFrameworkSwitcherContext } from "@carma-mapping/components";
+import { SystemMessageBanner } from "@carma-mapping/layers";
+import { useFeatureFlags } from "@carma-providers/feature-flag";
+
+import {
+  getBackgroundLayer,
+  getSelectedByCategory,
+  setSelectedLayerIndex,
+} from "../store/slices/mapping";
+import { getUIVisibleControls, getZenMode } from "../store/slices/ui";
+
+import { findFachzwillingByPathname } from "../constants/fachzwillinge";
+import {
+  findBackgroundCategory,
+  backgroundConfig,
+  getBackgroundCategoryTitle,
+} from "../config/backgroundConfig";
+import { useMapStyle } from "../hooks/useGeoportalMapStyle";
+import { useOblique } from "../oblique/hooks/useOblique";
+import {
+  BackgroundAction,
+  TrackingCategory,
+  formatItemName,
+  trackEvent,
+} from "../tracking";
+
+import ActionButtons from "./nav-items/ActionButtons";
+
+import ResourceModal from "./nav-items/ResourceModal";
+import "./switch.css";
+
+const TopNavbar = () => {
+  const dispatch = useDispatch();
+  const flags = useFeatureFlags();
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [showHelpTooltip, setShowHelpTooltip] = useState(false);
+  const { showOverlayHandler } = useOverlayTourContext();
+  const { isObliqueMode, setObliqueMode } = useOblique();
+  const { currentStyle, setCurrentStyle } = useMapStyle();
+  const { pathname, search } = useLocation();
+  const fachzwilling = findFachzwillingByPathname(pathname);
+
+  const isTouchDevice =
+    "ontouchstart" in window || navigator.maxTouchPoints > 0;
+
+  const { setAppMenuVisible } =
+    useContext<typeof UIDispatchContext>(UIDispatchContext);
+
+  const { isLeaflet, isCesium } = useMapFrameworkSwitcherContext();
+  const backgroundLayer = useSelector(getBackgroundLayer);
+  const selectedByCategory = useSelector(getSelectedByCategory);
+  const zenMode = useSelector(getZenMode);
+  const visibleControls = useSelector(getUIVisibleControls);
+  const navbarHidden = zenMode || !visibleControls.navbar;
+
+  const hintergrundConfig = useMemo(
+    () => getCollabedHelpElementsConfig("HINTERGRUND", geoElements),
+    []
+  );
+  const modalMenuConfig = useMemo(
+    () => getCollabedHelpElementsConfig("MENU", geoElements),
+    []
+  );
+  const oblqConfig = useMemo(
+    () => getCollabedHelpElementsConfig("OBLIQUE", geoElements),
+    []
+  );
+
+  const hintergrundTourRef = useOverlayHelper(hintergrundConfig);
+  const modalMenuTourRef = useOverlayHelper(modalMenuConfig);
+  const oblqTourRef = useOverlayHelper(oblqConfig);
+
+  const overlayConfig = useMemo(() => {
+    return {
+      ...getCollabedHelpElementsConfig("HILFE_OVERLAY", geoElements),
+      primary: {
+        ...getCollabedHelpElementsConfig("HILFE_OVERLAY", geoElements).primary,
+        minWindowSize: 1024,
+      },
+    };
+  }, []);
+
+  const helpOverlayTourRef = useOverlayHelper(overlayConfig);
+
+  const toggleMobileMenu = useCallback(() => {
+    setMobileMenuOpen(!mobileMenuOpen);
+  }, [mobileMenuOpen]);
+
+  const handleShowHelpTooltip = useCallback(() => {
+    setShowHelpTooltip(true);
+  }, []);
+
+  const handleHideHelpTooltip = useCallback(() => {
+    setShowHelpTooltip(false);
+  }, []);
+
+  const handleBackgroundLayerChange = useCallback(
+    (e: RadioChangeEvent) => {
+      e.stopPropagation();
+      const category = findBackgroundCategory(e.target.value);
+      if (e.target.value === "openBaseLayerView") {
+        trackEvent(
+          TrackingCategory.BACKGROUND,
+          BackgroundAction.OPEN_SELECTION
+        );
+        dispatch(setSelectedLayerIndex(-1));
+      } else if (category) {
+        // the plain title, not getBackgroundCategoryTitle: the engine-specific
+        // one would file the same background under two names in the reports
+        trackEvent(
+          TrackingCategory.BACKGROUND,
+          BackgroundAction.SWITCH,
+          formatItemName(category.title, category.id)
+        );
+        setCurrentStyle(e.target.value);
+      }
+    },
+    [dispatch, setCurrentStyle]
+  );
+
+  const handleAppMenuVisible = useCallback(() => {
+    setAppMenuVisible(true);
+  }, []); // setAppMenuVisible from context is stable
+
+  const [bannerVisible, setBannerVisible] = useState(false);
+  const bannerRef = useRef<HTMLDivElement | null>(null);
+
+  const bannerHidden = navbarHidden || !bannerVisible;
+
+  useEffect(() => {
+    const root = document.documentElement;
+    const setHeight = (px: number) => {
+      root.style.setProperty("--system-message-banner-height", `${px}px`);
+    };
+
+    if (bannerHidden || !bannerRef.current) {
+      setHeight(0);
+      return;
+    }
+
+    const el = bannerRef.current;
+    setHeight(el.getBoundingClientRect().height);
+
+    const observer = new ResizeObserver((entries) => {
+      const entry = entries[0];
+      if (entry) setHeight(entry.contentRect.height);
+    });
+    observer.observe(el);
+
+    return () => {
+      observer.disconnect();
+      setHeight(0);
+    };
+  }, [bannerHidden]);
+
+  const mainStyle = useMemo((): CSSProperties => {
+    return {
+      visibility: navbarHidden ? "hidden" : undefined,
+      display: navbarHidden ? "none" : "flex",
+      zIndex: 10000,
+      top: "var(--system-message-banner-height, 0px)",
+    };
+  }, [navbarHidden]);
+
+  const bannerStyle = useMemo((): CSSProperties => {
+    return {
+      visibility: bannerHidden ? "hidden" : undefined,
+      display: bannerHidden ? "none" : "block",
+      zIndex: 10000,
+    };
+  }, [bannerHidden]);
+
+  console.debug("RENDER: TopNavbar");
+
+  return (
+    <>
+      <div
+        ref={bannerRef}
+        className="fixed top-0 left-0 right-0"
+        style={bannerStyle}
+      >
+        <SystemMessageBanner
+          appKey="geoportal"
+          slot="main"
+          onVisibilityChange={setBannerVisible}
+        />
+      </div>
+      <div
+        // named so a map addon can measure how far the chrome reaches down over
+        // the map area; the bar is `display: none` while it is hidden, which
+        // measures as nothing covered
+        id="topNavbar"
+        className={`bg-white h-16 fixed left-0 right-0 items-center justify-between gap-2 xs:gap-3 sm:gap-6 py-2 pt-safe-top pb-safe-bottom pl-safe-left xs:pl-safe-left-xs pr-safe-right xs:pr-safe-right-xs`}
+        style={mainStyle}
+      >
+        <ResourceModal />
+
+        <p
+          className={`mb-0 font-semibold text-lg min-w-max ${
+            mobileMenuOpen ? "sm:block hidden" : ""
+          }`}
+        >
+          {fachzwilling?.title ? (
+            <>
+              <Link
+                // keep the hash query so the map position survives
+                to={{ pathname: "/", search }}
+                title="zurück zum Geoportal"
+                className="text-inherit hover:text-gray-500 hover:no-underline"
+              >
+                DigiTal Zwilling
+              </Link>
+              {` / ${fachzwilling.title}`}
+            </>
+          ) : (
+            "DigiTal Zwilling / Geoportal"
+          )}
+        </p>
+
+        <button
+          onClick={toggleMobileMenu}
+          className="sm:hidden flex items-center justify-center p-2 select-none"
+        >
+          <FontAwesomeIcon
+            icon={mobileMenuOpen ? faChevronRight : faChevronLeft}
+          />
+        </button>
+
+        <div
+          className={cn("transition-all duration-300 ease-in-out", {
+            "hidden sm:block": !mobileMenuOpen,
+          })}
+        >
+          <ActionButtons />
+        </div>
+
+        <div
+          className={cn("transition-all duration-300 ease-in-out", {
+            "hidden sm:block": !mobileMenuOpen,
+          })}
+        >
+          <div className={cn("flex items-center gap-3 sm:gap-6")}>
+            <Tooltip
+              open={!isTouchDevice && showHelpTooltip}
+              title="Hilfefolie überlagern"
+            >
+              <button
+                className="hover:text-gray-600 text-xl lg:mr-11 hidden sm:block xl:mr-40 select-none"
+                onClick={showOverlayHandler}
+                data-test-id="helper-overlay-btn"
+                ref={helpOverlayTourRef}
+                onMouseEnter={handleShowHelpTooltip}
+                onMouseLeave={handleHideHelpTooltip}
+              >
+                <FontAwesomeIcon
+                  className="h-[24px] pt-1"
+                  icon={faCircleQuestion}
+                />
+              </button>
+            </Tooltip>
+            {flags.featureFlagObliqueMode && isCesium && (
+              <Tooltip
+                title={
+                  isObliqueMode
+                    ? "Modus Schrägluftbilder ausschalten"
+                    : "Modus Schrägluftbilder einschalten"
+                }
+              >
+                <Button
+                  type={isObliqueMode ? "primary" : "default"}
+                  onClick={() => setObliqueMode(!isObliqueMode)}
+                  ref={oblqTourRef}
+                  className="mr-2 select-none"
+                >
+                  <FontAwesomeIcon icon={faPlane} rotation={270} />
+                  <FontAwesomeIcon icon={faImages} />
+                </Button>
+              </Tooltip>
+            )}
+            <div className="lg:flex hidden" ref={hintergrundTourRef}>
+              {backgroundLayer && (
+                <Radio.Group
+                  value={currentStyle}
+                  onChange={handleBackgroundLayerChange}
+                >
+                  {backgroundConfig.categories.map((category) => (
+                    <Tooltip
+                      key={category.id}
+                      title={
+                        isLeaflet
+                          ? selectedByCategory[category.id]?.title
+                          : getBackgroundCategoryTitle(category, isLeaflet)
+                      }
+                    >
+                      <Radio.Button className="select-none" value={category.id}>
+                        {category.title}
+                      </Radio.Button>
+                    </Tooltip>
+                  ))}
+                  <Tooltip title="Hintergrund auswählen">
+                    <Radio.Button
+                      className="select-none"
+                      value="openBaseLayerView"
+                      disabled={!isLeaflet}
+                    >
+                      <FontAwesomeIcon
+                        id="openBaseLayerView"
+                        icon={faLayerGroup}
+                      />
+                    </Radio.Button>
+                  </Tooltip>
+                </Radio.Group>
+              )}
+            </div>
+
+            <Tooltip title="Kompaktanleitung | Login">
+              <Button
+                onClick={handleAppMenuVisible}
+                ref={modalMenuTourRef}
+                data-test-id="modal-menu-btn"
+                className="select-none"
+              >
+                <FontAwesomeIcon icon={faBars} />
+              </Button>
+            </Tooltip>
+          </div>
+        </div>
+      </div>
+    </>
+  );
+};
+
+export default TopNavbar;

@@ -1,0 +1,432 @@
+import {
+  rasterDemTerrainTileUrl,
+  type RasterDemTerrainResource,
+} from "@carma-commons/resources";
+import { runTerrainWorkerTask } from "./terrain-worker-client";
+import { resolveRasterMeshErrorMeters } from "../../core/raster-mesh-error";
+import { TERRAIN_WORKER_TASK_KIND } from "../../core/terrain-worker-protocol";
+import {
+  getRasterDemTileGeometricError,
+  getRasterDemTileGridIdsForBounds,
+  isRasterDemTileDataAvailable,
+  type RasterDemTileGrid,
+} from "../../core/raster-dem-tile-grid";
+
+import {
+  assertTileId,
+  latitudeToTileY,
+  getTileBounds,
+  sampleRaster,
+  terrainTileKey,
+  type TerrainTileId,
+  type TerrainTileBounds,
+  type TerrainTile,
+  type DecodedRaster,
+} from "../../core/raster-dem-tile";
+export { terrainTileKey } from "../../core/raster-dem-tile";
+export type {
+  TerrainTileId,
+  TerrainTileBounds,
+  TerrainTile,
+} from "../../core/raster-dem-tile";
+const DEFAULT_MAX_CACHE_BYTES = 96 * 1024 ** 2;
+const TILE_RETRY_BASE_DELAY_MS = 250;
+const TILE_RETRY_MAX_DELAY_MS = 8_000;
+const TILE_RETRY_MAX_ATTEMPTS = 8;
+
+export type RasterDemTerrainTileSourceOptions = Readonly<{
+  maxCacheBytes?: number;
+  meshSegments?: number;
+  maximumMeshSegments?: number;
+}>;
+
+export interface RasterDemTerrainTileSource {
+  requestTile: (
+    id: TerrainTileId,
+    signal?: AbortSignal,
+    maximumMeshErrorMeters?: number
+  ) => Promise<TerrainTile>;
+  getTileGridIdsForBounds: (
+    bounds: TerrainTileBounds,
+    level: number
+  ) => TerrainTileId[];
+  getTileBounds: (id: TerrainTileId) => TerrainTileBounds;
+  getLevelMaximumGeometricError: (level: number) => number;
+  getTileDataAvailable: (id: TerrainTileId) => boolean;
+  sampleHeight: (longitude: number, latitude: number) => number | undefined;
+  trimCache: (retainedKeys?: ReadonlySet<string>) => void;
+  release: () => void;
+}
+
+type CacheEntry = {
+  tile: TerrainTile;
+  raster: DecodedRaster;
+  lastUsed: number;
+};
+
+type PendingRequest = {
+  controller: AbortController;
+  promise: Promise<TerrainTile>;
+  consumers: number;
+};
+
+class TerrainRequestError extends Error {
+  constructor(message: string, readonly statusCode?: number) {
+    super(message);
+  }
+}
+
+const sources = new Map<
+  string,
+  { source: RasterDemTerrainTileSource; users: number }
+>();
+
+export const isConfirmedTerrainServerError = (error: unknown): boolean => {
+  if (!error || typeof error !== "object" || !("statusCode" in error)) {
+    return false;
+  }
+  const status = (error as { statusCode?: unknown }).statusCode;
+  return (
+    typeof status === "number" &&
+    status >= 400 &&
+    status < 500 &&
+    status !== 408 &&
+    status !== 429
+  );
+};
+
+const waitWithSignal = (ms: number, signal?: AbortSignal): Promise<void> =>
+  new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(signal.reason ?? new Error("aborted"));
+      return;
+    }
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal?.reason ?? new Error("aborted"));
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+
+const buildSource = (
+  config: RasterDemTerrainResource,
+  options: RasterDemTerrainTileSourceOptions
+): RasterDemTerrainTileSource => {
+  const meshSegments = Math.max(
+    2,
+    Math.min(
+      config.tileSize,
+      Math.floor(options.meshSegments ?? config.tileSize)
+    )
+  );
+  const tileGrid: RasterDemTileGrid = {
+    bounds: {
+      west: config.bounds[0],
+      south: config.bounds[1],
+      east: config.bounds[2],
+      north: config.bounds[3],
+    },
+    minzoom: config.minzoom,
+    maxzoom: config.maxzoom,
+    meshSegments,
+  };
+  const maxCacheBytes = Math.max(
+    1,
+    Math.floor(options.maxCacheBytes ?? DEFAULT_MAX_CACHE_BYTES)
+  );
+  const cache = new Map<string, CacheEntry>();
+  const pending = new Map<string, PendingRequest>();
+  const lifetime = new AbortController();
+  let cachedBytes = 0;
+  let useClock = 0;
+
+  const getLevelMaximumGeometricError = (level: number) =>
+    getRasterDemTileGeometricError(tileGrid, level);
+  const tileIsAvailable = (id: TerrainTileId) =>
+    isRasterDemTileDataAvailable(tileGrid, id);
+  const trimCache = (retainedKeys: ReadonlySet<string> = new Set()) => {
+    if (cachedBytes <= maxCacheBytes) return;
+    const candidates = [...cache.entries()]
+      .filter(([, entry]) => !retainedKeys.has(terrainTileKey(entry.tile.id)))
+      .sort(([, left], [, right]) => left.lastUsed - right.lastUsed);
+    for (const [key, entry] of candidates) {
+      cache.delete(key);
+      cachedBytes -= entry.tile.byteLength + entry.raster.pixels.byteLength;
+      if (cachedBytes <= maxCacheBytes) break;
+    }
+  };
+  const waitForPending = (
+    key: string,
+    request: PendingRequest,
+    signal: AbortSignal
+  ): Promise<TerrainTile> => {
+    signal.throwIfAborted();
+    request.consumers += 1;
+    return new Promise((resolve, reject) => {
+      let active = true;
+      const detach = () => {
+        if (!active) return false;
+        active = false;
+        signal.removeEventListener("abort", onAbort);
+        request.consumers -= 1;
+        return true;
+      };
+      const onAbort = () => {
+        if (!detach()) return;
+        if (request.consumers === 0) {
+          // A cancelled speculative request may already have been adopted by
+          // visible terrain. Only its final consumer owns cancellation.
+          if (pending.get(key) === request) pending.delete(key);
+          request.controller.abort(signal.reason);
+        }
+        reject(signal.reason);
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
+      request.promise.then(
+        (tile) => {
+          if (detach()) resolve(tile);
+        },
+        (error: unknown) => {
+          if (detach()) reject(error);
+        }
+      );
+    });
+  };
+  const requestTile = async (
+    id: TerrainTileId,
+    signal?: AbortSignal,
+    requestedMaximumErrorMeters?: number
+  ) => {
+    signal = signal
+      ? AbortSignal.any([signal, lifetime.signal])
+      : lifetime.signal;
+    assertTileId(id);
+    if (!tileIsAvailable(id)) {
+      throw new TerrainRequestError(
+        `Terrain tile ${terrainTileKey(id)} is outside the configured source`,
+        404
+      );
+    }
+    signal?.throwIfAborted();
+    const maximumMeshErrorMeters = resolveRasterMeshErrorMeters(
+      requestedMaximumErrorMeters
+    );
+    const tileKey = terrainTileKey(id);
+    const key = `${tileKey}:error=${maximumMeshErrorMeters}`;
+    const cached = cache.get(key);
+    if (cached) {
+      cached.lastUsed = ++useClock;
+      return cached.tile;
+    }
+    const inFlight = pending.get(key);
+    if (inFlight) return waitForPending(key, inFlight, signal);
+    const controller = new AbortController();
+    const loadSignal = AbortSignal.any([controller.signal, lifetime.signal]);
+    const load = (async () => {
+      // A stricter view reuses the decoded source. Different mesh-error variants
+      // never share geometry by tile id alone, and concurrent variants share the
+      // first source request rather than downloading/decoding the PNG twice.
+      const otherVariant = [...pending].find(([pendingKey]) =>
+        pendingKey.startsWith(`${tileKey}:error=`)
+      );
+      if (otherVariant) {
+        await waitForPending(otherVariant[0], otherVariant[1], loadSignal);
+      }
+      loadSignal.throwIfAborted();
+      const decoded = [...cache.values()].find(
+        (entry) => terrainTileKey(entry.tile.id) === tileKey
+      )?.raster;
+      if (decoded) {
+        const result = await runTerrainWorkerTask(
+          {
+            kind: TERRAIN_WORKER_TASK_KIND.REMESH,
+            raster: decoded,
+            id,
+            error: getLevelMaximumGeometricError(id.level),
+            maximumMeshErrorMeters,
+            maximumMeshSegments: options.maximumMeshSegments,
+          },
+          loadSignal
+        );
+        if (result.kind !== TERRAIN_WORKER_TASK_KIND.REMESH)
+          throw new Error("Unexpected terrain remeshing result");
+        loadSignal.throwIfAborted();
+        cache.set(key, {
+          tile: result.tile,
+          raster: result.raster,
+          lastUsed: ++useClock,
+        });
+        cachedBytes += result.tile.byteLength + result.raster.pixels.byteLength;
+        trimCache();
+        return result.tile;
+      }
+      const url = rasterDemTerrainTileUrl(config)
+        .replace("{z}", String(id.level))
+        .replace("{x}", String(id.x))
+        .replace("{y}", String(id.y));
+      let response: Response | null = null;
+      for (let attempt = 0; attempt < TILE_RETRY_MAX_ATTEMPTS; attempt += 1) {
+        try {
+          response = await fetch(url, { signal: loadSignal });
+          if (!response.ok) {
+            throw new TerrainRequestError(
+              `Terrain request failed with ${response.status}`,
+              response.status
+            );
+          }
+          break;
+        } catch (error) {
+          loadSignal.throwIfAborted();
+          if (
+            isConfirmedTerrainServerError(error) ||
+            attempt + 1 >= TILE_RETRY_MAX_ATTEMPTS
+          ) {
+            throw error;
+          }
+          await waitWithSignal(
+            Math.min(
+              TILE_RETRY_MAX_DELAY_MS,
+              TILE_RETRY_BASE_DELAY_MS * 2 ** attempt
+            ) *
+              (0.5 + Math.random()),
+            loadSignal
+          );
+        }
+      }
+      if (!response)
+        throw new Error("Terrain request did not produce a response");
+      const payload = await response.blob();
+      const result = await runTerrainWorkerTask(
+        {
+          kind: TERRAIN_WORKER_TASK_KIND.DECODE,
+          blob: payload,
+          id,
+          segments: meshSegments,
+          error: getLevelMaximumGeometricError(id.level),
+          maximumMeshErrorMeters,
+          maximumMeshSegments: options.maximumMeshSegments,
+        },
+        loadSignal
+      );
+      if (result.kind !== TERRAIN_WORKER_TASK_KIND.DECODE)
+        throw new Error("Unexpected terrain decoding result");
+      loadSignal.throwIfAborted();
+      const { raster } = result;
+      // The decoded arrays are a fixed size for a given grid; only the fetched
+      // payload says how much this tile actually cost to bring in.
+      const tile = { ...result.tile, payloadByteLength: payload.size };
+      cache.set(key, { tile, raster, lastUsed: ++useClock });
+      cachedBytes += tile.byteLength + raster.pixels.byteLength;
+      trimCache();
+      return tile;
+    })();
+    const request: PendingRequest = { controller, promise: load, consumers: 0 };
+    pending.set(key, request);
+    const removePending = () => {
+      if (pending.get(key) === request) pending.delete(key);
+    };
+    load.then(removePending, removePending);
+    return waitForPending(key, request, signal);
+  };
+
+  return {
+    requestTile,
+    getTileGridIdsForBounds(bounds, level) {
+      if (!Number.isInteger(level) || level < 0) {
+        throw new RangeError("Terrain level must be a non-negative integer");
+      }
+      return getRasterDemTileGridIdsForBounds(tileGrid, bounds, level);
+    },
+    getTileBounds,
+    getLevelMaximumGeometricError,
+    getTileDataAvailable: tileIsAvailable,
+    sampleHeight(longitude, latitude) {
+      // Height queries run for floating labels too. Select the finest covering
+      // tile without allocating and sorting the entire cache for every label.
+      let entry: CacheEntry | undefined;
+      for (const candidate of cache.values()) {
+        const { bounds, id } = candidate.tile;
+        if (
+          (!entry || id.level > entry.tile.id.level) &&
+          longitude >= bounds.west &&
+          longitude <= bounds.east &&
+          latitude >= bounds.south &&
+          latitude <= bounds.north
+        ) {
+          entry = candidate;
+        }
+      }
+      if (!entry) return undefined;
+      entry.lastUsed = ++useClock;
+      const { bounds } = entry.tile;
+      const x = Math.max(
+        0,
+        Math.min(
+          entry.raster.width - 1,
+          ((longitude - bounds.west) / (bounds.east - bounds.west)) *
+            entry.raster.width -
+            0.5
+        )
+      );
+      const y = Math.max(
+        0,
+        Math.min(
+          entry.raster.height - 1,
+          (latitudeToTileY(latitude, entry.tile.id.level) - entry.tile.id.y) *
+            entry.raster.height -
+            0.5
+        )
+      );
+      return sampleRaster(entry.raster, x, y);
+    },
+    trimCache,
+    release() {
+      lifetime.abort();
+      cache.clear();
+      pending.clear();
+      cachedBytes = 0;
+    },
+  };
+};
+
+export const acquireRasterDemTerrainTileSource = (
+  config: RasterDemTerrainResource,
+  options: RasterDemTerrainTileSourceOptions = {}
+): Promise<RasterDemTerrainTileSource> => {
+  if (config.encoding !== "terrarium") {
+    throw new TypeError("Shadow terrain requires Terrarium elevation encoding");
+  }
+  const normalized = {
+    ...config,
+    url: config.url.trim(),
+    bounds: [...config.bounds] as RasterDemTerrainResource["bounds"],
+  } satisfies RasterDemTerrainResource;
+  if (!normalized.id || !normalized.url) {
+    throw new TypeError("Terrain source id and URL must not be empty");
+  }
+  const key = JSON.stringify([normalized, options]);
+  const entry = sources.get(key) ?? {
+    source: buildSource(normalized, options),
+    users: 0,
+  };
+  sources.set(key, entry);
+  entry.users += 1;
+  let released = false;
+  // A source switch can overlap two runtimes. Keep shared decoded data only
+  // while a consumer exists; persistent binary records remain on disk.
+  return Promise.resolve({
+    ...entry.source,
+    release() {
+      if (released) return;
+      released = true;
+      entry.users -= 1;
+      if (entry.users !== 0) return;
+      sources.delete(key);
+      entry.source.release();
+    },
+  });
+};

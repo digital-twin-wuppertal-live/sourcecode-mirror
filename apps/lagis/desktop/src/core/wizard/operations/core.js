@@ -1,0 +1,249 @@
+import {
+  ActionNotSuccessfulError,
+  deleteFlurstueck,
+  deleteSchluessel,
+  fetchFlurstueckArten,
+  fetchFlurstueckBySchluesselId,
+  fetchSuccessorEdges,
+  findArtByBezeichnung,
+  findSchluesselByKey,
+  insertFlurstueck,
+  insertSchluessel,
+  toTimestamp,
+  updateNutzung,
+  updateNutzungBuchung,
+  updateRebe,
+  updateMipa,
+  updateSchluessel,
+} from "../api";
+import { FLURSTUECK_ART } from "../constants";
+import { formatKey, isPseudoKey } from "../keys";
+
+export const staedtischColumns = (key, useDate) => {
+  const isStaedtisch = key.art?.bezeichnung === FLURSTUECK_ART.STAEDTISCH;
+  if (!isStaedtisch) {
+    return {};
+  }
+  const now = new Date();
+  if (!key.warStaedtisch) {
+    return useDate
+      ? {
+          war_staedtisch: true,
+          datum_letzter_stadtbesitz: toTimestamp(useDate),
+        }
+      : {
+          war_staedtisch: true,
+          datum_letzter_stadtbesitz: toTimestamp(now),
+          datum_entstehung: toTimestamp(now),
+        };
+  }
+  return { datum_letzter_stadtbesitz: toTimestamp(useDate ?? now) };
+};
+
+export const createFlurstueckForKey = async (key, ctx) => {
+  const { jwt, accountName, journal } = ctx;
+
+  let schluesselId = key.id;
+
+  if (!schluesselId) {
+    if (!isPseudoKey(key)) {
+      const existing = await findSchluesselByKey(key, jwt);
+      if (existing) {
+        throw new ActionNotSuccessfulError(
+          `Das Flurstück "${formatKey(key)}" ist bereits vorhanden.`
+        );
+      }
+    }
+    const created = new Date();
+    schluesselId = await insertSchluessel(
+      {
+        fk_gemarkung: key.gemarkung?.id ?? null,
+        flur: key.flur ?? null,
+        flurstueck_zaehler: key.zaehler ?? null,
+        flurstueck_nenner: key.nenner ?? null,
+        fk_flurstueck_art: key.art?.id ?? null,
+        ist_gesperrt: false,
+        datum_entstehung: toTimestamp(created),
+        war_staedtisch: key.warStaedtisch ?? null,
+        letzter_bearbeiter: accountName,
+        letzte_bearbeitung: toTimestamp(created),
+        ...staedtischColumns(key, created),
+      },
+      jwt
+    );
+    journal.record(`Anlegen des Flurstücksschlüssels "${formatKey(key)}"`, () =>
+      deleteSchluessel(schluesselId, jwt)
+    );
+  }
+
+  const flurstueckId = await insertFlurstueck(
+    { fk_flurstueck_schluessel: schluesselId },
+    jwt
+  );
+  journal.record(`Anlegen des Flurstücks "${formatKey(key)}"`, () =>
+    deleteFlurstueck(flurstueckId, jwt)
+  );
+
+  return { ...key, id: schluesselId, flurstueckId };
+};
+
+export const hasHistoryEntry = async (flurstueckId, jwt) =>
+  (await fetchSuccessorEdges(flurstueckId, jwt)).length > 0;
+
+export const setHistoricForKey = async (key, date, options, ctx) => {
+  const { jwt, accountName, journal } = ctx;
+  const keyString = formatKey(key);
+
+  if (!key.warStaedtisch) {
+    const previous = key.gueltigBis ?? null;
+    await updateSchluessel(
+      key.id,
+      { gueltig_bis: toTimestamp(date) },
+      jwt,
+      accountName
+    );
+    journal.record(`Historisch setzen von "${keyString}"`, () =>
+      updateSchluessel(key.id, { gueltig_bis: previous }, jwt, accountName)
+    );
+    return toTimestamp(date);
+  }
+
+  const flurstueck = await fetchFlurstueckBySchluesselId(key.id, jwt);
+  if (!flurstueck) {
+    throw new ActionNotSuccessfulError(
+      `Zu "${keyString}" existiert kein Flurstück.`
+    );
+  }
+
+  // only the "historisch setzen" action itself asks to close rights/leases
+
+  if (options?.mipaVertragsendeDatum) {
+    for (const mipa of options.mipa ?? []) {
+      const previous = mipa.vertragsende ?? null;
+      await updateMipa(
+        mipa.id,
+        toTimestamp(options.mipaVertragsendeDatum),
+        jwt
+      );
+      journal.record(`Vertragsende der Vermietung/Verpachtung ${mipa.id}`, () =>
+        updateMipa(mipa.id, previous, jwt)
+      );
+    }
+  }
+  if (options?.rebeLoeschDatum) {
+    for (const rebe of options.rebe ?? []) {
+      const previous = rebe.datum_loeschung ?? null;
+      await updateRebe(rebe.id, toTimestamp(options.rebeLoeschDatum), jwt);
+      journal.record(`Löschdatum des Rechts/der Belastung ${rebe.id}`, () =>
+        updateRebe(rebe.id, previous, jwt)
+      );
+    }
+  }
+
+  if (key.gueltigBis) {
+    // already historic: the picked date is ignored, the old end date stays
+    return key.gueltigBis;
+  }
+
+  const artName = key.art?.bezeichnung;
+
+  if (artName !== FLURSTUECK_ART.STAEDTISCH) {
+    // catalogue checked first so the error below is not misleading
+    const arten = await fetchFlurstueckArten(jwt);
+    if (!findArtByBezeichnung(arten, FLURSTUECK_ART.ABTEILUNG_IX)) {
+      throw new ActionNotSuccessfulError(
+        "Flurstücksart AbteilungIX konnte nicht gefunden werden."
+      );
+    }
+    if (artName !== FLURSTUECK_ART.ABTEILUNG_IX) {
+      throw new ActionNotSuccessfulError(
+        `Die Flurstückart ${FLURSTUECK_ART.STAEDTISCH} ist nicht in der Datenbank.`
+      );
+    }
+    if (!key.datumLetzterStadtbesitz) {
+      throw new ActionNotSuccessfulError(
+        "Das Flurstück war schon mal in Stadtbesitz, aber es existiert kein Datum wann."
+      );
+    }
+    // Abteilung IX: the parcel is closed on the day the city lost it
+    return await closeParcel(
+      key,
+      flurstueck,
+      new Date(key.datumLetzterStadtbesitz),
+      { setLastOwnership: false },
+      ctx
+    );
+  }
+
+  return await closeParcel(
+    key,
+    flurstueck,
+    date,
+    { setLastOwnership: true },
+    ctx
+  );
+};
+
+const closeParcel = async (
+  key,
+  flurstueck,
+  date,
+  { setLastOwnership },
+  ctx
+) => {
+  const { jwt, accountName, journal } = ctx;
+  const keyString = formatKey(key);
+  const stamp = toTimestamp(date);
+
+  const previousGueltigBis = key.gueltigBis ?? null;
+  const previousStadtbesitz = key.datumLetzterStadtbesitz ?? null;
+
+  await updateSchluessel(
+    key.id,
+    {
+      gueltig_bis: stamp,
+      ...(setLastOwnership ? { datum_letzter_stadtbesitz: stamp } : {}),
+    },
+    jwt,
+    accountName
+  );
+  journal.record(`Historisch setzen von "${keyString}"`, () =>
+    updateSchluessel(
+      key.id,
+      {
+        gueltig_bis: previousGueltigBis,
+        ...(setLastOwnership
+          ? { datum_letzter_stadtbesitz: previousStadtbesitz }
+          : {}),
+      },
+      jwt,
+      accountName
+    )
+  );
+
+  for (const nutzung of flurstueck.nutzungen) {
+    const wasHistorisch = nutzung.historisch ?? false;
+    if (!wasHistorisch) {
+      await updateNutzung(nutzung.id, { historisch: true }, jwt);
+      journal.record(`Historisch setzen der Nutzung ${nutzung.id}`, () =>
+        updateNutzung(nutzung.id, { historisch: wasHistorisch }, jwt)
+      );
+    }
+    for (const buchung of nutzung.nutzung_buchungArrayRelationShip ?? []) {
+      const current = buchung.gueltig_bis;
+      const needsClosing =
+        current === null ||
+        current === undefined ||
+        new Date(current) > new Date(date);
+      if (!needsClosing) {
+        continue;
+      }
+      await updateNutzungBuchung(buchung.id, { gueltig_bis: stamp }, jwt);
+      journal.record(`Gültigkeit der Nutzungsbuchung ${buchung.id}`, () =>
+        updateNutzungBuchung(buchung.id, { gueltig_bis: current ?? null }, jwt)
+      );
+    }
+  }
+
+  return stamp;
+};

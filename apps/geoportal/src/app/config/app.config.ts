@@ -1,0 +1,286 @@
+import {
+  BASEMAP_METROPOLE_RUHR_WMTS_GRAUBLAU_HQ,
+  WUPP_LOD2_TILESET,
+  WUPP_MESH_2024,
+  WUPP_TERRAIN_PROVIDER,
+  WUPP_TERRAIN_PROVIDER_DSM_MESH_2024_1M,
+} from "@carma-commons/resources";
+import { REFERENCE_OBJECT_SCALING_MODES } from "@carma-commons/math";
+
+import type { CesiumConfig } from "@carma-mapping/engines/cesium/react/runtime";
+import type { CesiumModelConfig } from "@carma-mapping/engines/cesium/core";
+import type { LeafletConfig } from "@carma-mapping/engines/leaflet";
+import {
+  filterAddonsByAvailability,
+  getAddonKind,
+  type AddonEntry,
+} from "@carma-mapping/addons";
+import {
+  ANNOTATION_SELECT_TOOL_ID,
+  ANNOTATION_TYPES,
+} from "@carma-mapping/annotations/core";
+import type { AnnotationToolId } from "@carma-mapping/annotations/core";
+import {
+  type AreaOcclusionStyleOptions,
+  type AnnotationLineStyleOptions,
+  type AnnotationReferenceObjectSizingOptions,
+} from "@carma-mapping/annotations/runtime";
+import {
+  DEFAULT_ANNOTATION_INFO_BOX_TOOL_IDS,
+  type AnnotationInfoBoxLayoutProps,
+} from "@carma-mapping/annotations/ui";
+import { Rectangle } from "cesium";
+
+import { availabilityContext } from "./availability";
+import { defaultWorkflowAddons } from "../constants/default-workflows";
+
+export const APP_BASE_PATH = import.meta.env.BASE_URL;
+export const ICON_PREFIX =
+  "https://www.wuppertal.de/geoportal/geoportal_icon_legends/";
+
+export const CONFIG_BASE_URL =
+  "https://ceepr.cismet.de/config/wuppertal/_dev_geoportal/";
+
+export const MIN_MOBILE_WIDTH = 600;
+export const DEFAULT_CAMERA_FOV_DEG = 60;
+
+/**
+ * What the MapLibre map shows where nothing is drawn: outside a standalone
+ * tileset's coverage, or before its tiles arrive. A neutral midday tone
+ * rather than black or the page background.
+ */
+export const MAP_BACKGROUND_COLOR = "#d8dde3";
+
+/**
+ * Addons every route gets. A route declaring the same addon replaces the entry
+ * here, see `withDefaultAddons`.
+ *
+ * `cameraRestriction` keeps the MapLibre camera north-up and flat everywhere,
+ * which is the app's long-standing behaviour, except while a 3D layer is on the
+ * map: buildings, trees and tilesets only show up in a tilted view. The mode
+ * asks the map what it is drawing rather than matching layer names, so a new 3D
+ * style is covered the day it is published. A route that wants different rules
+ * declares the addon itself with a config of its own.
+ *
+ * `libreTerrain` follows the restriction the engine ends up with rather than
+ * the layers: whenever the camera is free the terrain is on, and it goes off
+ * again the moment the camera locks. There is no button to it; the app
+ * switches CarmaMap's own terrain button off as well (`terrainControl={false}`),
+ * so relief is never a choice the user has to make.
+ *
+ * `attribution` shows the credits the visible styles declare on their sources
+ * (e.g. © OpenStreetMap for the Shortbread background) for five seconds, then
+ * removes them, as the OSMF attribution guidelines allow as long as the
+ * licence stays findable elsewhere (the menu).
+ * Backgrounds without a source attribution show nothing. It sits below the
+ * infobox in the bottom right corner.
+ */
+export const DEFAULT_ADDONS: AddonEntry[] = [
+  {
+    addon: "cameraRestriction",
+    config: { mode: "unless3dLayersActive" },
+  },
+  {
+    addon: "libreTerrain",
+    config: { appKey: "geoportal", mode: "whileCameraFree" },
+  },
+  {
+    addon: "attribution",
+    config: { mode: "transient", hideAfterSeconds: 5 },
+  },
+];
+
+/**
+ * The app's defaults, with the route's own declarations taking precedence.
+ * A default addon may carry an `availability` like a route addon; a feature
+ * flag used there must be in the base feature flag config (featureFlags.ts).
+ * The route's addons arrive already filtered, see constants/fachzwillinge.
+ *
+ * The default workflows join the defaults as ordinary addon entries, each
+ * carrying the definition it launches at mount, see constants/default-workflows.
+ * They follow the same precedence rule, so a route that declares the same kind
+ * takes the engine over and the default workflow does not run there.
+ */
+export const withDefaultAddons = (addons?: AddonEntry[]): AddonEntry[] => {
+  const declared = new Set((addons ?? []).map(getAddonKind));
+  return [
+    ...[
+      ...filterAddonsByAvailability(DEFAULT_ADDONS, availabilityContext),
+      ...defaultWorkflowAddons(),
+    ].filter((addon) => !declared.has(getAddonKind(addon))),
+    ...(addons ?? []),
+  ];
+};
+
+const CESIUM_PATHNAME = "__cesium__";
+const METROPOLE_RUHR_GRAUBLAU_RECTANGLE = Rectangle.fromDegrees(4, 48, 10, 52);
+export const CESIUM_TILESET_IDS = {
+  MESH_2024: "wupp-mesh-2024",
+  LOD2: "wupp-lod2",
+} as const;
+export const CESIUM_TERRAIN_PROVIDER_IDS = {
+  TERRAIN_2020: "terrain-2020",
+  DSM_MESH_2024_1M: "dsm-mesh-2024-1m",
+} as const;
+export const CESIUM_IMAGERY_LAYER_IDS = {
+  BASEMAP_GRAUBLAU: "basemap-graublau",
+} as const;
+const MODEL_SHADER_CONFIG_DEFAULTS = {
+  hover: {
+    clearDelayMs: 40,
+    enabled: false,
+    fade: {
+      durationMs: 220,
+    },
+  },
+  outline: {
+    color: "#000000",
+    opacity: 0.5,
+    widthPx: 2,
+  },
+  sampling: {
+    enabled: false,
+    fade: {
+      durationMs: 180,
+    },
+    opacity: 0.8,
+  },
+  flash: {
+    selection: {
+      color: "#ffffff",
+      inDurationMs: 50,
+      opacity: 1,
+      outDurationMs: 800,
+    },
+    highlight: {
+      color: "#6666ff",
+      inDurationMs: 50,
+      opacity: 1,
+      outDurationMs: 800,
+    },
+  },
+} as const;
+
+export type GeoportalAnnotationInfoBoxConfig = Pick<
+  AnnotationInfoBoxLayoutProps,
+  "controlOrder" | "fitContentWidth" | "pixelWidth"
+>;
+
+export type GeoportalCesiumAnnotationConfig = {
+  style: {
+    lines: AnnotationLineStyleOptions;
+    areaOcclusion: AreaOcclusionStyleOptions;
+  };
+  infoBox: GeoportalAnnotationInfoBoxConfig;
+  referenceObjectSizing: AnnotationReferenceObjectSizingOptions;
+  tools: {
+    defaultToolId: AnnotationToolId;
+    allToolIds: readonly AnnotationToolId[];
+    stableToolIds: readonly AnnotationToolId[];
+  };
+};
+
+export const CESIUM_CONFIG: CesiumConfig = {
+  transitions: {
+    mapMode: {
+      duration: 1000,
+    },
+  },
+  camera: {},
+  markerKey: "MarkerGlowLine",
+  markerAnchorHeight: 10,
+  baseUrl: `${APP_BASE_PATH}${CESIUM_PATHNAME}`,
+  pathName: CESIUM_PATHNAME,
+  providerConfig: {
+    terrainProviders: {
+      [CESIUM_TERRAIN_PROVIDER_IDS.TERRAIN_2020]: WUPP_TERRAIN_PROVIDER,
+      [CESIUM_TERRAIN_PROVIDER_IDS.DSM_MESH_2024_1M]:
+        WUPP_TERRAIN_PROVIDER_DSM_MESH_2024_1M,
+    },
+    imageryProviders: {
+      [CESIUM_IMAGERY_LAYER_IDS.BASEMAP_GRAUBLAU]: {
+        ...BASEMAP_METROPOLE_RUHR_WMTS_GRAUBLAU_HQ,
+        rectangle: METROPOLE_RUHR_GRAUBLAU_RECTANGLE,
+      },
+    },
+  },
+  tilesetConfigs: {
+    [CESIUM_TILESET_IDS.MESH_2024]: WUPP_MESH_2024,
+    [CESIUM_TILESET_IDS.LOD2]: WUPP_LOD2_TILESET,
+  },
+  model: {
+    hover: MODEL_SHADER_CONFIG_DEFAULTS.hover,
+    highlight: {
+      style: {
+        type: "silhouette",
+        fill: {
+          color: "#6666ff",
+        },
+        outline: MODEL_SHADER_CONFIG_DEFAULTS.outline,
+      },
+    },
+    sampling: MODEL_SHADER_CONFIG_DEFAULTS.sampling,
+    selection: {
+      style: {
+        type: "silhouette",
+        fill: {
+          color: "#ffff00",
+        },
+        outline: MODEL_SHADER_CONFIG_DEFAULTS.outline,
+      },
+      flash: MODEL_SHADER_CONFIG_DEFAULTS.flash,
+    },
+  } satisfies CesiumModelConfig,
+};
+
+export const CESIUM_ANNOTATION_CONFIG = {
+  style: {
+    lines: {
+      strokeWidthPx: 1.5,
+      overlayDashPattern: "8 8",
+    },
+    areaOcclusion: {
+      fill: {
+        overlay: true,
+        overlayAlphaMultiplier: 0.5,
+      },
+      line: {
+        overlayDashed: true,
+      },
+    },
+  },
+  infoBox: {
+    pixelWidth: 350,
+    fitContentWidth: false,
+    controlOrder: 12,
+  },
+  referenceObjectSizing: {
+    scalingMode: REFERENCE_OBJECT_SCALING_MODES.WORLD,
+    worldRadiusMeters: 3,
+    targetScreenRadiusCssPx: 48,
+    resizeWorldRadiusToScreenTarget: true,
+    resizeStepFactor: 4,
+    quantizeWorldRadius: false,
+  },
+  tools: {
+    defaultToolId: ANNOTATION_TYPES.DISTANCE,
+    allToolIds: DEFAULT_ANNOTATION_INFO_BOX_TOOL_IDS,
+    stableToolIds: [
+      ANNOTATION_SELECT_TOOL_ID,
+      ANNOTATION_TYPES.POINT,
+      ANNOTATION_TYPES.DISTANCE,
+    ],
+  },
+} satisfies GeoportalCesiumAnnotationConfig;
+
+export const LEAFLET_CONFIG: LeafletConfig = {
+  zoomSnap: 1.0,
+  zoomDelta: 1.0,
+};
+
+// URL hash parameter keys for runtime state
+export const URL_PARAM_KEYS = {
+  mapStyle: "m",
+  measurements: "mm",
+  shadowSimulation: "shadow",
+} as const;

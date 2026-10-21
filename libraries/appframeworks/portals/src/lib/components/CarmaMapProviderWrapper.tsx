@@ -1,0 +1,232 @@
+import { useCallback, useMemo, useSyncExternalStore } from "react";
+import { OverlayTourProvider } from "@carma-commons/ui/helper-overlay";
+import {
+  CesiumContextProvider,
+  type CesiumState,
+} from "@carma-mapping/engines/cesium/react/runtime";
+import {
+  AddonProvider,
+  LibreContextProvider,
+  MapSelectionProvider,
+  MapHighlightProvider,
+} from "@carma-mapping/contexts";
+import { TopicMapContextProvider } from "react-cismap/contexts/TopicMapContextProvider";
+
+import { GazDataProvider } from "./GazDataProvider";
+import { SelectionProvider } from "./SelectionProvider";
+import {
+  MapStyleProvider,
+  type MapStyleConfig,
+} from "../contexts/MapStyleProvider";
+import type { GazDataConfig } from "@carma-mapping/fuzzy-search";
+import { defaultGazDataConfig } from "@carma-commons/resources";
+import { parseToMapLayer } from "@carma-mapping/utils";
+import { AuthProvider } from "@carma-providers/auth";
+
+import type { StateKeyToHashParamValueCodecMap } from "@carma-providers/hash-state";
+import {
+  CarmaMapAPIProvider,
+  type AddLayerOptions,
+} from "@carma-mapping/carma-map-api";
+import { SandboxedEvalProvider } from "@carma-commons/sandbox-eval";
+
+import type { Store } from "redux";
+import { useCatalogDataOptional, type Layer } from "@carma-mapping/layers";
+
+import { CarmaApiBridge } from "./carma-api-bridge";
+import { findCatalogItemById } from "./carma-api-bridge/useMappingAdapter";
+
+// Selector factories for the legacy carma-map-api layer state operations.
+// Kept local to this (deprecated) provider; the carma-api bridge owns its own.
+const createLayerSelectors = {
+  hasLayerById: (id: string) => (state: PortalRootState) =>
+    state?.mapping?.layers?.some((layer: { id: string }) => layer.id === id) ??
+    false,
+};
+
+// Type for the portal Redux state shape (extends APIRootState for compatibility)
+interface PortalRootState {
+  mapping?: {
+    layers?: Array<{ id: string }>;
+  };
+  [key: string]: unknown; // Index signature for APIRootState compatibility
+}
+
+type CarmaMapProviderWrapperProps = {
+  children: React.ReactNode;
+  overlayOptions: { background: { transparency: number; color: string } };
+  cesiumOptions: { providerConfig: unknown; tilesetConfigs: unknown };
+  gazDataConfig?: GazDataConfig;
+  mapStyleConfig: MapStyleConfig;
+  /** Redux store instance from the app for cross-library state access */
+  store?: Store<PortalRootState>;
+  /** @deprecated HashStateProvider should be placed higher in the tree. These props are ignored. */
+  stateKeyAliases?: Record<string, string>;
+  /** @deprecated HashStateProvider should be placed higher in the tree. These props are ignored. */
+  stateKeyToHashParamValueCodecMap?: StateKeyToHashParamValueCodecMap;
+  /** @deprecated HashStateProvider should be placed higher in the tree. These props are ignored. */
+  hashParamNameOrder?: string[];
+  defaultRuntimeState?: Partial<CesiumState>;
+  addons?: readonly unknown[];
+  addonScope?: string;
+  topicMapConfig?: {
+    appKey?: string;
+    featureItemsURL?: string;
+    referenceSystemDefinition?: unknown;
+    mapEPSGCode?: string;
+    referenceSystem?: unknown;
+    getFeatureStyler?: unknown;
+    featureTooltipFunction?: unknown;
+    convertItemToFeature?: unknown;
+    clusteringOptions?: unknown;
+  };
+};
+
+/**
+ * Creates a hook factory for useHasLayerById that uses useSyncExternalStore.
+ * This is defined outside the component to avoid recreating on each render.
+ */
+const createUseHasLayerById =
+  (store: Store<PortalRootState>) =>
+  (id: string): boolean => {
+    // These callbacks need to be stable for useSyncExternalStore
+    // We can't use useCallback here since this is called as a hook by consumers
+    const subscribe = (onStoreChange: () => void) =>
+      store.subscribe(onStoreChange);
+    const getSnapshot = () =>
+      createLayerSelectors.hasLayerById(id)(store.getState());
+
+    // eslint-disable-next-line react-hooks/rules-of-hooks
+    return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+  };
+
+/**
+ * Internal component that provides Redux-backed implementations to CarmaMapAPIProvider.
+ * This is separated to ensure hooks are used correctly within a component.
+ */
+const CarmaMapAPIWithRedux = ({
+  children,
+  store,
+}: {
+  children: React.ReactNode;
+  store: Store<PortalRootState>;
+}) => {
+  const catalogData = useCatalogDataOptional();
+  const catalogItems = catalogData?.catalogItems;
+  const serviceCategories = catalogData?.serviceCategories;
+
+  // addLayerById resolves the id in the LayerCatalogProvider catalog and
+  // appends the parsed layer to the redux active-layer state
+  const addLayerById = useCallback(
+    async (
+      id: string,
+      options?: AddLayerOptions
+    ): Promise<Layer | undefined> => {
+      const { forceWMS = false, visible = true } = options ?? {};
+
+      const item = findCatalogItemById(id, catalogItems, serviceCategories);
+      if (!item) {
+        console.warn(`Layer with id "${id}" not found`);
+        return undefined;
+      }
+
+      const isAlreadyAdded = createLayerSelectors.hasLayerById(id)(
+        store.getState()
+      );
+      if (isAlreadyAdded) {
+        console.warn(`Layer with id "${id}" is already added to the map`);
+        return undefined;
+      }
+
+      const mapLayer = await parseToMapLayer(item, forceWMS, visible);
+
+      store.dispatch({ type: "mapping/appendLayer", payload: mapLayer });
+
+      return mapLayer;
+    },
+    [store, catalogItems, serviceCategories]
+  );
+
+  // Create stable useHasLayerById hook using the factory
+  // useMemo ensures we don't create a new hook function on every render
+  const useHasLayerById = useMemo(() => createUseHasLayerById(store), [store]);
+
+  return (
+    <CarmaMapAPIProvider
+      addLayerById={addLayerById}
+      useHasLayerById={useHasLayerById}
+      store={store}
+    >
+      {children}
+    </CarmaMapAPIProvider>
+  );
+};
+
+export const CarmaMapProviderWrapper = ({
+  children,
+  overlayOptions,
+  cesiumOptions,
+  gazDataConfig = defaultGazDataConfig,
+  mapStyleConfig,
+  topicMapConfig = {},
+  store,
+  defaultRuntimeState,
+  addons,
+  addonScope,
+}: CarmaMapProviderWrapperProps) => {
+  const { background } = overlayOptions;
+  const { transparency, color } = background;
+
+  if (gazDataConfig.crs !== "3857") {
+    console.warn(
+      "Gazetteer data CRS is not supported, it should be 3857, Spherical Mercator"
+    );
+  }
+
+  // Wrap children with CarmaMapAPIProvider (with or without Redux)
+  const wrappedChildren = store ? (
+    <CarmaMapAPIWithRedux store={store}>{children}</CarmaMapAPIWithRedux>
+  ) : (
+    <CarmaMapAPIProvider>{children}</CarmaMapAPIProvider>
+  );
+
+  return (
+    <AuthProvider>
+      <SandboxedEvalProvider>
+        <GazDataProvider config={gazDataConfig}>
+          <SelectionProvider>
+            <MapStyleProvider config={mapStyleConfig}>
+              <TopicMapContextProvider
+                infoBoxPixelWidth={350}
+                {...topicMapConfig}
+              >
+                <OverlayTourProvider transparency={transparency} color={color}>
+                  <CesiumContextProvider
+                    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                    providerConfig={cesiumOptions.providerConfig as any}
+                    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                    tilesetConfigs={cesiumOptions.tilesetConfigs as any}
+                    defaultRuntimeState={defaultRuntimeState}
+                  >
+                    <LibreContextProvider>
+                      <MapSelectionProvider>
+                        <CarmaApiBridge store={store} />
+                        <MapHighlightProvider>
+                          <AddonProvider addons={addons} scopeKey={addonScope}>
+                            {wrappedChildren}
+                          </AddonProvider>
+                        </MapHighlightProvider>
+                      </MapSelectionProvider>
+                    </LibreContextProvider>
+                  </CesiumContextProvider>
+                </OverlayTourProvider>
+              </TopicMapContextProvider>
+            </MapStyleProvider>
+          </SelectionProvider>
+        </GazDataProvider>
+      </SandboxedEvalProvider>
+    </AuthProvider>
+  );
+};
+
+export default CarmaMapProviderWrapper;

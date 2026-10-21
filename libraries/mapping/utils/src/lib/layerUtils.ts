@@ -1,0 +1,605 @@
+import { isNaN } from "lodash";
+
+import type { FeatureInfoProperties } from "./contracts/feature-info/feature-info";
+import type { Item, Layer, ToolEntry } from "@carma-mapping/layers";
+import {
+  extractCarmaConfig,
+  resolveLayerTitle,
+  resolveLayerDescription,
+} from "@carma-commons/utils";
+import envelope from "@turf/envelope";
+import L from "leaflet";
+import { sandboxedEvalExternal } from "@carma-commons/sandbox-eval";
+import localforage from "localforage";
+import { getStyleFeatureBounds } from "./styleFeatureBounds";
+
+export const getInternetExplorerVersion = () => {
+  var rV = -1; // Return value assumes failure.
+
+  if (
+    navigator.appName === "Microsoft Internet Explorer" ||
+    navigator.appName === "Netscape"
+  ) {
+    var uA = navigator.userAgent;
+    var rE = new RegExp("MSIE ([0-9]{1,}[.0-9]{0,})");
+
+    if (rE.exec(uA) !== null) {
+      rV = parseFloat(RegExp.$1);
+    } else if (!!navigator.userAgent.match(/Trident.*rv:11\./)) {
+      /*check for IE 11*/
+      rV = 11;
+    }
+  }
+  return rV;
+};
+
+export const setFromLocalforage = async (
+  lfKey,
+  setter,
+  fallbackValue,
+  forceFallback
+) => {
+  const value = await localforage.getItem(lfKey);
+  if (value !== undefined && value !== null) {
+    setter(value);
+  } else if (fallbackValue !== undefined || forceFallback === true) {
+    setter(fallbackValue);
+  }
+};
+
+export const parseDescription = (description: string) => {
+  const result = { inhalt: "", sichtbarkeit: "", nutzung: "" };
+  const keywords = ["Inhalt:", "Sichtbarkeit:", "Nutzung:"];
+
+  if (!description) {
+    return result;
+  }
+
+  function extractTextAfterKeyword(input: string, keyword: string) {
+    const index = input.indexOf(keyword);
+    if (index !== -1) {
+      const startIndex = index + keyword.length;
+      let endIndex = input.length;
+      for (const nextKeyword of keywords) {
+        const nextIndex = input.indexOf(nextKeyword, startIndex);
+        if (nextIndex !== -1 && nextIndex < endIndex) {
+          endIndex = nextIndex;
+        }
+      }
+      return input.slice(startIndex, endIndex).trim();
+    }
+    return "";
+  }
+
+  result.inhalt = extractTextAfterKeyword(description, "Inhalt:");
+  result.sichtbarkeit = extractTextAfterKeyword(description, "Sichtbarkeit:");
+  result.nutzung = extractTextAfterKeyword(description, "Nutzung:");
+
+  return result;
+};
+
+export function paramsToObject(entries: URLSearchParams) {
+  const result: { [key: string]: string } = {};
+  for (const [key, value] of entries) {
+    // each 'entry' is a [key, value] tupple
+    result[key] = value;
+  }
+  return result;
+}
+
+const parseZoom = (
+  vectorStyles: {
+    id: string;
+    maxzoom: number;
+    minzoom: number;
+  }[],
+  sourceZoom: {
+    minzoom: number;
+    maxzoom: number;
+  }
+) => {
+  let maxzoom = sourceZoom.maxzoom;
+  let minzoom = sourceZoom.minzoom;
+
+  if (vectorStyles.length > 0) {
+    const maxzoomVector = vectorStyles.reduce((acc, cur) => {
+      if (cur.maxzoom > acc) {
+        return cur.maxzoom;
+      }
+      return acc;
+    }, 0);
+    const definedMinzooms = vectorStyles
+      .map((s) => s.minzoom)
+      .filter((z) => z !== undefined);
+    const minzoomVector =
+      definedMinzooms.length > 0
+        ? Math.min(...definedMinzooms)
+        : sourceZoom.minzoom;
+
+    maxzoom = Math.max(maxzoom, maxzoomVector);
+    minzoom = Math.max(minzoom, minzoomVector);
+  }
+
+  return { maxzoom, minzoom };
+};
+
+const vectorStyleCache = new Map<string, Promise<any>>();
+
+const fetchVectorStyle = (url: string): Promise<any> => {
+  const cached = vectorStyleCache.get(url);
+  if (cached) {
+    return cached;
+  }
+  const request = fetch(url)
+    .then((response) => {
+      if (!response.ok) {
+        throw new Error(
+          `Fetching vector style ${url} failed with status ${response.status}`
+        );
+      }
+      return response.json();
+    })
+    .catch((error) => {
+      // don't keep a rejected promise around, the next parse should retry
+      vectorStyleCache.delete(url);
+      throw error;
+    });
+  vectorStyleCache.set(url, request);
+  return request;
+};
+
+function isJson(str) {
+  try {
+    JSON.parse(str);
+  } catch (e) {
+    return false;
+  }
+  return true;
+}
+
+/**
+ * `ToolEntry` accepts three spellings, a bare kind and an object naming its
+ * addon with either `kind` or `addon`, and configs are written in all of them.
+ * Accepting only `kind` here dropped every `{ addon: "..." }` entry on the way
+ * into the layer, without a trace: the addon registry never saw it.
+ */
+const isToolEntry = (value: unknown): value is ToolEntry =>
+  typeof value === "string" ||
+  (typeof value === "object" &&
+    value !== null &&
+    (typeof (value as { kind?: unknown }).kind === "string" ||
+      typeof (value as { addon?: unknown }).addon === "string"));
+
+const parseToolEntries = (value: unknown): ToolEntry[] | null => {
+  let entries = value;
+  if (typeof entries === "string") {
+    try {
+      entries = JSON.parse(entries);
+    } catch {
+      return null;
+    }
+  }
+  if (!Array.isArray(entries)) {
+    return null;
+  }
+  const tools = entries.filter(isToolEntry);
+  return tools.length > 0 ? tools : null;
+};
+
+const toolKind = (tool: ToolEntry): string =>
+  typeof tool === "string" ? tool : "kind" in tool ? tool.kind : tool.addon;
+
+/**
+ * The tools of a layer from both places that may declare them: the style speaks
+ * about itself (a "zoomToExtent" on its own extent), the catalog item about
+ * this deployment's use of it. Both are kept; where they name the same addon
+ * the item wins, since it is the more specific statement.
+ */
+const mergeToolEntries = (
+  styleTools: unknown,
+  itemTools: unknown
+): ToolEntry[] | null => {
+  const fromStyle = parseToolEntries(styleTools) ?? [];
+  const fromItem = parseToolEntries(itemTools) ?? [];
+  if (fromStyle.length === 0) {
+    return fromItem.length > 0 ? fromItem : null;
+  }
+  const itemKinds = new Set(fromItem.map(toolKind));
+  const merged = [
+    ...fromStyle.filter((tool) => !itemKinds.has(toolKind(tool))),
+    ...fromItem,
+  ];
+  return merged.length > 0 ? merged : null;
+};
+
+export const parseToMapLayer = async (
+  layer: Item,
+  forceWMS: boolean,
+  visible: boolean,
+  opacity?: number
+) => {
+  let newLayer: Layer | null = null;
+  const id = layer.id.startsWith("fav_") ? layer.id.slice(4) : layer.id;
+
+  const carmaConf = extractCarmaConfig(layer.keywords);
+  const resolvedTitle = resolveLayerTitle(layer);
+  const resolvedDescription = resolveLayerDescription(layer);
+  // Addon tools of this layer, from the item and from what the layer declares
+  // about itself; a vector layer's style is read in the vector branch below.
+  let tools: ToolEntry[] | null = mergeToolEntries(carmaConf?.tools, layer.tools);
+  let resolvedStyleJson: object | null = null;
+  if (layer.type === "layer" || layer.type === "object") {
+    let capabilitiesUrl = layer?.props?.url
+      ? layer?.props?.url + "service=WMS&request=GetCapabilities&version=1.1.1"
+      : undefined;
+    let localJson = false;
+    if ((carmaConf?.vectorStyle && !forceWMS) || layer.vectorStyle) {
+      let zoom = {
+        minzoom: 9,
+        maxzoom: 24,
+      };
+      let vectorStyle:
+        | string
+        | {
+            layers: {
+              id: string;
+              maxzoom: number;
+              minzoom: number;
+              type: string;
+              source: string;
+            }[];
+            metadata?: { carmaConf: { layerInfo: Record<string, unknown> } };
+          } = "";
+      if (carmaConf?.vectorStyle) {
+        localJson = isJson(carmaConf.vectorStyle);
+        vectorStyle = localJson
+          ? JSON.parse(carmaConf.vectorStyle as string)
+          : carmaConf.vectorStyle;
+      } else if (layer.vectorStyle) {
+        localJson = isJson(layer.vectorStyle);
+        vectorStyle = localJson
+          ? JSON.parse(layer.vectorStyle as string)
+          : layer.vectorStyle;
+      }
+
+      let metaData: {
+        carmaConf?: {
+          layerInfo?: {
+            keywords?: string[];
+            [key: string]: unknown;
+          };
+          [key: string]: unknown;
+        };
+        [key: string]: unknown;
+      } = {};
+      let filterConfig = null;
+      let dynamicStyling = null;
+      if (vectorStyle && typeof vectorStyle === "object") {
+        resolvedStyleJson = vectorStyle;
+        zoom = parseZoom(vectorStyle.layers, {
+          minzoom: 9,
+          maxzoom: 24,
+        });
+        if (vectorStyle.metadata) {
+          metaData = vectorStyle.metadata;
+          if (metaData?.carmaConf?.filterConfig) {
+            filterConfig = metaData?.carmaConf?.filterConfig;
+          }
+          if (metaData?.carmaConf?.dynamicStyling) {
+            const ds = metaData.carmaConf.dynamicStyling;
+            dynamicStyling = Array.isArray(ds) ? ds : [ds];
+          }
+        }
+      } else if (typeof vectorStyle === "string" && vectorStyle) {
+        zoom = await fetchVectorStyle(vectorStyle).then((result) => {
+          resolvedStyleJson = result;
+          const parsedZoom = parseZoom(result.layers, {
+            minzoom: 9,
+            maxzoom: 24,
+          });
+          if (result.metadata) {
+            metaData = result.metadata;
+            if (metaData?.carmaConf?.filterConfig) {
+              filterConfig = metaData?.carmaConf?.filterConfig;
+            }
+            if (metaData?.carmaConf?.dynamicStyling) {
+              dynamicStyling = metaData?.carmaConf?.dynamicStyling;
+            }
+          }
+          return parsedZoom;
+        });
+      }
+
+      let vectorConf = null;
+
+      if (metaData?.carmaConf?.layerInfo?.keywords) {
+        vectorConf = extractCarmaConfig(
+          metaData?.carmaConf?.layerInfo?.keywords as string[]
+        );
+      }
+
+      const layerInfo: {
+        keywords?: string[];
+        links?: { url: string; text: string }[];
+        [key: string]: unknown;
+      } = metaData?.carmaConf?.layerInfo ?? {};
+      const styleLinks = Array.isArray(layerInfo.links) ? layerInfo.links : [];
+      const itemLinks = layer.links ?? [];
+
+      const metaDataCarmaConf = metaData?.carmaConf as
+        | Record<string, unknown>
+        | undefined;
+      const mergedConf = { ...vectorConf, ...metaDataCarmaConf, ...carmaConf };
+      tools = mergeToolEntries(mergedConf.tools, layer.tools);
+
+      newLayer = {
+        title: resolvedTitle,
+        id: id,
+        layerType: "vector",
+        opacity: opacity ?? 1.0,
+        description: resolvedDescription,
+        conf: Object.keys(mergedConf).length > 0 ? mergedConf : undefined,
+        queryable: !layer.queryable
+          ? "infoboxMapping" in mergedConf || "lazyInfoBox" in mergedConf
+          : layer.queryable,
+        useInFeatureInfo: true,
+        visible: visible,
+        props: {
+          style: vectorStyle as string,
+          minZoom:
+            Number(carmaConf?.minZoom) || zoom?.minzoom || layer?.minZoom,
+          maxZoom:
+            Number(carmaConf?.maxZoom) || zoom?.maxzoom || layer?.maxZoom,
+          legend: layer?.props?.Style?.[0].LegendURL,
+          metaData: layer?.props?.MetadataURL,
+        },
+        other: {
+          name: layer.name,
+          layerName: layer.name,
+          capabilitiesUrl: capabilitiesUrl,
+          service: layer.service,
+          serviceName: layer.serviceName,
+          keywords: layer.keywords,
+          tags: layer.tags,
+          icon: layer.icon,
+          alternativeIcon: layer.alternativeIcon,
+          path: layer.path,
+          originalPath: layer.originalPath,
+          vectorLegend: layer.vectorLegend,
+          thumbnail: layer.thumbnail,
+        },
+        layerInfo: {
+          ...layerInfo,
+          // style links first, then the ones from the catalog item
+          ...(styleLinks.length || itemLinks.length
+            ? { links: [...styleLinks, ...itemLinks] }
+            : {}),
+        },
+        filterConfig,
+        dynamicStyling,
+        type: layer.type,
+      };
+    } else {
+      switch (layer.layerType) {
+        case "wmts-nt":
+        case "wmts": {
+          const layerType =
+            carmaConf && "nonTiled" in carmaConf ? "wmts-nt" : layer.layerType;
+          newLayer = {
+            title: resolvedTitle,
+            id: id,
+            layerType,
+            opacity: opacity ?? 1.0,
+            description: resolvedDescription,
+            conf: carmaConf!,
+            visible: visible,
+            queryable: layer.queryable,
+            useInFeatureInfo: true,
+            props: {
+              url: (carmaConf?.source as string) || layer.props.url,
+              legend: layer.props.Style?.[0].LegendURL,
+              name: (carmaConf?.sourceLayer as string) || layer.props.Name,
+              maxZoom: layer.maxZoom,
+              minZoom: layer.minZoom,
+              featureInfoUrl: layer.props.url,
+              featureInfoName: layer.props.Name,
+              metaData: layer.props.MetadataURL,
+            },
+            other: {
+              name: layer.name,
+              layerName: layer.name,
+              capabilitiesUrl: capabilitiesUrl,
+              service: layer.service,
+              serviceName: layer.serviceName,
+              keywords: layer.keywords,
+              tags: layer.tags,
+              icon: layer.icon,
+              alternativeIcon: layer.alternativeIcon,
+              path: layer.path,
+              originalPath: layer.originalPath,
+              vectorLegend: layer.vectorLegend,
+              thumbnail: layer.thumbnail,
+            },
+            ...(layer.links?.length ? { layerInfo: { links: layer.links } } : {}),
+          };
+          break;
+        }
+        case "vector": {
+          newLayer = {
+            title: resolvedTitle,
+            id: id,
+            layerType: "vector",
+            opacity: 1.0,
+            description: resolvedDescription,
+            conf: carmaConf!,
+            queryable: isNaN(layer.queryable)
+              ? layer?.keywords?.some((keyword) =>
+                  keyword.includes("carmaconf://infoBoxMapping")
+                )
+              : layer.queryable,
+            useInFeatureInfo: true,
+            visible: visible,
+            props: {
+              style: layer.props.style ? layer.props.style : "",
+              legend: layer.props.Style[0].LegendURL,
+              metaData: layer.props.MetadataURL,
+            },
+            other: {
+              name: layer.name,
+              layerName: layer.name,
+              capabilitiesUrl: capabilitiesUrl,
+              service: layer.service,
+              serviceName: layer.serviceName,
+              keywords: layer.keywords,
+              tags: layer.tags,
+              icon: layer.icon,
+              alternativeIcon: layer.alternativeIcon,
+              path: layer.path,
+              originalPath: layer.originalPath,
+              vectorLegend: layer.vectorLegend,
+              thumbnail: layer.thumbnail,
+            },
+            ...(layer.links?.length ? { layerInfo: { links: layer.links } } : {}),
+          };
+          break;
+        }
+      }
+    }
+  }
+
+  // Check if newLayer was assigned and throw an error if not
+  if (newLayer === null) {
+    throw new Error(`Could not parse layer ${layer.id} to map layer.`);
+  }
+
+  if (tools) {
+    newLayer.tools = tools;
+  }
+  const featureBounds = await getStyleFeatureBounds(resolvedStyleJson);
+  if (featureBounds) {
+    newLayer.featureBounds = featureBounds;
+  }
+  return newLayer;
+};
+
+export const getCoordinates = (geometry) => {
+  switch (geometry.type) {
+    case "Polygon":
+      return geometry.coordinates[0][0];
+    case "MultiPolygon":
+      return geometry.coordinates[0][0][0];
+    case "LineString":
+      return geometry.coordinates[1];
+    default:
+      return geometry.coordinates;
+  }
+};
+
+export const zoomToFeature = ({
+  selectedFeature,
+  leafletMap,
+  libreMap,
+  padding = [0, 0],
+}: {
+  selectedFeature: any;
+  leafletMap?: L.Map;
+  libreMap?: maplibregl.Map;
+  padding?: [number, number];
+}) => {
+  if (!leafletMap && !libreMap) return;
+  if (selectedFeature.properties?.wmsProps?.bounds) {
+    const bbox = JSON.parse(selectedFeature.properties.wmsProps.bounds);
+    if (leafletMap) {
+      leafletMap.fitBounds(
+        [
+          [bbox[3], bbox[2]],
+          [bbox[1], bbox[0]],
+        ],
+        {
+          padding: padding,
+        }
+      );
+    } else if (libreMap) {
+      libreMap.fitBounds(
+        [
+          [bbox[0], bbox[1]],
+          [bbox[2], bbox[3]],
+        ],
+        {
+          padding: 60,
+        }
+      );
+    }
+  } else if (selectedFeature.geometry) {
+    const type = selectedFeature.geometry.type;
+    if (type === "Point") {
+      const coordinates = getCoordinates(selectedFeature.geometry);
+
+      if (leafletMap) {
+        leafletMap.setView(
+          [coordinates[1], coordinates[0]],
+          selectedFeature.properties.zoom ? selectedFeature.properties.zoom : 20
+        );
+      } else if (libreMap) {
+        libreMap.flyTo({
+          center: [coordinates[0], coordinates[1]],
+          zoom: selectedFeature.properties.zoom
+            ? selectedFeature.properties.zoom - 1
+            : 19,
+          animate: false,
+        });
+      }
+    } else {
+      console.log("xxx", selectedFeature.geometry);
+      const bbox = envelope(selectedFeature.geometry).bbox;
+
+      if (leafletMap) {
+        leafletMap.fitBounds(
+          [
+            [bbox[3], bbox[2]],
+            [bbox[1], bbox[0]],
+          ],
+          {
+            padding: padding,
+          }
+        );
+      } else if (libreMap) {
+        libreMap.fitBounds(
+          [
+            [bbox[0], bbox[1]],
+            [bbox[2], bbox[3]],
+          ],
+          {
+            padding: 60,
+          }
+        );
+      }
+    }
+  }
+};
+
+export const getFunctionRegex = () => {
+  return /(function\s*\([^)]*\)\s*\{[^}]*\})|(\([^)]*\)\s*=>\s*[^}]*)/g;
+};
+
+export const parseHeader = async (
+  header: string,
+  properties?: FeatureInfoProperties
+) => {
+  if (!header) return "";
+
+  if (getFunctionRegex().test(header)) {
+    try {
+      const result = await sandboxedEvalExternal(
+        "(" + header + ")",
+        properties
+      );
+      return (result as any).toString();
+    } catch (error) {
+      console.error("Error parsing header function:", error);
+      return header;
+    }
+  }
+
+  return header;
+};

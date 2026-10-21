@@ -1,0 +1,17 @@
+export const drawerTextsHelper = {
+  allgemeinTitle: "Allgemein",
+  synchronisierenText: "Flurstück mit Java Anwendung synchronisieren",
+  karteTitle: "Karte",
+  optionaleTitle: "Optionale Layer",
+  abtOpt: "Abteilung 9",
+  baulastnachweisOpt: "Baulastnachweis",
+  stadtFstckOpt: "Städt. Flurstücke",
+  alkisLandparcels: "Flurstücke",
+  hintergrundTitle: "Hintergrund",
+  liegenschaftskarteGrauOpt: "Liegenschaftskarte (grau)",
+  liegenschaftskarteBuntOpt: "Liegenschaftskarte (bunt)",
+  trueOrthoOpt: "True Orthofoto",
+  lbkOpt: "Luftbildkarte",
+  stadtplanGrauOpt: "Stadtplan (grau)",
+  stadtplanOpt: "Stadtplan (bunt)",
+};

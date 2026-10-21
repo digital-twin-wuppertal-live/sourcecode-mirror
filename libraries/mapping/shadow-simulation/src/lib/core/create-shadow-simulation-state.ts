@@ -1,0 +1,107 @@
+import {
+  usesMobileShadowBaseline,
+  MOBILE_MESH_CACHE_BYTES,
+} from "./shadow-device-profile";
+import {
+  SHADOW_ANIMATION_MODE,
+  SHADOW_CONTROL_STYLE,
+  SHADOW_TERRAIN_QUALITY,
+  type ShadowDateState,
+  type ShadowSimulationConfig,
+  type ShadowSimulationState,
+} from "../contracts/shadow-simulation";
+import {
+  clampSelectionToDaylight,
+  DEFAULT_SHADOW_SIMULATION_TIME_ZONE,
+  getSolarSelectionForInstant,
+  type SolarLocation,
+} from "./solar-position";
+import {
+  DEFAULT_TERRAIN_ERROR_TARGET_PIXELS,
+  DEFAULT_SHADOW_BUILDING_COLOR,
+  DEFAULT_SHADOW_BUILDING_COLOR_MIX,
+  DEFAULT_SHADOW_BUILDING_TEXTURE_SATURATION,
+  DEFAULT_SHADOW_QUALITY,
+  SHADOW_QUALITY,
+  resolveShadowSurfaceColor,
+  SHADOW_QUALITY_PROFILES,
+  type ShadowQualityMultiplier,
+} from "./shadow-types";
+
+export const selectShadowQualityPreset = (
+  state: ShadowSimulationState,
+  shadowQuality: ShadowQualityMultiplier
+): ShadowSimulationState => ({
+  ...state,
+  shadowQuality,
+  shadowBufferFormat: undefined,
+  shadowSunDiscSamples: undefined,
+  shadowMsaaSamples: undefined,
+  shadowGroundTexelFit: undefined,
+});
+
+export const createInitialShadowSimulationState = (
+  config: ShadowSimulationConfig | undefined
+): ShadowSimulationState => {
+  const mobileBaseline = usesMobileShadowBaseline();
+  const initialTerrain =
+    config?.terrainSources?.[0]?.terrain ?? config?.terrain;
+  return {
+    enabled: false,
+    terrainColor: resolveShadowSurfaceColor(initialTerrain?.material?.color),
+    terrainSourceId: initialTerrain?.id,
+    terrainGeometryProjection: initialTerrain?.geometryProjection ?? "ecef",
+    terrainQuality: mobileBaseline
+      ? SHADOW_TERRAIN_QUALITY.STANDARD
+      : SHADOW_TERRAIN_QUALITY.MAX,
+    buildingsFullOpacity: true,
+    buildingColorMix: DEFAULT_SHADOW_BUILDING_COLOR_MIX,
+    meshTextureSaturation: DEFAULT_SHADOW_BUILDING_TEXTURE_SATURATION,
+    meshTextureColorCorrection: true,
+    buildingColor: DEFAULT_SHADOW_BUILDING_COLOR,
+    shadowQuality: mobileBaseline
+      ? SHADOW_QUALITY.FPS_120
+      : DEFAULT_SHADOW_QUALITY,
+    shadowAdaptiveQuality: true,
+    terrainErrorTarget: DEFAULT_TERRAIN_ERROR_TARGET_PIXELS,
+    meshCacheBudgetBytes: mobileBaseline ? MOBILE_MESH_CACHE_BYTES : undefined,
+    showSunDebugVector: true,
+    showTileBounds: true,
+    showProjectionDebugView: false,
+    showDisplaySettings: false,
+    softSunShadows: !mobileBaseline,
+    showMapStyleContent: true,
+    showMapStyleLabels: true,
+    showMapStyleElevationLines: false,
+    showMapStyleElevationLabels: false,
+    useTransmittanceLut: true,
+    useSkyIrradianceLut: true,
+    controlStyle: SHADOW_CONTROL_STYLE.QUICK,
+    animationMode: SHADOW_ANIMATION_MODE.DAY,
+    animationSpeed: 4,
+    isAnimating: false,
+    shadowIntensity: 1,
+  };
+};
+
+export const createInitialShadowDateState = (
+  config: ShadowSimulationConfig | undefined,
+  location: SolarLocation,
+  instant = new Date()
+): ShadowDateState => {
+  const timeZone = config?.timeZone ?? DEFAULT_SHADOW_SIMULATION_TIME_ZONE;
+  const now = getSolarSelectionForInstant(instant, timeZone);
+  const candidate = {
+    year: config?.year ?? now.year,
+    dayOfYear: config?.initialDayOfYear ?? now.dayOfYear,
+    minutes: config?.initialMinutes ?? now.minutes,
+    timeZone,
+  };
+
+  return (
+    clampSelectionToDaylight(candidate, location) ?? {
+      ...candidate,
+      minutes: 12 * 60,
+    }
+  );
+};

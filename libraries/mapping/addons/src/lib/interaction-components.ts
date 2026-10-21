@@ -1,0 +1,52 @@
+import type { ComponentType } from "react";
+
+import type { Layer } from "@carma-mapping/layers";
+
+import {
+  HighlightInteractionPanel,
+  HIGHLIGHT_TOOLS_INTERACTION_ID,
+} from "../addons/VectorHighlight";
+import {
+  TimeSliderInteractionPanel,
+  TIME_SLIDER_TOOLS_INTERACTION_ID,
+} from "../addons/TimeSlider";
+import {
+  FloodInteractionPanel,
+  FLOOD_TOOLS_INTERACTION_ID,
+} from "../addons/FloodSimulation";
+import {
+  FlowFieldTuningInteractionPanel,
+  FLOW_FIELD_TUNING_INTERACTION_ID,
+} from "../addons/FlowField";
+import {
+  AnnotationInteractionPanel,
+  ANNOTATION_TOOLS_INTERACTION_ID,
+} from "../addons/Annotation";
+import {
+  TrafficInteractionPanel,
+  TRAFFIC_TOOLS_INTERACTION_ID,
+} from "../addons/TrafficAnimation";
+import {
+  SpotHighlightsPanel,
+  SPOT_HIGHLIGHTS_TOOLS_INTERACTION_ID,
+} from "../addons/SpotHighlights";
+
+/**
+ * Panels addons contribute to the host's interaction view, keyed by the id of
+ * the interaction button that opens them. The host merges this into its own
+ * map, so an addon can bring a panel without the app knowing it exists.
+ */
+export const ADDON_INTERACTION_COMPONENTS: Record<
+  string,
+  ComponentType<{ layer: Layer }>
+> = {
+  [HIGHLIGHT_TOOLS_INTERACTION_ID]: HighlightInteractionPanel,
+  [TIME_SLIDER_TOOLS_INTERACTION_ID]: TimeSliderInteractionPanel,
+  [FLOOD_TOOLS_INTERACTION_ID]: FloodInteractionPanel,
+  // the row only offers the button that opens this under `?ff=admin`
+  [FLOW_FIELD_TUNING_INTERACTION_ID]: FlowFieldTuningInteractionPanel,
+  [ANNOTATION_TOOLS_INTERACTION_ID]: AnnotationInteractionPanel,
+  // opened from the readout on the button of the layer that launched it
+  [TRAFFIC_TOOLS_INTERACTION_ID]: TrafficInteractionPanel,
+  [SPOT_HIGHLIGHTS_TOOLS_INTERACTION_ID]: SpotHighlightsPanel,
+};

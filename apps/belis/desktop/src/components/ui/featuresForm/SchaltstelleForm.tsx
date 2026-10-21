@@ -1,0 +1,302 @@
+import {
+  useState,
+  useEffect,
+  useCallback,
+  useRef,
+  type ReactNode,
+} from "react";
+import type { FormInstance } from "antd";
+import { message } from "antd";
+import { useSelector } from "react-redux";
+import dayjs from "dayjs";
+import type { DraftFile } from "../../../store/slices/featuresForms";
+import { isCreationDraftKey } from "../../../store/slices/featuresForms";
+import { getJWT } from "../../../store/slices/auth";
+import { DokumentItem } from "../DocumentPreview";
+import { getDocumentKey } from "../FilePreview";
+import FeatureFormLayout from "./FeatureFormLayout";
+import { useCreateFeatureDraft } from "../useCreateFeatureDraft";
+import { extractListItem } from "../BelisSidebar";
+import SchaltstelleFormFields from "./SchaltstelleFormFields";
+import { normalizeSensorValues } from "./sensorFields";
+import { updateDataByClassName } from "../../../helper/apiMethods";
+import { uploadDraftFiles } from "../../../helper/uploadDraftFiles";
+import { useFeatureRights } from "./FeatureRightsContext";
+
+const transformDatesForBackend = (
+  values: Record<string, unknown>
+): Record<string, unknown> => {
+  const result: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(values)) {
+    if (dayjs.isDayjs(value)) {
+      result[key] = value.toISOString();
+    } else {
+      result[key] = value;
+    }
+  }
+  return result;
+};
+
+interface SchaltstelleFormProps {
+  data: Record<string, unknown> | null;
+  rawFeature?: {
+    id?: string | number;
+    properties?: Record<string, unknown>;
+  } | null;
+  onClose?: () => void;
+  readOnly?: boolean;
+  loading?: boolean;
+  draftValues?: Record<string, unknown>;
+  draftFiles?: DraftFile[];
+  hasDraft?: boolean;
+  isCreation?: boolean;
+  featureId?: string;
+  formHeaderContent?: ReactNode;
+  geometrySelector?: ReactNode;
+  onDraftChange?: (values: Record<string, unknown>) => void;
+  onDraftFilesChange?: (files: DraftFile[]) => void;
+  onOriginalValues?: (values: Record<string, unknown>) => void;
+  onToggleReadOnly?: () => void;
+  onCancel?: () => void;
+  onSaveComplete?: () => void;
+  removedDocumentKeys?: Set<string>;
+  onRemovedDocumentKeysChange?: (keys: Set<string>) => void;
+}
+
+const SchaltstelleForm = ({
+  data,
+  rawFeature,
+  onClose,
+  readOnly = true,
+  loading,
+  draftValues,
+  draftFiles,
+  hasDraft,
+  featureId,
+  formHeaderContent,
+  geometrySelector,
+  onDraftChange,
+  onDraftFilesChange,
+  onOriginalValues,
+  onToggleReadOnly,
+  onCancel,
+  onSaveComplete,
+  removedDocumentKeys: removedDocumentKeysProp,
+  onRemovedDocumentKeysChange,
+}: SchaltstelleFormProps) => {
+  const { fieldsReadOnly } = useFeatureRights();
+  const removedDocumentKeys = removedDocumentKeysProp ?? new Set<string>();
+  const formRef = useRef<FormInstance | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [localDocuments, setLocalDocuments] = useState<DokumentItem[] | null>(
+    null
+  );
+  const jwt = useSelector(getJWT);
+  const createFeatureDraft = useCreateFeatureDraft();
+
+  const setFormInstance = useCallback((form: FormInstance) => {
+    formRef.current = form;
+  }, []);
+
+  const handleValuesChange = useCallback(
+    (_: Record<string, unknown>, allValues: Record<string, unknown>) => {
+      onDraftChange?.(allValues);
+    },
+    [onDraftChange]
+  );
+
+  const handleToggleRemoveDocument = useCallback(
+    (key: string) => {
+      const next = new Set(removedDocumentKeys);
+      if (next.has(key)) {
+        next.delete(key);
+      } else {
+        next.add(key);
+      }
+      onRemovedDocumentKeysChange?.(next);
+    },
+    [removedDocumentKeys, onRemovedDocumentKeysChange]
+  );
+
+  // Reset local documents override when data changes
+  useEffect(() => {
+    setLocalDocuments(null);
+  }, [data]);
+
+  // Extract documents from schaltstelle[0].dokumenteArray
+  const schaltstelleData = data as Record<string, unknown>;
+  const schaltstelleArray = schaltstelleData?.schaltstelle as
+    | Array<Record<string, unknown>>
+    | undefined;
+  const serverDocuments: DokumentItem[] =
+    (schaltstelleArray?.[0]?.dokumenteArray as DokumentItem[]) || [];
+  const documents = localDocuments ?? serverDocuments;
+
+  // Extract schaltstelle object and ID
+  const ss = schaltstelleArray?.[0] || null;
+  const schaltstelleId = ss?.id as number | undefined;
+
+  // Extract subtitle - use rawFeature (vector tile) to match list display
+  const rawProps = rawFeature?.properties;
+  const subtitle =
+    (rawProps?.bauart_bezeichnung as string) ||
+    (rawProps?.bezeichnung as string) ||
+    // `bauart` is the denormalized Bauart label — set on real tile features
+    // and on drafts (via enrichSyntheticProps' fk_bauart rule). Matches the
+    // sidebar extractor's `bezeichnung || bauart` fallback.
+    (rawProps?.bauart as string) ||
+    "-ohne Bezeichnung-";
+
+  // Compute sidebar main title to display in form header
+  const isCreation =
+    typeof rawProps?.id === "string" && isCreationDraftKey(rawProps.id);
+
+  // Header identifier comes from the shared sidebar extractor, so the sticky
+  // header reads identically to the sidebar row — drafts included.
+  const sidebarMain = extractListItem("schaltstelle", rawFeature).main;
+
+  const cancelBTn = rawProps?.schaltstellen_nummer
+    ? `S ${rawProps.schaltstellen_nummer}`
+    : isCreation
+    ? "Neuer Entwurf"
+    : rawProps?.id
+    ? `ID - ${rawProps.id}`
+    : "";
+
+  const handleSave = async () => {
+    if (!jwt) {
+      message.error("Nicht authentifiziert");
+      return;
+    }
+
+    if (!schaltstelleId) {
+      message.error("Keine Schaltstellen-ID gefunden");
+      return;
+    }
+
+    if (!formRef.current) {
+      return;
+    }
+
+    setSaving(true);
+    try {
+      const formValues = formRef.current.getFieldsValue();
+
+      // Remove display-only fields that the backend doesn't expect
+      const { strassenschluessel_pk, strassenschluessel_strasse, ...rest } =
+        formValues;
+
+      // Upload pending draft files first
+      let uploadedDocuments: DokumentItem[] = [];
+      if (draftFiles && draftFiles.length > 0) {
+        uploadedDocuments = await uploadDraftFiles(jwt, draftFiles);
+      }
+
+      // Build final dokumenteArray: existing minus removed, plus newly uploaded
+      const hasDocumentChanges =
+        uploadedDocuments.length > 0 || removedDocumentKeys.size > 0;
+      let finalDokumenteArray: DokumentItem[] | undefined;
+      if (hasDocumentChanges) {
+        const kept = documents.filter(
+          (doc) => !removedDocumentKeys.has(getDocumentKey(doc))
+        );
+        finalDokumenteArray = [...kept, ...uploadedDocuments];
+      }
+
+      const dataToSave = transformDatesForBackend(
+        normalizeSensorValues({
+          id: schaltstelleId,
+          ...rest,
+          // Include updated documents array when changed
+          ...(finalDokumenteArray !== undefined
+            ? { dokumenteArray: finalDokumenteArray }
+            : {}),
+        })
+      );
+
+      await updateDataByClassName(jwt, "schaltstelle", dataToSave);
+
+      // Update local documents so changes appear immediately
+      if (hasDocumentChanges && finalDokumenteArray) {
+        setLocalDocuments(finalDokumenteArray);
+        onRemovedDocumentKeysChange?.(new Set());
+      }
+
+      if (removedDocumentKeys.size > 0) {
+        message.success(
+          removedDocumentKeys.size === 1
+            ? "1 Datei gelöscht"
+            : `${removedDocumentKeys.size} Dateien gelöscht`
+        );
+      }
+      message.success("Schaltstelle gespeichert");
+      onSaveComplete?.();
+    } catch (error) {
+      console.error("Save error:", error);
+      message.error(
+        error instanceof Error ? error.message : "Fehler beim Speichern"
+      );
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (!data) {
+    return (
+      <div className="flex items-center justify-center h-40 text-gray-400">
+        Keine Daten ausgewählt
+      </div>
+    );
+  }
+
+  return (
+    <FeatureFormLayout
+      title={`Schaltstelle ${sidebarMain}`}
+      cancelLabel={cancelBTn || ""}
+      isCreation={isCreation}
+      formHeaderContent={formHeaderContent}
+      subtitle={subtitle}
+      documents={documents}
+      jwt={jwt}
+      draftFiles={draftFiles}
+      onDraftFilesChange={onDraftFilesChange}
+      removedDocumentKeys={removedDocumentKeys}
+      onToggleRemoveDocument={handleToggleRemoveDocument}
+      debugData={data}
+      rawFeatureData={rawFeature}
+      loading={loading}
+      saving={saving}
+      readOnly={readOnly}
+      hasDraft={hasDraft || removedDocumentKeys.size > 0}
+      onToggleReadOnly={onToggleReadOnly}
+      onCancel={onCancel}
+      onSave={handleSave}
+      onCreateRelatedDraft={
+        isCreation
+          ? () =>
+              createFeatureDraft(
+                "schaltstelle",
+                draftValues
+                  ? { seedValues: draftValues }
+                  : { seedFromSelection: true }
+              )
+          : undefined
+      }
+      createDraftButtonVariant="white"
+    >
+      <SchaltstelleFormFields
+        schaltstelle={ss}
+        readOnly={readOnly || fieldsReadOnly}
+        isCreation={isCreation}
+        featureId={featureId}
+        geometrySelector={geometrySelector}
+        onFormInstance={setFormInstance}
+        draftValues={draftValues}
+        onValuesChange={handleValuesChange}
+        onOriginalValues={onOriginalValues}
+      />
+    </FeatureFormLayout>
+  );
+};
+
+export default SchaltstelleForm;

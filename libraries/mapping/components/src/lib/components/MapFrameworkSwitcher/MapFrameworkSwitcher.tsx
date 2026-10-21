@@ -1,0 +1,122 @@
+import {
+  type CSSProperties,
+  type MouseEvent,
+  useState,
+  forwardRef,
+} from "react";
+import { Tooltip } from "antd";
+import UAParser from "ua-parser-js";
+import { ControlButtonStyler } from "@carma-mapping/map-controls-layout";
+import { useMapFrameworkSwitcherContext } from "./MapFrameworkSwitcherContext";
+
+type MapFrameworkSwitcherProps = {
+  forceEnabled?: boolean;
+  disabled?: boolean;
+  useDisabledStyle?: boolean;
+  className?: string;
+  nativeTooltip?: boolean;
+  enableMobileWarning?: boolean;
+  switchTo3DText?: string;
+  switchTo2DText?: string;
+  style?: CSSProperties;
+  onToggleOverride?: () => void | Promise<void>;
+};
+
+export type { MapFrameworkSwitcherProps };
+
+const parser = new UAParser();
+const isMobileUA = parser.getDevice().type === "mobile";
+const isTabletUA = parser.getDevice().type === "tablet";
+const isMobileOrTablet = isMobileUA || isTabletUA;
+
+const LOCALE_DE_WARNING_ENABLE_CESIUM_MODE = `Achtung ⚠️\n\nDie 3D-Darstellung stellt hohe Anforderungen an die Speicherausstattung Ihres Endgerätes. Bei leistungsschwächeren Geräten funktioniert der 3D-Modus eventuell nicht stabil.`;
+
+const LOCALE_DE_SWITCH_TO_3D_MODE = `Zur 3D-Ansicht wechseln`;
+const LOCALE_DE_SWITCH_TO_2D_MODE = `Zur 2D-Ansicht wechseln`;
+
+export const MapFrameworkSwitcher = forwardRef<
+  HTMLButtonElement,
+  MapFrameworkSwitcherProps
+>(
+  (
+    {
+      forceEnabled,
+      disabled,
+      useDisabledStyle,
+      className,
+      nativeTooltip = false,
+      enableMobileWarning = false,
+      switchTo3DText = LOCALE_DE_SWITCH_TO_3D_MODE,
+      switchTo2DText = LOCALE_DE_SWITCH_TO_2D_MODE,
+      style,
+      onToggleOverride,
+    },
+    ref
+  ) => {
+    const {
+      isTransitioning,
+      isPreparingCesiumTransition,
+      toggle,
+      isReady,
+      isLeaflet,
+    } = useMapFrameworkSwitcherContext();
+    const [hasConfirmed, setHasConfirmed] = useState(false);
+
+    const handleSwitchMapMode = async (e: MouseEvent) => {
+      e.preventDefault();
+
+      if (
+        isLeaflet &&
+        !hasConfirmed &&
+        enableMobileWarning &&
+        isMobileOrTablet
+      ) {
+        const confirmed = window.confirm(LOCALE_DE_WARNING_ENABLE_CESIUM_MODE);
+        if (confirmed) setHasConfirmed(true);
+        else return;
+      }
+
+      if (onToggleOverride) {
+        await onToggleOverride();
+        return;
+      }
+
+      await toggle();
+    };
+
+    const switchInfoText = isLeaflet ? switchTo3DText : switchTo2DText;
+
+    // An override bypasses the leaflet-dependent readiness gate, just like forceEnabled.
+    const bypassReadyGate = forceEnabled === true || Boolean(onToggleOverride);
+
+    // Disable button if not ready or transitioning (unless the ready gate is bypassed)
+    const isDisabled =
+      disabled === true ||
+      ((!isReady || isTransitioning || isPreparingCesiumTransition) &&
+        !bypassReadyGate);
+
+    const button = (
+      <ControlButtonStyler
+        className={("font-semibold " + (className || "")).trim()}
+        onClick={handleSwitchMapMode}
+        disabled={isDisabled}
+        useDisabledStyle={useDisabledStyle}
+        title={nativeTooltip ? switchInfoText : undefined}
+        dataTestId={isLeaflet ? "3d-control" : "2d-control"}
+        ref={ref}
+      >
+        {isLeaflet ? "3D" : "2D"}
+      </ControlButtonStyler>
+    );
+
+    const content = nativeTooltip ? (
+      button
+    ) : (
+      <Tooltip title={switchInfoText} placement="right">
+        <span className="inline-block">{button}</span>
+      </Tooltip>
+    );
+
+    return style ? <div style={style}>{content}</div> : content;
+  }
+);

@@ -1,0 +1,397 @@
+import { useCallback, useMemo, useState } from "react";
+import { useSelector, useDispatch } from "react-redux";
+import { Modal, message } from "antd";
+import {
+  getAADraft,
+  getAPDraft,
+  setAADraft,
+  setAPDraft,
+  removeAADraft,
+  removeAPDraft,
+  setAAOriginalValues,
+  setAPOriginalValues,
+  hasAADraftChanges,
+  hasAPDraftChanges,
+  getAAOriginalValues,
+  getAPOriginalValues,
+  getAllAADrafts,
+  getAllAPDrafts,
+  getTotalDraftCount,
+  getAADraftCount,
+  getAPDraftCount,
+  getAPDeletions,
+  getAPDeletionCount,
+  unmarkAPForDeletion,
+} from "../../../store/slices/arbeitsauftraegeDrafts";
+import { ChangedFieldsProvider } from "./DraftFieldHighlight";
+import type { RootState } from "../../../store";
+import {
+  serializeValues,
+  deserializeValues,
+} from "../../../helper/draftSerialize";
+import { getFachobjektOfProtocol } from "@carma-appframeworks/belis";
+import { getHeaderColorFromStatus } from "../../../helper/buildApGeoJson";
+import { getJWT } from "../../../store/slices/auth";
+import { incrementFeatureDataVersion } from "../../../store/slices/featureCollection";
+import {
+  setDraftMode,
+  clearSelection,
+} from "../../../store/slices/arbeitsauftraege";
+import {
+  saveAllArbeitsauftraegeDrafts,
+  saveAllAPActions,
+  deleteAPsByIds,
+} from "../../../helper/arbeitsauftraegeSaveHelpers";
+import { useDatasheet } from "@carma-mapping/engines/maplibre";
+import ArbeitsauftragForm from "./ArbeitsauftragForm";
+import ArbeitsprotokollForm from "./ArbeitsprotokollForm";
+
+interface ArbeitsauftraegeFormsWrapperProps {
+  mode: "aa" | "ap";
+  id: string | undefined;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  data: Record<string, any>;
+  loading?: boolean;
+  readOnly?: boolean;
+  geometry?: GeoJSON.Geometry;
+  onBack?: () => void;
+  fachobjektType?: string;
+  aaId?: string;
+}
+
+const ArbeitsauftraegeFormsWrapper = ({
+  mode,
+  id,
+  data,
+  loading,
+  readOnly = true,
+  geometry,
+  onBack,
+  fachobjektType,
+  aaId,
+}: ArbeitsauftraegeFormsWrapperProps) => {
+  const dispatch = useDispatch();
+  const { closeDatasheet } = useDatasheet();
+  const [resetKey, setResetKey] = useState(0);
+  const jwt = useSelector(getJWT);
+
+  const allAADrafts = useSelector(getAllAADrafts);
+  const allAPDrafts = useSelector(getAllAPDrafts);
+  const totalDraftCount = useSelector(getTotalDraftCount);
+  const aaDraftCount = useSelector(getAADraftCount);
+  const apDraftCount = useSelector(getAPDraftCount);
+  const apDeletions = useSelector(getAPDeletions);
+  const apDeletionCount = useSelector(getAPDeletionCount);
+
+  const draft = useSelector((state: RootState) =>
+    mode === "aa" ? getAADraft(state, id) : getAPDraft(state, id)
+  );
+
+  const isCurrentAPMarkedForDeletion =
+    mode === "ap" && id ? id in apDeletions : false;
+
+  const hasAPDeletionsForCurrentAA =
+    mode === "aa" && id
+      ? Object.values(apDeletions).some((aaId) => aaId === id)
+      : false;
+
+  const hasAPDraftsForCurrentAA =
+    mode === "aa" && id
+      ? Object.values(allAPDrafts).some((draft) => draft.aaId === id)
+      : false;
+
+  const hasChanges = useSelector((state: RootState) =>
+    mode === "aa" ? hasAADraftChanges(state, id) : hasAPDraftChanges(state, id)
+  ) || isCurrentAPMarkedForDeletion || hasAPDeletionsForCurrentAA || hasAPDraftsForCurrentAA;
+
+  const originalValues = useSelector((state: RootState) =>
+    mode === "aa"
+      ? getAAOriginalValues(state, id)
+      : getAPOriginalValues(state, id)
+  );
+
+  const deserializedDraftValues = useMemo(
+    () => (draft?.values ? deserializeValues(draft.values) : undefined),
+    [draft?.values]
+  );
+
+  const handleDraftChange = useCallback(
+    (
+      _changedValues: Record<string, unknown>,
+      allValues: Record<string, unknown>
+    ) => {
+      if (!id) return;
+      const serialized = serializeValues(allValues);
+      if (mode === "aa") {
+        dispatch(
+          setAADraft({
+            id,
+            values: serialized,
+            geometry,
+            meta: {
+              nummer: data?.nummer != null ? String(data.nummer) : undefined,
+              team: (data?.team?.name as string | undefined) ?? undefined,
+              angelegt_am: data?.angelegt_am as string | undefined,
+            },
+          })
+        );
+      } else {
+        dispatch(
+          setAPDraft({
+            id,
+            values: serialized,
+            geometry,
+            featureType: fachobjektType,
+            aaId,
+            serverData: data,
+            meta: {
+              protokollnummer:
+                data?.protokollnummer != null
+                  ? String(data.protokollnummer)
+                  : undefined,
+              fachobjektType,
+              veranlassung: data?.veranlassung?.bezeichnung as
+                | string
+                | undefined,
+              headerColor: getHeaderColorFromStatus(
+                data?.arbeitsprotokollstatus ?? null
+              ),
+              datum: data?.datum
+                ? new Date(data.datum as string).toLocaleDateString("de-DE", {
+                    day: "2-digit",
+                    month: "2-digit",
+                    year: "numeric",
+                  })
+                : undefined,
+              shortname:
+                (getFachobjektOfProtocol(data)?.shortname as
+                  | string
+                  | undefined) ?? fachobjektType,
+            },
+          })
+        );
+      }
+    },
+    [id, mode, dispatch, geometry, data, fachobjektType, aaId]
+  );
+
+  const handleOriginalValues = useCallback(
+    (values: Record<string, unknown>) => {
+      if (!id) return;
+      const serialized = serializeValues(values);
+      if (mode === "aa") {
+        dispatch(setAAOriginalValues({ id, values: serialized }));
+      } else {
+        dispatch(setAPOriginalValues({ id, values: serialized }));
+      }
+    },
+    [id, mode, dispatch]
+  );
+
+  const handleCancel = useCallback(() => {
+    if (!id) return;
+    if (mode === "aa") {
+      dispatch(removeAADraft(id));
+      // Also remove all AP drafts and deletions belonging to this AA
+      for (const [apId, draft] of Object.entries(allAPDrafts)) {
+        if (draft.aaId === id) {
+          dispatch(removeAPDraft(apId));
+        }
+      }
+      for (const [apId, aaId] of Object.entries(apDeletions)) {
+        if (aaId === id) {
+          dispatch(unmarkAPForDeletion(apId));
+        }
+      }
+    } else {
+      dispatch(removeAPDraft(id));
+      dispatch(unmarkAPForDeletion(id));
+    }
+    setResetKey((prev) => prev + 1);
+  }, [id, mode, dispatch, allAPDrafts, apDeletions]);
+
+  const handleSave = useCallback(() => {
+    if (!id || !draft) return;
+    // Update baseline to saved values
+    if (draft.values && Object.keys(draft.values).length > 0) {
+      if (mode === "aa") {
+        dispatch(setAAOriginalValues({ id, values: draft.values }));
+        dispatch(removeAADraft(id));
+      } else {
+        dispatch(setAPOriginalValues({ id, values: draft.values }));
+        dispatch(removeAPDraft(id));
+      }
+    }
+  }, [id, mode, draft, dispatch]);
+
+  const handleSaveAll = useCallback(() => {
+    const totalCount = aaDraftCount + apDraftCount + apDeletionCount;
+
+    const parts: string[] = [];
+    if (aaDraftCount + apDraftCount > 0) {
+      parts.push(
+        `${aaDraftCount + apDraftCount} ${aaDraftCount + apDraftCount === 1 ? "Entwurf" : "Entwürfe"}`
+      );
+    }
+    if (apDeletionCount > 0) {
+      parts.push(
+        `${apDeletionCount} ${apDeletionCount === 1 ? "Löschung" : "Löschungen"}`
+      );
+    }
+
+    Modal.confirm({
+      title: "Alle Entwürfe speichern?",
+      content:
+        totalCount === 1
+          ? "Entwurf wird gespeichert."
+          : `${parts.join(" und ")} werden gespeichert.`,
+      okText: "Alle speichern",
+      cancelText: "Abbrechen",
+      onOk: async () => {
+        if (!jwt) {
+          message.error("Nicht authentifiziert");
+          return;
+        }
+
+        // Save AA + AP base data via updateDataByClassName
+        const aaResult = await saveAllArbeitsauftraegeDrafts(
+          jwt,
+          allAADrafts,
+          allAPDrafts
+        );
+
+        // Save AP actions via dedicated action endpoints
+        const apActionsResult = await saveAllAPActions(jwt, allAPDrafts);
+
+        // Delete APs marked for deletion
+        const apIdsToDelete = Object.keys(apDeletions);
+        const deleteResult =
+          apIdsToDelete.length > 0
+            ? await deleteAPsByIds(jwt, apIdsToDelete)
+            : { succeeded: [] as string[], failed: [] as { id: string; error: string }[] };
+
+        // Clean up succeeded AA drafts
+        for (const aaId of aaResult.aa.succeeded) {
+          dispatch(removeAADraft(aaId));
+        }
+
+        // Clean up succeeded AP drafts (base data + all actions must succeed)
+        const actionFailedApIds = new Set(
+          apActionsResult.failed.map((f) => f.apId)
+        );
+        const baseDataSucceededApIds = new Set(aaResult.ap.succeeded);
+        for (const apId of baseDataSucceededApIds) {
+          if (!actionFailedApIds.has(apId)) {
+            dispatch(removeAPDraft(apId));
+          }
+        }
+
+        // Clean up succeeded AP deletions
+        for (const apId of deleteResult.succeeded) {
+          dispatch(unmarkAPForDeletion(apId));
+        }
+
+        // Show errors
+        for (const fail of aaResult.aa.failed) {
+          message.error(`AA ${fail.id}: ${fail.error}`);
+        }
+        for (const fail of apActionsResult.failed) {
+          message.error(
+            `AP ${fail.apId} (${fail.actionLabel}): ${fail.error}`
+          );
+        }
+        for (const fail of deleteResult.failed) {
+          message.error(`AP ${fail.id} (Löschung): ${fail.error}`);
+        }
+
+        const succeeded =
+          aaResult.aa.succeeded.length +
+          aaResult.ap.succeeded.length +
+          apActionsResult.succeeded.length +
+          deleteResult.succeeded.length;
+        const failed =
+          aaResult.aa.failed.length +
+          aaResult.ap.failed.length +
+          apActionsResult.failed.length +
+          deleteResult.failed.length;
+
+        if (failed === 0 && succeeded > 0) {
+          dispatch(setDraftMode(false));
+        }
+
+        // AA team may have changed — clear stale detail panel and show map
+        if (aaResult.aa.succeeded.length > 0 || deleteResult.succeeded.length > 0) {
+          dispatch(clearSelection());
+          closeDatasheet();
+        }
+
+        if (succeeded > 0) {
+          dispatch(incrementFeatureDataVersion());
+          message.success(
+            succeeded === 1
+              ? "Entwurf gespeichert."
+              : `Alle (${succeeded}) Entwürfe gespeichert.`
+          );
+        } else if (succeeded === 0 && failed > 0) {
+          message.error("Alle Entwürfe fehlgeschlagen");
+        } else if (failed > 0) {
+          message.warning(
+            `${succeeded} von ${succeeded + failed} gespeichert, ${failed} fehlgeschlagen`
+          );
+        }
+      },
+    });
+  }, [jwt, allAADrafts, allAPDrafts, apDeletions, aaDraftCount, apDraftCount, apDeletionCount, dispatch]);
+
+  if (mode === "ap") {
+    return (
+      <ChangedFieldsProvider
+        originalValues={originalValues}
+        draftValues={draft?.values}
+      >
+        <ArbeitsprotokollForm
+          key={resetKey}
+          data={data}
+          loading={loading}
+          readOnly={readOnly}
+          onBack={onBack}
+          onCancel={hasChanges ? handleCancel : undefined}
+          onSave={hasChanges ? handleSave : undefined}
+          hasDraft={hasChanges}
+          draftValues={deserializedDraftValues}
+          onValuesChange={handleDraftChange}
+          onOriginalValues={handleOriginalValues}
+          apId={id}
+          aaId={aaId}
+          customDraftsCount={totalDraftCount}
+          onSaveAll={handleSaveAll}
+        />
+      </ChangedFieldsProvider>
+    );
+  }
+
+  return (
+    <ChangedFieldsProvider
+      originalValues={originalValues}
+      draftValues={draft?.values}
+    >
+      <ArbeitsauftragForm
+        key={resetKey}
+        data={data}
+        loading={loading}
+        readOnly={readOnly}
+        onCancel={hasChanges ? handleCancel : undefined}
+        onSave={hasChanges ? handleSave : undefined}
+        hasDraft={hasChanges}
+        draftValues={deserializedDraftValues}
+        onValuesChange={handleDraftChange}
+        onOriginalValues={handleOriginalValues}
+        customDraftsCount={totalDraftCount}
+        onSaveAll={handleSaveAll}
+        aaId={id}
+      />
+    </ChangedFieldsProvider>
+  );
+};
+
+export default ArbeitsauftraegeFormsWrapper;

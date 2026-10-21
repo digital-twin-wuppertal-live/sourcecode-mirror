@@ -1,0 +1,144 @@
+const DROP_URL_TYPES = [
+  "URL",
+  "text/uri-list",
+  "text/plain",
+  "text/html",
+] as const;
+
+const parseHttpUrl = (candidate: string): string | null => {
+  try {
+    const url = new URL(candidate.trim());
+    return url.protocol === "http:" || url.protocol === "https:"
+      ? url.toString()
+      : null;
+  } catch {
+    return null;
+  }
+};
+
+const resolveHtmlUrl = (html: string): string | null => {
+  const href = new DOMParser()
+    .parseFromString(html, "text/html")
+    .querySelector<HTMLAnchorElement>("a[href]")?.href;
+
+  return href ? parseHttpUrl(href) : null;
+};
+
+export const resolveDroppedUrl = (
+  dataTransfer: Pick<DataTransfer, "getData"> | null | undefined
+): string | null => {
+  if (!dataTransfer) return null;
+
+  for (const type of DROP_URL_TYPES) {
+    let value = "";
+    try {
+      value = dataTransfer.getData(type);
+    } catch {
+      continue;
+    }
+
+    for (const line of value.split(/\r?\n/)) {
+      const candidate = line.trim();
+      if (!candidate || candidate.startsWith("#")) continue;
+      const url = parseHttpUrl(candidate);
+      if (url) return url;
+    }
+
+    if (type === "text/html") {
+      const url = resolveHtmlUrl(value);
+      if (url) return url;
+    }
+  }
+
+  return null;
+};
+
+export const isJsonUrl = (url: string): boolean =>
+  new URL(url).pathname.toLowerCase().endsWith(".json");
+
+export const replaceVectorTileServerPlaceholders = (
+  input: string,
+  vectorTileServerUrl: string
+): string =>
+  input
+    .replaceAll("__SERVER_URL__", vectorTileServerUrl)
+    .replaceAll("__server_url__", vectorTileServerUrl);
+
+// standard WMS request params; everything else (e.g. `map=`, tokens) is kept
+// on the derived capabilities url since the service may need it
+const WMS_REQUEST_PARAMS = new Set([
+  "service",
+  "request",
+  "version",
+  "layers",
+  "styles",
+  "bbox",
+  "width",
+  "height",
+  "format",
+  "crs",
+  "srs",
+  "transparent",
+  "bgcolor",
+  "exceptions",
+  "time",
+  "elevation",
+  "query_layers",
+  "info_format",
+  "feature_count",
+  "x",
+  "y",
+  "i",
+  "j",
+]);
+
+export interface WmsLayerUrl {
+  capabilitiesUrl: string;
+  layerNames: string[];
+}
+
+// Recognizes a link to individual WMS layers (typically a GetMap request,
+// e.g. `...?service=WMS&request=GetMap&layers=solar_year`) and derives the
+// GetCapabilities url plus the requested layer names. Plain capabilities urls
+// return null so they keep loading every layer.
+export const parseWmsLayerUrl = (input: string): WmsLayerUrl | null => {
+  let url: URL;
+  try {
+    url = new URL(input);
+  } catch {
+    return null;
+  }
+
+  const params = new Map<string, string>();
+  url.searchParams.forEach((value, key) => {
+    params.set(key.toLowerCase(), value);
+  });
+
+  const service = params.get("service")?.toLowerCase();
+  const request = params.get("request")?.toLowerCase();
+  if (service !== "wms" && request !== "getmap") {
+    return null;
+  }
+  if (request === "getcapabilities") {
+    return null;
+  }
+
+  const layerNames = (params.get("layers") ?? "")
+    .split(",")
+    .map((name) => name.trim())
+    .filter(Boolean);
+  if (layerNames.length === 0) {
+    return null;
+  }
+
+  const capabilitiesUrl = new URL(url.toString());
+  [...capabilitiesUrl.searchParams.keys()].forEach((key) => {
+    if (WMS_REQUEST_PARAMS.has(key.toLowerCase())) {
+      capabilitiesUrl.searchParams.delete(key);
+    }
+  });
+  capabilitiesUrl.searchParams.set("service", "WMS");
+  capabilitiesUrl.searchParams.set("request", "GetCapabilities");
+
+  return { capabilitiesUrl: capabilitiesUrl.toString(), layerNames };
+};

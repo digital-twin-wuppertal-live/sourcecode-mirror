@@ -1,0 +1,511 @@
+// @vitest-environment jsdom
+
+/**
+ * Native traversal integration for offscreen REPLACE sibling deferral and
+ * later re-entry. The in-memory tileset uses deterministic frame scheduling.
+ */
+
+import { TilesRenderer } from "3d-tiles-renderer";
+import type { Tile } from "3d-tiles-renderer/core";
+import type { Map as MaplibreMap } from "maplibre-gl";
+import * as THREE from "three";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+import { buildThreeTilesRuntime } from "./three-tiles-runtime";
+import type { ThreeTilesRuntimeState } from "./three-tiles-runtime-context";
+
+vi.hoisted(() => {
+  Object.defineProperty(URL, "createObjectURL", {
+    configurable: true,
+    value: () => "blob:vitest-maplibre-worker",
+  });
+});
+
+const ORIGIN: [number, number] = [7.15, 51.25];
+const BASE_URL = "https://tiles.test/traversal";
+const TILESET_URL = `${BASE_URL}/tileset.json`;
+const FAILED = -1;
+const LOADED = 4;
+
+type TilesetJson = {
+  asset: { version: string };
+  geometricError: number;
+  root: TileJson;
+};
+type TileJson = {
+  boundingVolume: { box: number[] };
+  geometricError: number;
+  refine: "REPLACE";
+  content?: { uri: string };
+  children?: TileJson[];
+  transform?: number[];
+};
+type HarnessTile = Tile & {
+  priority?: number;
+  traversal: Tile["traversal"] & {
+    active: boolean;
+    allChildrenLoaded: boolean;
+    unconditionallyRefine: boolean;
+  };
+  engineData: {
+    scene: THREE.Object3D | null;
+    geometry: THREE.BufferGeometry[] | null;
+    materials: THREE.Material[] | null;
+    textures: THREE.Texture[] | null;
+  };
+};
+type HarnessRenderer = TilesRenderer & {
+  root: HarnessTile | null;
+  stats: {
+    failed: number;
+    queued: number;
+    downloading: number;
+    parsing: number;
+  };
+  ellipsoid: {
+    getObjectFrame: (
+      lat: number,
+      lon: number,
+      height: number,
+      az: number,
+      el: number,
+      roll: number,
+      target: THREE.Matrix4
+    ) => THREE.Matrix4;
+  };
+};
+
+/**
+ * Boxes are given in scene coordinates (x east, y up, z south). The runtime
+ * re-orients the tileset from the ECEF object frame at the layer origin, in
+ * which the local axes point x west / z north, so mirror x and z.
+ */
+const sceneBox = (
+  cx: number,
+  cy: number,
+  cz: number,
+  hx: number,
+  hy: number,
+  hz: number
+) => ({ box: [-cx, cy, -cz, hx, 0, 0, 0, hy, 0, 0, 0, hz] });
+
+const tileName = (tile: Tile): string =>
+  (tile.content?.uri ?? "").replace(/^.*\//, "").replace(/\.b3dm$/, "");
+
+const names = (set: Iterable<Tile>) => [...set].map(tileName).sort();
+
+/**
+ * root box 400 x 100 x 400 centred on the origin (ge 100)
+ * children: 2x2 grid of 200 x 100 x 200 boxes (ge 10), "near" = +z, "far" = -z
+ * grandchildren: 2x2 grid of 100 x 100 x 100 boxes per child (ge 1)
+ */
+const NEAR = ["near-west", "near-east"];
+const FAR = ["far-west", "far-east"];
+const buildQuadTileset = (): TilesetJson => {
+  const childLayout: Array<[string, number, number]> = [
+    ["near-west", -100, 100],
+    ["near-east", 100, 100],
+    ["far-west", -100, -100],
+    ["far-east", 100, -100],
+  ];
+  const children = childLayout.map(([name, cx, cz]) => ({
+    boundingVolume: sceneBox(cx, 0, cz, 100, 50, 100),
+    geometricError: 10,
+    refine: "REPLACE" as const,
+    content: { uri: `${name}.b3dm` },
+    children: [
+      [-50, -50],
+      [50, -50],
+      [-50, 50],
+      [50, 50],
+    ].map(([gx, gz], index) => ({
+      boundingVolume: sceneBox(cx + gx, 0, cz + gz, 50, 50, 50),
+      geometricError: 1,
+      refine: "REPLACE" as const,
+      content: { uri: `${name}_${index}.b3dm` },
+    })),
+  }));
+  return {
+    asset: { version: "1.0" },
+    geometricError: 100,
+    root: {
+      boundingVolume: sceneBox(0, 0, 0, 200, 50, 200),
+      geometricError: 100,
+      refine: "REPLACE",
+      content: { uri: "root.b3dm" },
+      children,
+    },
+  };
+};
+
+/** Camera at z=+500 looking along -z; `far` bounds the visible depth. */
+const createViewCamera = (far: number) => {
+  const camera = new THREE.PerspectiveCamera(40, 800 / 600, 1, far);
+  camera.position.set(0, 30, 500);
+  camera.lookAt(0, 30, 0);
+  camera.updateProjectionMatrix();
+  camera.updateMatrixWorld(true);
+  return camera;
+};
+
+type Harness = {
+  tiles: HarnessRenderer;
+  layer: ReturnType<typeof buildThreeTilesRuntime>;
+  downloads: string[];
+  frame: (
+    camera: THREE.PerspectiveCamera,
+    flushSteps?: number
+  ) => Promise<void>;
+  runUntilSettled: (
+    camera: THREE.PerspectiveCamera,
+    options?: { flushSteps?: number; onFrame?: () => void }
+  ) => Promise<void>;
+  dispose: () => void;
+};
+
+const createHarness = (
+  buildTilesets: (
+    tiles: HarnessRenderer
+  ) => Record<string, TilesetJson | (() => TilesetJson)>,
+  runtimeOptions: Record<string, unknown> = {}
+): Harness => {
+  const frameCallbacks = new Map<number, FrameRequestCallback>();
+  let nextHandle = 1;
+  vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => {
+    const handle = nextHandle++;
+    frameCallbacks.set(handle, cb);
+    return handle;
+  });
+  vi.stubGlobal("cancelAnimationFrame", (handle: number) => {
+    frameCallbacks.delete(handle);
+  });
+
+  let captured: HarnessRenderer | undefined;
+  const registerPlugin = TilesRenderer.prototype.registerPlugin;
+  vi.spyOn(TilesRenderer.prototype, "registerPlugin").mockImplementation(
+    function (this: TilesRenderer, plugin: object) {
+      captured = this as HarnessRenderer;
+      return registerPlugin.call(this, plugin);
+    }
+  );
+  const downloads: string[] = [];
+  let tilesets: Record<string, TilesetJson | (() => TilesetJson)> = {};
+  vi.stubGlobal("fetch", (input: string | URL) => {
+    const url = String(input);
+    const tileset = tilesets[url];
+    if (tileset) {
+      downloads.push(url.replace(`${BASE_URL}/`, ""));
+      const json = typeof tileset === "function" ? tileset() : tileset;
+      return Promise.resolve(
+        new Response(JSON.stringify(json), {
+          headers: { "content-type": "application/json" },
+        })
+      );
+    }
+    downloads.push(url.replace(`${BASE_URL}/`, ""));
+    return Promise.resolve(new Response(new ArrayBuffer(16)));
+  });
+
+  const map = {
+    on: vi.fn(),
+    off: vi.fn(),
+    triggerRepaint: vi.fn(),
+    getZoom: () => 17,
+    getPitch: () => 45,
+  } as unknown as MaplibreMap;
+  const layer = buildThreeTilesRuntime(
+    "mesh",
+    TILESET_URL,
+    ORIGIN,
+    runtimeOptions
+  );
+  layer.scene.onAdd?.(map);
+  expect(captured).toBeDefined();
+  const tiles = captured!;
+  tilesets = buildTilesets(tiles);
+  tiles.registerPlugin({
+    name: "TEST_PARSE_PLUGIN",
+    parseTile: (
+      _buffer: ArrayBuffer,
+      tile: Tile,
+      _extension: string,
+      _url: string,
+      signal: AbortSignal
+    ) => {
+      if (signal.aborted) return Promise.resolve();
+      const geometry = new THREE.BoxGeometry(1, 1, 1);
+      const material = new THREE.MeshBasicMaterial();
+      const scene = new THREE.Group();
+      scene.add(new THREE.Mesh(geometry, material));
+      const engineData = (tile as HarnessTile).engineData;
+      engineData.scene = scene;
+      engineData.geometry = [geometry];
+      engineData.materials = [material];
+      engineData.textures = [];
+      return Promise.resolve();
+    },
+  });
+
+  const nextTick = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+  const flush = async (steps: number) => {
+    for (let index = 0; index < steps; index += 1) {
+      const callbacks = [...frameCallbacks.values()];
+      frameCallbacks.clear();
+      for (const callback of callbacks) callback(index);
+      await nextTick();
+    }
+  };
+  const frame = async (camera: THREE.PerspectiveCamera, flushSteps = 8) => {
+    tiles.dispatchEvent({ type: "needs-update" });
+    layer.scene.root.updateMatrixWorld(true);
+    layer.scene.update({
+      map,
+      renderCamera: camera,
+      lodCamera: camera,
+      lookTarget: new THREE.Vector3(),
+      viewport: new THREE.Vector2(800, 600),
+      localFrame: {
+        lngLat: [7.15, 51.25] as const,
+        revision: 1,
+        sceneFromLocal: new THREE.Matrix4(),
+        sceneFromLocalRotation: new THREE.Matrix4(),
+        referenceLngLat: [7.15, 51.25] as const,
+        sceneFromLocalReference: new THREE.Matrix4(),
+        referenceToCurrent: new THREE.Matrix4(),
+        currentToReference: new THREE.Matrix4(),
+      },
+    });
+    await flush(flushSteps);
+  };
+  const runUntilSettled: Harness["runUntilSettled"] = async (
+    camera,
+    options = {}
+  ) => {
+    let stableFrames = 0;
+    let lastCount = -1;
+    for (let index = 0; index < 80 && stableFrames < 4; index += 1) {
+      await frame(camera, options.flushSteps);
+      options.onFrame?.();
+      if (downloads.length === lastCount) {
+        stableFrames += 1;
+      } else {
+        stableFrames = 0;
+        lastCount = downloads.length;
+      }
+    }
+  };
+
+  return {
+    tiles,
+    layer,
+    downloads,
+    frame,
+    runUntilSettled,
+    dispose: () => {
+      layer.scene.dispose();
+      vi.unstubAllGlobals();
+      vi.restoreAllMocks();
+    },
+  };
+};
+
+/** Root transform = object frame at the layer origin, so local == scene frame. */
+const withOriginTransform = (
+  tiles: HarnessRenderer,
+  tileset: TilesetJson
+): TilesetJson => {
+  const frame = tiles.ellipsoid.getObjectFrame(
+    THREE.MathUtils.degToRad(ORIGIN[1]),
+    THREE.MathUtils.degToRad(ORIGIN[0]),
+    0,
+    0,
+    0,
+    0,
+    new THREE.Matrix4()
+  );
+  return { ...tileset, root: { ...tileset.root, transform: frame.toArray() } };
+};
+
+const childByName = (tiles: HarnessRenderer, name: string) =>
+  tiles.root!.children!.find(
+    (child) => tileName(child) === name
+  ) as HarnessTile;
+
+describe("three tiles traversal (D1 deferral)", () => {
+  let harness: Harness | null = null;
+  afterEach(() => {
+    harness?.dispose();
+    harness = null;
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("shows the parent first and refines the visible children although two off-frustum siblings never load", async () => {
+    harness = createHarness((tiles) => ({
+      [TILESET_URL]: withOriginTransform(tiles, buildQuadTileset()),
+    }));
+    const { tiles, layer, downloads } = harness;
+    // Serialise the pipeline so the placeholder chain is observable.
+    layer.loading.setRequestConcurrency(1);
+    tiles.parseQueue.maxJobs = 1;
+    const camera = createViewCamera(450);
+    const visibleTimeline: string[][] = [];
+    const sampleVisible = () => {
+      const current = names(tiles.visibleTiles);
+      const last = visibleTimeline[visibleTimeline.length - 1];
+      if (!last || last.join() !== current.join())
+        visibleTimeline.push(current);
+    };
+
+    await harness.runUntilSettled(camera, {
+      flushSteps: 2,
+      onFrame: sampleVisible,
+    });
+
+    const near = NEAR.map((name) => childByName(tiles, name));
+    const far = FAR.map((name) => childByName(tiles, name));
+    expect(near.map((tile) => tile.traversal.inFrustum)).toEqual([true, true]);
+    expect(far.map((tile) => tile.traversal.inFrustum)).toEqual([false, false]);
+
+    // Everything the camera sees is loaded: root, 2 children, 8 grandchildren.
+    const grandchildren = NEAR.flatMap((name) =>
+      [0, 1, 2, 3].map((index) => `${name}_${index}`)
+    );
+    expect(downloads.filter((entry) => entry.endsWith(".b3dm")).sort()).toEqual(
+      [
+        "root.b3dm",
+        ...NEAR.map((n) => `${n}.b3dm`),
+        ...grandchildren.map((n) => `${n}.b3dm`),
+      ].sort()
+    );
+    // The off-frustum siblings were marked used by the traversal, deferred
+    // (parked as finished) and never requested; they are no failures.
+    for (const tile of far) {
+      expect(tile.traversal.used).toBe(true);
+      expect(tile.internal.loadingState).toBe(FAILED);
+      expect(tile.traversal.active).toBe(false);
+      expect(tile.traversal.visible).toBe(false);
+    }
+    expect(tiles.stats.failed).toBe(0);
+
+    // The parent gate opens: root and near children step aside.
+    expect(tiles.root!.traversal.allChildrenLoaded).toBe(true);
+    expect(tiles.root!.traversal.isLeaf).toBe(false);
+    expect(names(tiles.visibleTiles)).toEqual([...grandchildren].sort());
+    expect(names(tiles.activeTiles)).toEqual([...grandchildren].sort());
+
+    // Progressive placeholder chain: nothing -> root -> near children -> ... ->
+    // the 8 grandchildren; the deferred siblings never show up.
+    expect(visibleTimeline[0]).toEqual([]);
+    expect(visibleTimeline[1]).toEqual(["root"]);
+    expect(visibleTimeline).toContainEqual([...NEAR].sort());
+    expect(visibleTimeline[visibleTimeline.length - 1]).toEqual(
+      [...grandchildren].sort()
+    );
+    for (const stage of visibleTimeline) {
+      for (const name of FAR) expect(stage).not.toContain(name);
+    }
+  });
+
+  /**
+   * Zoom-in regression: from a coarse view the loader must refine to the next
+   * level once its family is loaded. The stall this covers kept the coarse
+   * parent published although every in-view child was loaded, so the staged
+   * target never advanced and the view stayed at the initial quality.
+   */
+  it("refines a coarse published parent once its loaded children cover the view", async () => {
+    const stubs: Record<string, TilesetJson> = {};
+    const childLayout: Array<[string, number, number]> = [
+      ["c-nw", -100, 100],
+      ["c-ne", 100, 100],
+      ["c-sw", -100, -100],
+      ["c-se", 100, -100],
+    ];
+    const children = childLayout.map(([name, cx, cz]) => {
+      // Each child refines through external tileset stubs, as the real mesh
+      // does: their documents stay unfetched while the child is displayable.
+      const grandchildren = [0, 1, 2, 3].map((index) => {
+        const uri = `${name}-${index}/tileset.json`;
+        stubs[`${BASE_URL}/${uri}`] = {
+          asset: { version: "1.0" },
+          geometricError: 4,
+          root: {
+            boundingVolume: sceneBox(cx, 0, cz, 100, 50, 100),
+            geometricError: 4,
+            refine: "REPLACE",
+            content: { uri: `${name}-${index}.b3dm` },
+          },
+        };
+        return {
+          boundingVolume: sceneBox(cx, 0, cz, 100, 50, 100),
+          geometricError: 8,
+          refine: "REPLACE" as const,
+          content: { uri },
+        };
+      });
+      return {
+        boundingVolume: sceneBox(cx, 0, cz, 100, 50, 100),
+        geometricError: 40,
+        refine: "REPLACE" as const,
+        content: { uri: `${name}.b3dm` },
+        children: grandchildren,
+      };
+    });
+    harness = createHarness(
+      (tiles) => ({
+        [TILESET_URL]: withOriginTransform(tiles, {
+          asset: { version: "1.0" },
+          geometricError: 400,
+          root: {
+            boundingVolume: sceneBox(0, 0, 0, 200, 50, 200),
+            geometricError: 400,
+            refine: "REPLACE",
+            content: { uri: "root.b3dm" },
+            children,
+          },
+        }),
+        ...stubs,
+      }),
+      { providesTerrain: true, baseErrorTargetPixels: 16, diagnostics: true }
+    );
+    const { tiles, layer } = harness;
+    layer.loading.setErrorTarget(6, 16);
+    const timeline: string[][] = [];
+    await harness.runUntilSettled(createViewCamera(2_000), {
+      onFrame: () => {
+        const current = layer.debug.readState() as ThreeTilesRuntimeState;
+        timeline.push(names(current.displayedMeshFrontier));
+      },
+    });
+    const state = [
+      ...((
+        window as unknown as { __carmaTiles3d?: Set<ThreeTilesRuntimeState> }
+      ).__carmaTiles3d ?? []),
+    ].find((candidate) => candidate.layerId === "mesh")!;
+    expect(state).toBeDefined();
+    const displayed = () => names(state.displayedMeshFrontier);
+    // The first drawable parent must publish even above the old first-image
+    // quality limit, then keep coverage while its loaded children replace it.
+    expect(tiles.root).toBeTruthy();
+    expect(timeline).toContainEqual(["root"]);
+    const firstCoverage = timeline.findIndex((cut) => cut.length > 0);
+    expect(firstCoverage).toBeGreaterThanOrEqual(0);
+    expect(timeline.slice(firstCoverage).every((cut) => cut.length > 0)).toBe(
+      true
+    );
+    // Refine: every child is loaded and in view, so the published cut must
+    // move down a level and the staged target must reach the requested one.
+    await harness.runUntilSettled(createViewCamera(2_000));
+    const cut = displayed();
+    // The coarse root no longer holds the surface and every published tile
+    // belongs to a refined family below it.
+    expect(cut).not.toContain("root");
+    expect(cut.length).toBeGreaterThanOrEqual(4);
+    expect(state.effectiveErrorTarget).toBeLessThanOrEqual(16);
+    // Published family members remain owned support; support is not a pending queue.
+    for (const tile of state.meshRefinementSupport) {
+      expect(tile.internal.loadingState).toBe(4);
+      expect(tiles.lruCache.has(tile)).toBe(true);
+    }
+  });
+});

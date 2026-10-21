@@ -1,0 +1,146 @@
+import { Form, Row, Col, Select } from "antd";
+import { useSelector } from "react-redux";
+import { getKeyTablesData } from "../../../store/slices/keyTables";
+import { FormItem } from "./DraftFieldHighlight";
+import toTitleCase from "../../../helper/toTitleCase";
+
+interface StrassenschluesselFieldsModalProps {
+  namePrefix?: string;
+  label?: string;
+  // Called after the deferred setFieldValue calls populate the derived
+  // (strasse, fk) values. Antd's setFieldValue does not trigger Form's
+  // onValuesChange, so the parent must be notified manually to keep
+  // Redux/draft state in sync.
+  onSyncDerivedValues?: (
+    changedValues: Record<string, unknown>,
+    allValues: Record<string, unknown>
+  ) => void;
+}
+
+interface StrassenschluesselItem {
+  id: number;
+  pk: string;
+  strasse: string;
+}
+
+const FormLabel = ({ children }: { children: React.ReactNode }) => (
+  <span className="text-sm font-medium text-gray-700">{children}</span>
+);
+
+const StrassenschluesselFieldsModal = ({
+  namePrefix,
+  label = "Strassenschlüssel",
+  onSyncDerivedValues,
+}: StrassenschluesselFieldsModalProps) => {
+  const form = Form.useFormInstance();
+  const keyTablesData = useSelector(getKeyTablesData);
+
+  const strassenschluesselOptions = [
+    ...((keyTablesData["straßenschlüssel"] ||
+      []) as StrassenschluesselItem[]),
+  ]
+    .filter((item) => item.pk && item.strasse)
+    .sort((a, b) => a.pk.localeCompare(b.pk));
+
+  const fieldName = (name: string) => (namePrefix ? [namePrefix, name] : name);
+
+  const strasseName = fieldName("strassenschluessel_strasse");
+  const pkName = fieldName("strassenschluessel_pk");
+
+  const fkName = fieldName("fk_strassenschluessel");
+
+  const buildChanged = (changes: Record<string, unknown>) =>
+    namePrefix ? { [namePrefix]: changes } : changes;
+
+  const handlePkChange = (selectedPk: string | undefined) => {
+    const match = strassenschluesselOptions.find(
+      (item) => item.pk === selectedPk
+    );
+    setTimeout(() => {
+      const strasse = match?.strasse ?? undefined;
+      const fk = match?.id ?? undefined;
+      form.setFieldValue(strasseName, strasse);
+      form.setFieldValue(fkName, fk);
+      onSyncDerivedValues?.(
+        buildChanged({
+          strassenschluessel_strasse: strasse,
+          fk_strassenschluessel: fk,
+        }),
+        form.getFieldsValue()
+      );
+    }, 0);
+  };
+
+  const handleStrasseChange = (selectedStrasse: string | undefined) => {
+    const match = strassenschluesselOptions.find(
+      (item) => item.strasse === selectedStrasse
+    );
+    setTimeout(() => {
+      const pk = match?.pk ?? undefined;
+      const fk = match?.id ?? undefined;
+      form.setFieldValue(pkName, pk);
+      form.setFieldValue(fkName, fk);
+      onSyncDerivedValues?.(
+        buildChanged({
+          strassenschluessel_pk: pk,
+          fk_strassenschluessel: fk,
+        }),
+        form.getFieldsValue()
+      );
+    }, 0);
+  };
+
+  return (
+    <Row gutter={16}>
+      <FormItem name={fieldName("fk_strassenschluessel")} hidden noStyle>
+        <input type="hidden" />
+      </FormItem>
+      <Col span={6}>
+        <FormItem
+          name={fieldName("strassenschluessel_pk")}
+          label={<FormLabel>{label}</FormLabel>}
+          className="mb-4"
+        >
+          <Select
+            size="large"
+            showSearch
+            allowClear
+            optionFilterProp="children"
+            placeholder=""
+            onChange={handlePkChange}
+          >
+            {strassenschluesselOptions.map((item) => (
+              <Select.Option key={item.id} value={item.pk}>
+                {item.pk}
+              </Select.Option>
+            ))}
+          </Select>
+        </FormItem>
+      </Col>
+      <Col span={18}>
+        <FormItem
+          name={fieldName("strassenschluessel_strasse")}
+          label={<FormLabel>&nbsp;</FormLabel>}
+          className="mb-4"
+        >
+          <Select
+            size="large"
+            showSearch
+            allowClear
+            optionFilterProp="children"
+            placeholder="Strasse auswählen"
+            onChange={handleStrasseChange}
+          >
+            {strassenschluesselOptions.map((item) => (
+              <Select.Option key={item.id} value={item.strasse}>
+                {toTitleCase(item.strasse)}
+              </Select.Option>
+            ))}
+          </Select>
+        </FormItem>
+      </Col>
+    </Row>
+  );
+};
+
+export default StrassenschluesselFieldsModal;

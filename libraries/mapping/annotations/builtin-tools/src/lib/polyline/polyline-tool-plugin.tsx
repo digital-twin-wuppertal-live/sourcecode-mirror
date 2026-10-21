@@ -1,0 +1,212 @@
+import { VectorPolylineIcon } from "@carma-commons/ui/components";
+import {
+  DEFAULT_ANNOTATION_SHORT_LABEL_CONFIG,
+  ANNOTATION_COMMON_SHORTCUT_ACTIONS,
+  formatMeasurementShortLabelToken,
+  isKeyboardTargetEditable,
+  resolveAnnotationCommonShortcutAction,
+  ANNOTATION_TYPES,
+} from "@carma-mapping/annotations/core";
+import {
+  AUTHORING_MEASUREMENT_PLUGIN_CAPABILITIES,
+  createMeasurementToolPlugin,
+  annotationVisualStyles,
+  resolveAnnotationLineStyleOptions,
+  withEdgeVisualStyle,
+  withPointMarkerVisualStyle,
+} from "@carma-mapping/annotations/runtime";
+import { ANNOTATION_TOOL_PLUGIN_CAPABILITIES } from "@carma-mapping/annotations/runtime";
+import type {
+  AnnotationToolDraftState,
+  AnnotationLineStyleOptions,
+} from "@carma-mapping/annotations/runtime";
+import { createSegmentAuthoringController } from "@carma-mapping/annotations/runtime";
+import {
+  appendPolylinePreviewPoint,
+  finishPolylinePreview,
+} from "./polyline-tool-actions";
+import { createPolylineToolInfoBoxSlots } from "./polyline-tool-info-box-slots";
+import { buildPolylineToolRenderModels } from "./polyline-tool-render-models";
+import { ANNOTATION_DEFAULT_LABEL_THEME } from "@carma-mapping/annotations/runtime";
+import type { DefaultAnnotationToolTexts } from "../annotation-mode-text";
+import { defaultAnnotationToolTexts } from "../annotation-mode-text";
+const { POLYLINE: ANNOTATION_TYPE_POLYLINE } = ANNOTATION_TYPES;
+
+const toolType = ANNOTATION_TYPE_POLYLINE;
+const labelTheme = ANNOTATION_DEFAULT_LABEL_THEME;
+const badgeStyle = {
+  ...DEFAULT_ANNOTATION_SHORT_LABEL_CONFIG[toolType],
+  backgroundColor: labelTheme.scheme.colorPrimary,
+  textColor: labelTheme.scheme.textColor,
+};
+
+export type PolylineToolPluginOptions = {
+  annotationLineStyleOptions?: AnnotationLineStyleOptions;
+  texts?: DefaultAnnotationToolTexts;
+};
+
+export const createPolylineToolPlugin = ({
+  annotationLineStyleOptions,
+  texts = defaultAnnotationToolTexts,
+}: PolylineToolPluginOptions = {}) => {
+  const text = texts.polyline;
+  const getPolylineToolInfoBoxSlots = createPolylineToolInfoBoxSlots(toolType, {
+    headingTitle: text.headingTitle,
+    headingColor: labelTheme.scheme.colorPrimary,
+    formatLabelToken: (counter) =>
+      formatMeasurementShortLabelToken(toolType, counter),
+    actionLabels: texts.actions,
+    navigationLabels: texts.navigation,
+    metricLabels: text.metricLabels,
+  });
+  const resolvedLineStyleOptions = resolveAnnotationLineStyleOptions(
+    annotationLineStyleOptions
+  );
+  const polylineToolVisuals = {
+    edge: withEdgeVisualStyle(annotationVisualStyles.edge, {
+      strokeWidth: resolvedLineStyleOptions.strokeWidthPx,
+      overlayDashPattern: resolvedLineStyleOptions.overlayDashPattern,
+    }),
+    point: withPointMarkerVisualStyle(annotationVisualStyles.point),
+  };
+
+  return createMeasurementToolPlugin({
+    id: toolType,
+    annotationType: toolType,
+    descriptor: {
+      id: toolType,
+      order: 40,
+      label: text.label,
+      tooltip: text.tooltip,
+      shortcutKey: "P",
+      icon: <VectorPolylineIcon fontSize="1.33em" />,
+    },
+    helpText: text.helpText,
+    capabilities: [
+      ...AUTHORING_MEASUREMENT_PLUGIN_CAPABILITIES,
+      ANNOTATION_TOOL_PLUGIN_CAPABILITIES.INFO_BOX,
+    ],
+    session: {
+      createSession: ({ drafts, setActiveToolType, addAnnotation }) => ({
+        toolType,
+        requestStart: () => {
+          setActiveToolType(toolType);
+        },
+        requestFinish: () => {
+          const draft = drafts.get(toolType);
+          const nextMeasurement = finishPolylinePreview({
+            toolType,
+            coordinates: draft.coordinates,
+            linkedNodeGroupIds: draft.linkedNodeGroupIds,
+            addAnnotation,
+            sourceToolId: toolType,
+          });
+
+          drafts.clear(toolType);
+          return Boolean(nextMeasurement);
+        },
+        discardDraft: () => {
+          drafts.clear(toolType);
+        },
+        onNodeCreated: (coordinate, linkedNodeGroupId) => {
+          const currentDraft = drafts.get(toolType);
+          const nextDraft: AnnotationToolDraftState = {
+            coordinates: appendPolylinePreviewPoint(
+              currentDraft.coordinates,
+              coordinate
+            ),
+            linkedNodeGroupIds: appendPolylinePreviewPoint(
+              currentDraft.linkedNodeGroupIds,
+              linkedNodeGroupId ?? null
+            ),
+          };
+          drafts.set(toolType, nextDraft);
+        },
+        finishesOnLoopClosure: true,
+      }),
+    },
+    pointQuery: {
+      onPointCreated: ({
+        coordinate,
+        linkedNodeGroupId,
+        activeToolSession,
+      }) => {
+        if (activeToolSession?.onNodeCreated) {
+          activeToolSession.onNodeCreated(coordinate, linkedNodeGroupId);
+        }
+      },
+    },
+    authoringVisuals: {
+      createController: (context) =>
+        createSegmentAuthoringController({
+          toolType,
+          context,
+          showCommittedDraftChain: true,
+          lineOptions: {
+            overlayDashed: true,
+            strokeWidth: resolvedLineStyleOptions.strokeWidthPx,
+            overlayDashPattern: resolvedLineStyleOptions.overlayDashPattern,
+          },
+        }),
+    },
+    keyboard: {
+      onKeyDown: ({ event, activeToolSession }) => {
+        if (
+          event.defaultPrevented ||
+          event.metaKey ||
+          event.ctrlKey ||
+          event.altKey ||
+          isKeyboardTargetEditable(event.target)
+        ) {
+          return false;
+        }
+
+        if (
+          resolveAnnotationCommonShortcutAction(event) !==
+          ANNOTATION_COMMON_SHORTCUT_ACTIONS.CANCEL_ACTIVE_TOOL
+        ) {
+          return false;
+        }
+
+        activeToolSession?.discardDraft();
+        event.preventDefault();
+        return true;
+      },
+    },
+    visualModels: {
+      build: ({
+        nodes,
+        annotationEntries,
+        selectedAnnotationIds,
+        setSelectedAnnotationId,
+        formatOptions,
+        onNodeLongPress,
+      }) => {
+        const { points, edges, pointLabels } = buildPolylineToolRenderModels({
+          toolType,
+          visuals: polylineToolVisuals,
+          formatOptions,
+          badgeStyle,
+          getLabel: (counter) =>
+            formatMeasurementShortLabelToken(toolType, counter),
+          nodes,
+          annotations: annotationEntries,
+          selectedAnnotationIds: selectedAnnotationIds,
+          onSelect: setSelectedAnnotationId,
+          onNodeLongPress,
+        });
+
+        return {
+          points,
+          edges,
+          pointLabels,
+        };
+      },
+    },
+    infoBox: {
+      getSlots: getPolylineToolInfoBoxSlots,
+    },
+  });
+};
+
+export const polylineToolPlugin = createPolylineToolPlugin();

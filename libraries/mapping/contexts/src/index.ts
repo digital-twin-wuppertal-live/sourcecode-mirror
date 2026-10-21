@@ -1,0 +1,63 @@
+// @carma-mapping/contexts
+// Shared contexts for CARMA mapping framework
+// This library exists to break circular dependencies between mapping libraries
+
+export {
+  LibreContext,
+  LibreContextProvider,
+  useLibreContext,
+} from "./LibreContext";
+
+export type {
+  LibreContextType,
+  GeoJsonMetadata,
+  FilterPresentation,
+} from "./LibreContext";
+
+export { LocateContext, LocateProvider, useLocate } from "./LocateContext";
+
+export type { LocateContextType, LocateProblem } from "./LocateContext";
+
+export {
+  MapSelectionContext,
+  MapSelectionProvider,
+  useMapSelection,
+} from "./MapSelectionContext";
+
+export type {
+  MapSelectionContextType,
+  SelectedFeatureIdentifier,
+} from "./MapSelectionContext";
+
+export {
+  DatasheetContext,
+  DatasheetProvider,
+  useDatasheet,
+} from "./DatasheetContext";
+
+export type { DatasheetContextType } from "./DatasheetContext";
+
+export {
+  MapHighlightContext,
+  MapHighlightProvider,
+  useMapHighlight,
+} from "./MapHighlightContext";
+
+export type {
+  MapHighlightContextType,
+  HighlightCriteria,
+  PropertyMatcher,
+  QueryId,
+  ToggledFeature,
+} from "./MapHighlightContext";
+
+export {
+  AddonListContext,
+  AddonProvider,
+  AddonScopeContext,
+  AddonStateSetterContext,
+  AddonStateValueContext,
+  EMPTY_ADDON_STATE,
+} from "./AddonStateContext";
+
+export type { AddonStateRecord, AddonStateSet } from "./AddonStateContext";

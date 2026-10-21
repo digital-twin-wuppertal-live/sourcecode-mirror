@@ -1,0 +1,171 @@
+import { useCallback } from "react";
+import { useDispatch, useSelector } from "react-redux";
+import type { Map as MaplibreMap } from "maplibre-gl";
+
+import { useLibreContext } from "@carma-mapping/contexts";
+import type { PrintInputLayer } from "@carma-mapping/print-core";
+import {
+  MapLibrePrintPreview,
+  buildInlineVectorStyle,
+  buildLiveVectorStyle,
+  layerHasActiveFilter,
+  type StyleLayerLike,
+} from "@carma-mapping/print-core/maplibre";
+
+import { convertLayerStringToLayers } from "../../config";
+import { getUIMode, setUIMode, UIMode } from "../../store/slices/ui";
+import {
+  changeIfMapPrinted,
+  changeIsLoading,
+  changePrintError,
+  changeRedrawPreview,
+  getDPI,
+  getIfMapPrinted,
+  getIsLoading,
+  getOrientation,
+  getPrintName,
+  getRedrawPreview,
+  getScale,
+} from "../../store/slices/print";
+import { getBackgroundLayer, getLayers } from "../../store/slices/mapping";
+
+/**
+ * A layer whose style launches the vehicleAnimation (the Schwebebahn) has no
+ * print style the print service knows, and its failing WMS request takes the
+ * whole job down, so it stays off the paper.
+ *
+ * Temporary fix: keying on the vehicleAnimation addon is a stand-in. Styles
+ * will get a metadata tag (in `metadata.carmaConf`) that says whether a layer
+ * is printable, and this filter will read that instead.
+ */
+const launchesVehicleAnimation = (layer: { tools?: unknown }): boolean =>
+  Array.isArray(layer.tools) &&
+  layer.tools.some(
+    (tool) =>
+      (tool as { addon?: unknown } | null)?.addon === "vehicleAnimation"
+  );
+
+// Thin Redux connector for the MapLibre print preview — the libre-map analog
+// of PrintPreview.tsx (Leaflet). All rendering/behaviour lives in the library
+// component (@carma-mapping/print-core/maplibre); this wrapper maps the
+// geoportal store onto its props and builds the print layer stack from the
+// background + overlay layers at print time.
+const LibrePrintPreview = () => {
+  const dispatch = useDispatch();
+  const mode = useSelector(getUIMode);
+  const orientation = useSelector(getOrientation);
+  const dpi = useSelector(getDPI);
+  const scale = useSelector(getScale);
+  const printName = useSelector(getPrintName);
+  const loading = useSelector(getIsLoading);
+  const redrawPrev = useSelector(getRedrawPreview);
+  const ifMapPrinted = useSelector(getIfMapPrinted);
+  const bgLayer = useSelector(getBackgroundLayer);
+  const layers = useSelector(getLayers);
+  const { map: libreMap } = useLibreContext();
+
+  const resolveLayers = useCallback(
+    (
+      map: MaplibreMap,
+      bbox: [number, number, number, number]
+    ): PrintInputLayer[] => {
+      const background = convertLayerStringToLayers(
+        bgLayer.layers,
+        bgLayer.visible,
+        bgLayer.opacity
+      );
+      // convertLayerStringToLayers keeps the order of the spec, so the name of
+      // each background entry is the one at the same position
+      const bgNames = bgLayer.layers
+        .split("|")
+        .map((spec) => spec.split("@")[0]);
+      const combined = [
+        ...background,
+        ...layers.filter((layer) => !launchesVehicleAnimation(layer)),
+      ];
+      return combined.map((layer, index) => {
+        // A vector background is printed as the map renders it, with its
+        // tiles remote, so it needs no hosted tgl4printing style. Its style
+        // layers carry the "bg-<name>" layer-id of
+        // geoportalBackgroundToLibreLayers.
+        if (
+          index < background.length &&
+          layer.visible &&
+          layer.layerType === "vector"
+        ) {
+          const layerId = `bg-${bgNames[index]}`;
+          const inlineStyle = buildLiveVectorStyle(
+            map,
+            (styleLayer) => styleLayer.metadata?.["layer-id"] === layerId
+          );
+          if (inlineStyle) {
+            // opacity is already in the paint
+            return {
+              visible: true,
+              layerType: "inline",
+              opacity: 1,
+              inlineStyle,
+            } satisfies PrintInputLayer;
+          }
+        }
+        // A filtered or selection-carrying vector layer must be inlined from
+        // the live map (the hosted print style is unfiltered and stateless).
+        // Unlike the Leaflet path (one dedicated MapLibre map per vector
+        // layer), the libre map is a composite of every layer, so the inline
+        // builder is scoped to this layer's style layers via the
+        // metadata["layer-id"] stamp of the style builder.
+        // Any other vector layer (e.g. a dropped style, which has no hosted
+        // print style) is printed as the map renders it, like the background.
+        if (layer.visible && layer.layerType === "vector" && layer.id) {
+          const styleLayerFilter = (styleLayer: StyleLayerLike) =>
+            styleLayer.metadata?.["layer-id"] === layer.id;
+          const inlineStyle =
+            buildInlineVectorStyle(
+              map,
+              layer,
+              bbox,
+              layerHasActiveFilter(layer),
+              { styleLayerFilter }
+            ) ?? buildLiveVectorStyle(map, styleLayerFilter);
+          if (inlineStyle) {
+            // Opacity is already baked into the composite map's paint by the
+            // style builder, so it must not be applied a second time.
+            return {
+              visible: true,
+              layerType: "inline",
+              opacity: 1,
+              inlineStyle,
+            } satisfies PrintInputLayer;
+          }
+        }
+        return layer as PrintInputLayer;
+      });
+    },
+    [bgLayer, layers]
+  );
+
+  return (
+    <MapLibrePrintPreview
+      map={libreMap}
+      active={mode === UIMode.PRINT}
+      orientation={orientation}
+      scale={scale}
+      dpi={dpi}
+      name={printName}
+      resolveLayers={resolveLayers}
+      redrawTrigger={redrawPrev}
+      keepRectangle={ifMapPrinted}
+      loading={loading}
+      onClose={() => dispatch(setUIMode(UIMode.DEFAULT))}
+      onLoadingChange={(status) => dispatch(changeIsLoading(status))}
+      onError={(message) => dispatch(changePrintError(message))}
+      onPrintStart={() => dispatch(changeIfMapPrinted(true))}
+      onRequestRedraw={() => {
+        dispatch(changeIfMapPrinted(false));
+        dispatch(changeRedrawPreview(!redrawPrev));
+      }}
+    />
+  );
+};
+
+export default LibrePrintPreview;

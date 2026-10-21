@@ -1,0 +1,34 @@
+{
+  "name": "@carma-commons/utils",
+  "version": "0.0.1",
+  "private": true,
+  "main": "./index.js",
+  "types": "./index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "import": "./index.mjs",
+      "require": "./index.js"
+    },
+    "./fetching": {
+      "types": "./fetching.d.ts",
+      "import": "./fetching.mjs",
+      "require": "./fetching.js"
+    },
+    "./number-format": {
+      "types": "./number-format.d.ts",
+      "import": "./number-format.mjs",
+      "require": "./number-format.js"
+    },
+    "./promise": {
+      "types": "./promise.d.ts",
+      "import": "./promise.mjs",
+      "require": "./promise.js"
+    },
+    "./window": {
+      "types": "./window.d.ts",
+      "import": "./window.mjs",
+      "require": "./window.js"
+    }
+  }
+}

@@ -1,0 +1,133 @@
+import { describe, expect, it } from "vitest";
+import type { Vector3 } from "three";
+
+import { createProjectedTerrainTileGeometry } from "./terrain-tile-geometry";
+
+const tile = {
+  bounds: { west: 0, south: 0, east: 1, north: 1 },
+  u: [0, 0, 1, 1],
+  v: [0, 1, 0, 1],
+  heightMeters: [10, 10, 10, 10],
+  indices: [0, 3, 1, 0, 2, 3],
+};
+
+describe("createProjectedTerrainTileGeometry", () => {
+  it("projects the native TIN with upward-facing normals", () => {
+    const geometry = createProjectedTerrainTileGeometry({
+      tile,
+      projectToWorld: (longitude, latitude, height, target) =>
+        target.set(longitude, height, -latitude),
+    });
+
+    expect([...(geometry.getIndex()?.array ?? [])]).toEqual([0, 3, 1, 0, 2, 3]);
+    expect(geometry.getAttribute("position").count).toBe(4);
+    expect(geometry.getAttribute("uv")).toBeUndefined();
+    expect(geometry.getAttribute("normal").getY(0)).toBeCloseTo(1);
+  });
+
+  it("does not create skirt geometry from Cesium edge metadata", () => {
+    const geometry = createProjectedTerrainTileGeometry({
+      tile: {
+        ...tile,
+        westIndices: [0, 1],
+        westSkirtHeight: 4,
+      },
+      projectToWorld: (longitude, latitude, height, target) =>
+        target.set(longitude, height, -latitude),
+    });
+
+    expect(geometry.getAttribute("position").count).toBe(4);
+    expect(geometry.getIndex()?.count).toBe(6);
+  });
+
+  it("preserves caller-prepared normals and rejects incomplete output buffers", () => {
+    const normalBuffer = new Float32Array([0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1]);
+    const options = {
+      tile,
+      normalBuffer,
+      projectToWorld: (
+        longitude: number,
+        latitude: number,
+        height: number,
+        target: Vector3
+      ) => target.set(longitude, height, -latitude),
+    };
+    const geometry = createProjectedTerrainTileGeometry(options);
+    expect(geometry.getAttribute("normal").array).toBe(normalBuffer);
+    expect(geometry.getAttribute("normal").getZ(0)).toBe(1);
+    expect(() =>
+      createProjectedTerrainTileGeometry({
+        ...options,
+        normalBuffer: new Float32Array(3),
+      })
+    ).toThrow("normal buffer");
+    geometry.dispose();
+  });
+
+  it("drops zero-area faces and corrects downward winding", () => {
+    const geometry = createProjectedTerrainTileGeometry({
+      tile: {
+        ...tile,
+        // First triangle is clockwise in projected X/Z. The second has the
+        // same horizontal vertex three times and must not reach the GPU.
+        indices: [0, 1, 3, 0, 0, 0],
+      },
+      projectToWorld: (longitude, latitude, height, target) =>
+        target.set(longitude, height, -latitude),
+    });
+
+    expect([...(geometry.getIndex()?.array ?? [])]).toEqual([0, 3, 1]);
+    for (const index of [0, 1, 3]) {
+      expect(geometry.getAttribute("normal").getY(index)).toBeGreaterThan(0);
+    }
+  });
+
+  it("keeps nondegenerate geographic faces whose local XZ projection collapses", () => {
+    const geometry = createProjectedTerrainTileGeometry({
+      tile: { ...tile, indices: [0, 2, 1] },
+      triangleOrientation: "geographic",
+      projectToWorld: (longitude, latitude, height, target) =>
+        target.set(longitude, latitude, height),
+    });
+
+    expect([...(geometry.getIndex()?.array ?? [])]).toEqual([0, 2, 1]);
+    const normal = geometry.getAttribute("normal");
+    for (const index of [0, 1, 2])
+      expect(
+        Math.hypot(normal.getX(index), normal.getY(index), normal.getZ(index))
+      ).toBeGreaterThan(0);
+  });
+
+  it("rejects out-of-range indices before creating GPU buffers", () => {
+    expect(() =>
+      createProjectedTerrainTileGeometry({
+        tile: { ...tile, indices: [0, 1, 4] },
+        projectToWorld: (longitude, latitude, height, target) =>
+          target.set(longitude, height, -latitude),
+      })
+    ).toThrow("outside the vertex array");
+  });
+
+  it("keeps indices above 65535 intact for full-resolution terrain grids", () => {
+    const vertexCount = 65537;
+    const u = new Float32Array(vertexCount);
+    const v = new Float32Array(vertexCount);
+    u[65535] = 1;
+    v[65536] = 1;
+    const geometry = createProjectedTerrainTileGeometry({
+      tile: {
+        bounds: tile.bounds,
+        u,
+        v,
+        heightMeters: new Float32Array(vertexCount),
+        indices: new Uint32Array([0, 65535, 65536]),
+      },
+      projectToWorld: (longitude, latitude, height, target) =>
+        target.set(longitude, height, -latitude),
+    });
+
+    expect(geometry.getIndex()?.array).toBeInstanceOf(Uint32Array);
+    expect([...(geometry.getIndex()?.array ?? [])]).toEqual([0, 65535, 65536]);
+    geometry.dispose();
+  });
+});

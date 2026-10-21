@@ -1,0 +1,118 @@
+import { describe, expect, it } from "vitest";
+
+import type {
+  ShadowDateState,
+  ShadowSimulationState,
+} from "../contracts/shadow-simulation";
+
+import {
+  applyShadowHashSelection,
+  resolveShadowHashSelection,
+  shadowStateMatchesHashSelection,
+} from "./shadow-selection-state";
+
+describe("shadow selection state", () => {
+  it("preserves night selections for the full-day texture capture", () => {
+    expect(
+      resolveShadowHashSelection(
+        { dayOfYear: 267, minutes: 0 },
+        2026,
+        { latitude: 51.25, longitude: 7.12 },
+        "Europe/Berlin",
+        { daylightOnly: false }
+      )
+    ).toEqual({ dayOfYear: 267, minutes: 0 });
+  });
+  it("validates leap days and integer years with the shared calendar", () => {
+    const selection = { dayOfYear: 366, minutes: 720 };
+    expect(
+      resolveShadowHashSelection(selection, 2024, {}, "Europe/Berlin")
+    ).not.toBeNull();
+    expect(
+      resolveShadowHashSelection(selection, 2026, {}, "Europe/Berlin")
+    ).toBeNull();
+    expect(
+      resolveShadowHashSelection(selection, 2024.5, {}, "Europe/Berlin")
+    ).toBeNull();
+  });
+  it("matches enabled state and hash selection by value", () => {
+    const selection = { dayOfYear: 172, minutes: 720 };
+    expect(shadowStateMatchesHashSelection(true, selection, selection)).toBe(
+      true
+    );
+    expect(shadowStateMatchesHashSelection(false, selection, null)).toBe(true);
+  });
+
+  it("rejects invalid dates and clamps valid night selections", () => {
+    expect(
+      resolveShadowHashSelection(
+        { dayOfYear: 366, minutes: 720 },
+        2025,
+        { latitude: 51.256, longitude: 7.15 },
+        "Europe/Berlin"
+      )
+    ).toBeNull();
+
+    expect(
+      resolveShadowHashSelection(
+        { dayOfYear: 172, minutes: 0 },
+        2026,
+        { latitude: 51.256, longitude: 7.15 },
+        "Europe/Berlin"
+      )?.minutes
+    ).toBeGreaterThan(0);
+  });
+
+  it("carries the tile diagnostics of a shared link", () => {
+    const state = { enabled: false } as ShadowSimulationState;
+    const dateState: ShadowDateState = {
+      year: 2026,
+      dayOfYear: 172,
+      minutes: 720,
+      timeZone: "Europe/Berlin",
+    };
+    expect(
+      applyShadowHashSelection(state, dateState, {
+        dayOfYear: 173,
+        minutes: 800,
+        tileDiagnostics: true,
+      }).shadowState.showTileDiagnostics
+    ).toBe(true);
+    // A link without a selection leaves the current toggle alone.
+    expect(
+      applyShadowHashSelection(
+        { ...state, showTileDiagnostics: true } as ShadowSimulationState,
+        dateState,
+        null
+      ).shadowState.showTileDiagnostics
+    ).toBe(true);
+  });
+
+  it("restores only the hash-owned state fields", () => {
+    const state = {
+      enabled: false,
+      terrainColor: "#fff",
+    } as ShadowSimulationState;
+    const dateState: ShadowDateState = {
+      year: 2026,
+      dayOfYear: 172,
+      minutes: 720,
+      timeZone: "Europe/Berlin",
+    };
+
+    expect(
+      applyShadowHashSelection(state, dateState, {
+        dayOfYear: 173,
+        minutes: 800,
+      })
+    ).toEqual({
+      shadowState: { ...state, enabled: true, showTileDiagnostics: false },
+      dateState: {
+        year: 2026,
+        dayOfYear: 173,
+        minutes: 800,
+        timeZone: "Europe/Berlin",
+      },
+    });
+  });
+});

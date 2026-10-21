@@ -1,0 +1,224 @@
+import { useEffect } from "react";
+import { useDispatch, useSelector } from "react-redux";
+
+import {
+  faExclamation,
+  faEye,
+  faFileExport,
+  faPrint,
+  faRotateRight,
+  faShareNodes,
+} from "@fortawesome/free-solid-svg-icons";
+import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
+import { Tooltip } from "antd";
+
+import { Save, useSelection, useShareUrl } from "@carma-appframeworks/portals";
+import { geoElements } from "@carma-collab/wuppertal/geoportal";
+import { getCollabedHelpComponentConfig as getCollabedHelpElementsConfig } from "@carma-collab/wuppertal/helper-overlay";
+import { useOverlayHelper } from "@carma-commons/ui/helper-overlay";
+import { carmaWindow } from "@carma-commons/utils";
+import { useMapFrameworkSwitcherContext } from "@carma-mapping/components";
+import { APP_BASE_PATH } from "../../config/app.config";
+import {
+  appendSavedLayerConfig,
+  changeBackgroundOpacity,
+  changeBackgroundVisibility,
+  getBackgroundLayer,
+  getFocusMode,
+  getLayerStack,
+  getLayerState,
+  getPaleOpacityValue,
+  setFocusMode,
+} from "../../store/slices/mapping";
+import {
+  changePrintError,
+  getIfPopupOpend,
+  getIsLoading,
+  getPrintError,
+} from "../../store/slices/print";
+import {
+  setShowResourceModal,
+  setUIMode,
+  setZenMode,
+} from "../../store/slices/ui";
+import { ShareContent } from "../ShareContent";
+import Print from "../map-print/Print";
+import CustomPopover from "./CustomPopover";
+import { getSelectedFeature } from "../../store/slices/features";
+import {
+  ToolAction,
+  TrackingCategory,
+  formatMapMode,
+  trackEvent,
+} from "../../tracking";
+
+const disabledClass = "text-gray-300";
+const disabledImageOpacity = "opacity-20";
+
+const ActionButtons = () => {
+  const dispatch = useDispatch();
+  const layerState = useSelector(getLayerState);
+  const { selection } = useSelection();
+  const { copyShareUrl, contextHolder } = useShareUrl();
+  const { isLeaflet, isCesium } = useMapFrameworkSwitcherContext();
+  const focusMode = useSelector(getFocusMode);
+  const activeLayers = useSelector(getLayerStack);
+  const showPrintPopup = useSelector(getIfPopupOpend);
+  const backgroundLayer = useSelector(getBackgroundLayer);
+  const paleOpacityValue = useSelector(getPaleOpacityValue);
+  const selectedFeature = useSelector(getSelectedFeature);
+
+  // every tool event carries the map context it was used from
+  const mapMode = formatMapMode(isCesium);
+  const trackTool = (action: string) =>
+    trackEvent(TrackingCategory.TOOL, action, mapMode);
+
+  const menuTourRef = useOverlayHelper(
+    getCollabedHelpElementsConfig("MENULEISTE", geoElements)
+  );
+
+  const loading = useSelector(getIsLoading);
+  const printError = useSelector(getPrintError);
+
+  useEffect(() => {
+    if (printError) {
+      const timer = setTimeout(() => {
+        dispatch(changePrintError(null));
+      }, 5000);
+
+      return () => clearTimeout(timer);
+    }
+  }, [printError]);
+
+  return (
+    <div
+      ref={menuTourRef}
+      className="flex items-center gap-4 sm:gap-6 lg:ml-[86px] xl:ml-[190px]"
+    >
+      <Tooltip title="Aktualisieren">
+        <button
+          onClick={carmaWindow.location.reload}
+          className="text-xl hover:text-gray-600"
+          data-test-id="reload-btn"
+        >
+          <FontAwesomeIcon icon={faRotateRight} />
+        </button>
+      </Tooltip>
+      <Tooltip title="Karteninhalte hinzufügen">
+        <button
+          onClick={() => {
+            trackTool(ToolAction.ADD_LAYERS);
+            dispatch(setShowResourceModal(true));
+          }}
+          className="h-[24.5px] min-w-fit"
+          data-test-id="kartenebenen-hinzufügen-btn"
+        >
+          <img
+            src={`${APP_BASE_PATH}icons/add-layers.png`}
+            alt="Kartenebenen hinzufügen"
+            className={`h-5 min-w-fit mb-0.5 cursor-pointer`}
+          />
+        </button>
+      </Tooltip>
+      <Tooltip
+        title={`Hintergrundkarte ${focusMode ? "zurücksetzen" : "abschwächen"}`}
+      >
+        <button
+          className="h-[24.5px] min-w-fit"
+          disabled={isCesium}
+          onClick={() => {
+            trackTool(
+              focusMode
+                ? ToolAction.BACKGROUND_RESET
+                : ToolAction.BACKGROUND_PALE
+            );
+            dispatch(setFocusMode(!focusMode));
+            dispatch(
+              changeBackgroundOpacity({
+                opacity: focusMode ? 1 : paleOpacityValue,
+              })
+            );
+            if (focusMode) {
+              dispatch(changeBackgroundVisibility(true));
+            }
+          }}
+          data-test-id="hintergrundkarte-btn"
+        >
+          <img
+            src={`${APP_BASE_PATH}icons/focus-${focusMode ? "on" : "off"}.png`}
+            alt={`Hintergrundkarte ${
+              focusMode ? "zurücksetzen" : "abschwächen"
+            }`}
+            className={`h-5 min-w-fit mb-0.5 cursor-pointer ${
+              isLeaflet ? "" : disabledImageOpacity
+            }`}
+          />
+        </button>
+      </Tooltip>
+      <Tooltip
+        title={
+          <span>
+            Bedienelemente ausblenden
+            <br />
+            (Zen-Modus starten)
+          </span>
+        }
+      >
+        <button
+          className={`text-xl hover:text-gray-600`}
+          onClick={() => {
+            trackTool(ToolAction.ZEN_MODE);
+            dispatch(setZenMode(true));
+            dispatch(setUIMode("default"));
+          }}
+          data-test-id="zen-mode-btn"
+        >
+          <FontAwesomeIcon fixedWidth={true} icon={faEye} />
+        </button>
+      </Tooltip>
+      <CustomPopover
+        content={
+          <Save
+            layers={activeLayers}
+            backgroundLayer={backgroundLayer}
+            storeConfigAction={(config) =>
+              dispatch(appendSavedLayerConfig(config))
+            }
+          />
+        }
+        icon={faFileExport}
+        testId="speichern-btn"
+        tooltip="Karte speichern"
+        disabled={!isLeaflet}
+        onOpen={() => trackTool(ToolAction.SAVE)}
+      />
+      <CustomPopover
+        content={<Print />}
+        icon={printError ? faExclamation : faPrint}
+        testId="print-btn"
+        tooltip={printError ? printError : "Drucken"}
+        disabled={!isLeaflet}
+        className={printError ? "text-red-600" : ""}
+        onOpen={() => trackTool(ToolAction.PRINT)}
+      />
+      <CustomPopover
+        content={<ShareContent />}
+        icon={faShareNodes}
+        testId="teilen-btn"
+        tooltip="Teilen"
+        onOpen={() => trackTool(ToolAction.SHARE)}
+        shiftClickHandler={() => {
+          trackTool(ToolAction.SHARE_COPY_URL);
+          copyShareUrl({
+            layerState,
+            gazetteerSelection: selection,
+            selectedFeature,
+          });
+        }}
+      />
+      {contextHolder}
+    </div>
+  );
+};
+
+export default ActionButtons;
