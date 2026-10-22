@@ -1,4 +1,67 @@
 {
+  "baederkarte": {
+    "version": "2.0.7",
+    "tag": "baederkarte/v2.0.7",
+    "date": "2025-10-31T10:09:08Z",
+    "sources": {
+      "carma": "7a0dd7e1bdf21bab560d6407c602cc85647b7b43",
+      "carma-wuppertal-collab": "df4c59a74d4215904f07129dfe5a5de6c1c1c289"
+    }
+  },
+  "belis-desktop": {
+    "version": "0.10.2",
+    "tag": "belis-desktop/v0.10.2",
+    "date": "2026-10-15T14:34:17Z",
+    "sources": {
+      "carma": "b4edc5ecaac4cdc8771ec37be6ead87e19cb9646",
+      "carma-wuppertal-collab": "f197f6da532071e322372a34ca057139448dcbb6"
+    }
+  },
+  "bplan-auskunft": {
+    "version": "2.3.11",
+    "tag": "bplan-auskunft/v2.3.11",
+    "date": "2026-07-07T06:43:44Z",
+    "sources": {
+      "carma": "62a787a4f155317be929e870e0f02e524a82c906",
+      "carma-wuppertal-collab": "b9b577a31816d20af7ff29fa8d24ad66a81361f2"
+    }
+  },
+  "e-auto-ladestation": {
+    "version": "2.1.6",
+    "tag": "e-auto-ladestation/v2.1.6",
+    "date": "2025-11-17T13:48:54Z",
+    "sources": {
+      "carma": "9d7890a69973018856a4a80e054a105864645b32",
+      "carma-wuppertal-collab": "53c69f0062c61c2b2dc90f450647aeef83293a7d"
+    }
+  },
+  "e-bikes": {
+    "version": "2.1.6",
+    "tag": "e-bikes/v2.1.6",
+    "date": "2025-11-17T13:53:33Z",
+    "sources": {
+      "carma": "d96d3a3987732ac317a0e2b17b9ea34e40a23dda",
+      "carma-wuppertal-collab": "53c69f0062c61c2b2dc90f450647aeef83293a7d"
+    }
+  },
+  "fnp-inspektor": {
+    "version": "2.3.11",
+    "tag": "fnp-inspektor/v2.3.11",
+    "date": "2026-06-17T09:31:30Z",
+    "sources": {
+      "carma": "93e9e45d6e72df3214388a435a92d771242a09d8",
+      "carma-wuppertal-collab": "150dab95e26702ca6bc4c94a91984e7330223ad9"
+    }
+  },
+  "generic-topicmap": {
+    "version": "2.4.2",
+    "tag": "generic-topicmap/v2.4.2",
+    "date": "2026-04-07T10:35:57Z",
+    "sources": {
+      "carma": "554a28055ba176e3ae60c34cd83f269c85373348",
+      "carma-wuppertal-collab": "3ef91fe02be81d0091969313dbd2d6cdcd30e432"
+    }
+  },
   "geoportal": {
     "version": "1.3.11",
     "tag": "geoportal/v1.3.11",
@@ -8,6 +71,78 @@
       "carma-wuppertal-collab": "c664386cb2442f20157413e8541e76ef3f9bf345"
     }
   },
+  "hitzeinderstadt": {
+    "version": "2.0.5",
+    "tag": "hitzeinderstadt/v2.0.5",
+    "date": "2025-10-31T10:24:05Z",
+    "sources": {
+      "carma": "f5c14b5c144b6c11d6431bb02e4f4d4fade6034a",
+      "carma-wuppertal-collab": "df4c59a74d4215904f07129dfe5a5de6c1c1c289"
+    }
+  },
+  "kita-finder": {
+    "version": "2.0.8",
+    "tag": "kita-finder/v2.0.8",
+    "date": "2026-05-11T17:55:47Z",
+    "sources": {
+      "carma": "5558fec2c89c4d9c267f358e805601de23df1457",
+      "carma-wuppertal-collab": "fb10b4b2c1427ec33558ba3e6e855c482a7f0465"
+    }
+  },
+  "klimaorte": {
+    "version": "2.1.7",
+    "tag": "klimaorte/v2.1.7",
+    "date": "2025-11-17T14:30:45Z",
+    "sources": {
+      "carma": "f7eab219705cd0ceca32aa27a395b2d6e7d7abd7",
+      "carma-wuppertal-collab": "53c69f0062c61c2b2dc90f450647aeef83293a7d"
+    }
+  },
+  "kulturstadtplan": {
+    "version": "2.0.7",
+    "tag": "kulturstadtplan/v2.0.7",
+    "date": "2025-10-31T10:07:14Z",
+    "sources": {
+      "carma": "160b8424bb8bccc8acf940bb537699ec7e67f857",
+      "carma-wuppertal-collab": "df4c59a74d4215904f07129dfe5a5de6c1c1c289"
+    }
+  },
+  "lagis-desktop": {
+    "version": "1.10.4",
+    "tag": "lagis-desktop/v1.10.4",
+    "date": "2026-09-25T11:12:18Z",
+    "sources": {
+      "carma": "6f8d74cc583fc3a89d0e02f8d532d30975e135ee",
+      "carma-wuppertal-collab": "f197f6da532071e322372a34ca057139448dcbb6"
+    }
+  },
+  "legals": {
+    "version": "0.0.0",
+    "tag": "legals/v0.0.0",
+    "date": "2025-11-04T06:40:49Z",
+    "sources": {
+      "carma": "0e219bb55d52711dfddc3ca3ca68962410ba37c9",
+      "carma-wuppertal-collab": "c30fd44b9e135dc9b4503eb1846e1075bd6a8dae"
+    }
+  },
+  "luftmessstationen": {
+    "version": "1.1.8",
+    "tag": "luftmessstationen/v1.1.8",
+    "date": "2025-11-17T13:56:15Z",
+    "sources": {
+      "carma": "8f292404e3fd0975b0cc32fb6462ef7dba9452a0",
+      "carma-wuppertal-collab": "53c69f0062c61c2b2dc90f450647aeef83293a7d"
+    }
+  },
+  "potenzialflaechen-online": {
+    "version": "1.3.8",
+    "tag": "potenzialflaechen-online/v1.3.8",
+    "date": "2026-05-12T16:18:09Z",
+    "sources": {
+      "carma": "d568822bcbca59e6c9ca507c6023e7275b948366",
+      "carma-wuppertal-collab": "a72e57da1579b9e29e9a29e3e5b382941781d45c"
+    }
+  },
   "stadtplan": {
     "version": "3.0.0",
     "tag": "stadtplan/v3.0.0",
@@ -15,6 +150,51 @@
     "sources": {
       "carma": "02c7428ce9d24c8b210b188e769c867d698f5b5a",
       "carma-wuppertal-collab": "c664386cb2442f20157413e8541e76ef3f9bf345"
+    }
+  },
+  "tz-leerstandsmanagement": {
+    "version": "0.2.0",
+    "tag": "tz-leerstandsmanagement/v0.2.0",
+    "date": "2026-09-29T10:23:16Z",
+    "sources": {
+      "carma": "252f8b3dcfa1fe03115ab07cc04c29677b9ed040",
+      "carma-wuppertal-collab": "f197f6da532071e322372a34ca057139448dcbb6"
+    }
+  },
+  "umweltalarm": {
+    "version": "1.3.5",
+    "tag": "umweltalarm/v1.3.5",
+    "date": "2026-05-12T16:16:01Z",
+    "sources": {
+      "carma": "b76ba82b36e2fcf157a26c83b18f744a45332ed0",
+      "carma-wuppertal-collab": "a72e57da1579b9e29e9a29e3e5b382941781d45c"
+    }
+  },
+  "verdis-desktop": {
+    "version": "1.5.0",
+    "tag": "verdis-desktop/v1.5.0",
+    "date": "2026-04-21T09:39:30Z",
+    "sources": {
+      "carma": "0f1fc8b9fb7020711085d72d3851912ab8ad8158",
+      "carma-wuppertal-collab": "a474f6dd6b465c4cc849f050eeec50b2886d9552"
+    }
+  },
+  "vorhabenkarte": {
+    "version": "0.6.0",
+    "tag": "vorhabenkarte/v0.6.0",
+    "date": "2026-07-28T09:24:59Z",
+    "sources": {
+      "carma": "595362c5d7140891d22083082c1147097dc70d36",
+      "carma-wuppertal-collab": "46ee4a8da5295233637c201b2ad67510818b0864"
+    }
+  },
+  "x-and-ride": {
+    "version": "2.0.7",
+    "tag": "x-and-ride/v2.0.7",
+    "date": "2025-11-17T13:51:01Z",
+    "sources": {
+      "carma": "5071374df4b663d0060ae79d4ff28dad64c1bbf2",
+      "carma-wuppertal-collab": "53c69f0062c61c2b2dc90f450647aeef83293a7d"
     }
   }
 }
