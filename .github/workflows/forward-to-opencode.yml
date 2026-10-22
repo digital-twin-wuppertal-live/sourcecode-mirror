@@ -1,0 +1,66 @@
+name: Forward to OpenCoDE
+
+# Pushes every branch and tag of this repository to the OpenCoDE project wuppertal-geo/digital-zwilling,
+# so both hold the same commits and tags. OpenCoDE's GitLab has no pull mirroring, so this side pushes.
+# Runs after every push and deletion here, by hand (Actions > Forward to OpenCoDE > Run workflow),
+# and once a day, which catches up after a failed run.
+# OPENCODE_TOKEN: project access token of the OpenCoDE project "github-sourcecode-mirror-sync",
+# role Maintainer (GitLab lets only Maintainers push to the protected main), scope write_repository,
+# expires 2027-10-21.
+run-name: >-
+  🪞 forward to OpenCoDE - ${{ github.event_name }}${{ github.event_name != 'schedule' && format(' - {0}', github.ref_name) || '' }}
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["**"]
+  delete:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * *"
+
+permissions:
+  contents: read
+
+# Every run pushes the complete state, so a waiting run may be replaced by a newer one.
+concurrency:
+  group: forward-to-opencode
+  cancel-in-progress: false
+
+env:
+  OPENCODE_REPO: gitlab.opencode.de/wuppertal-geo/digital-zwilling
+
+jobs:
+  forward:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Push branches and tags to OpenCoDE
+        env:
+          TOKEN: ${{ secrets.OPENCODE_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "$TOKEN" ]; then
+            echo "::error::Secret OPENCODE_TOKEN is missing"
+            exit 1
+          fi
+          remote="https://oauth2:${TOKEN}@${OPENCODE_REPO}.git"
+
+          # A full bare clone: an empty OpenCoDE repository cannot be filled from a shallow one.
+          git clone -q --bare "https://github.com/${GITHUB_REPOSITORY}.git" repo.git
+          cd repo.git
+          git push --prune "$remote" '+refs/heads/*:refs/heads/*' '+refs/tags/*:refs/tags/*'
+
+          # OpenCoDE must now list exactly the branches and tags that were pushed, with the same objects.
+          git ls-remote --heads --tags . | sort > "$RUNNER_TEMP/github.refs"
+          git ls-remote --heads --tags "$remote" | sort > "$RUNNER_TEMP/opencode.refs"
+          if ! diff "$RUNNER_TEMP/github.refs" "$RUNNER_TEMP/opencode.refs"; then
+            echo "::error::OpenCoDE differs from this repository after the push"
+            exit 1
+          fi
+
+          {
+            echo "### Forwarded to [OpenCoDE](https://${OPENCODE_REPO})"
+            echo
+            echo "- main \`$(awk '$2 == "refs/heads/main" { print substr($1, 1, 9) }' "$RUNNER_TEMP/opencode.refs")\`"
+            echo "- $(grep -c 'refs/heads/' "$RUNNER_TEMP/opencode.refs") branches, $(grep -c 'refs/tags/[^^]*$' "$RUNNER_TEMP/opencode.refs" || true) tags, identical on both sides"
+          } >> "$GITHUB_STEP_SUMMARY"
