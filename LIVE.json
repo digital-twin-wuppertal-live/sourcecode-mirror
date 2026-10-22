@@ -7,5 +7,14 @@
       "carma": "eb4c287340c36dcbc37d2481fe1e0d04910455db",
       "carma-wuppertal-collab": "c664386cb2442f20157413e8541e76ef3f9bf345"
     }
+  },
+  "stadtplan": {
+    "version": "3.0.0",
+    "tag": "stadtplan/v3.0.0",
+    "date": "2026-10-22T08:49:29Z",
+    "sources": {
+      "carma": "02c7428ce9d24c8b210b188e769c867d698f5b5a",
+      "carma-wuppertal-collab": "c664386cb2442f20157413e8541e76ef3f9bf345"
+    }
   }
 }
