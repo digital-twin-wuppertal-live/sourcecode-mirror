@@ -1,14 +1,17 @@
 import Icon from "react-cismap/commons/Icon";
-
 import ConfigurableDocBlocks from "react-cismap/topicmaps/ConfigurableDocBlocks";
 import Section from "react-cismap/topicmaps/menu/Section";
 import { getSymbolSVGGetter } from "react-cismap/tools/uiHelper";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
+import { faLocationArrow } from "@fortawesome/free-solid-svg-icons";
 import { faPlus } from "@fortawesome/free-solid-svg-icons";
 import { Link } from "react-scroll";
+import meinStandpunktMarkerMitKompass from "../stadtplan/assets/MeinStandpunktMarkerMitKompass.jpg";
+import meinStandpunktMarkerDoppel from "../stadtplan/assets/meinStandpunktMarkerDoppel.jpg";
 import {
   MeinStandortText,
   StadtplanTagNachtText,
+  OpenStreetMapText, 
   LuftbildkarteText,
   InKartePositionierenText,
 } from "../commons";
@@ -72,171 +75,178 @@ export const KompaktanleitungSection = ({
                         </p>
 
                         <ul>
-                          <LuftbildkarteText />
                           <StadtplanTagNachtText />
+                          <OpenStreetMapText />
+                          <LuftbildkarteText />
                         </ul>
                       </div>
                     ),
                   },
                 },
                 {
-                  title: "Fachobjekte auswählen und abfragen",
+                  title: "Vorhaben auswählen und abfragen",
                   bsStyle: "success",
                   contentBlockConf: {
                     type: "REACTCOMP",
                     content: (
                       <div>
                         <p>
-                          Bewegen Sie den Mauszeiger im Kartenfenster auf eines
-                          der farbigen Symbole, mit denen die Fachobjekte des
-                          Kartenthemas in der Karte dargestellt werden, um sich
-                          den Namen des jeweiligen Fachobjektes anzeigen zu
-                          lassen. Ein Klick auf das Symbol setzt den Fokus auf
-                          dieses Fachobjekt. Es wird dann blau hinterlegt und
-                          die zugehörigen Informationen werden unten rechts in
-                          der Info-Box angezeigt. Außerdem werden Ihnen in der
-                          Info-Box weiterführende Funktionen und
-                          Kommunikationslinks zu diesem Fachobjekt angeboten.
-                          Mit der Lupenfunktion <Icon name="search" /> wird die
-                          Karte auf das aktuelle Fachobjekt zentriert und
-                          gleichzeitig ein großer Betrachtungsmaßstab (Zoomstufe
-                          15) eingestellt. Falls es mehr Informationen zu den
-                          Fachobjekten gibt, als in der Info-Box dargestellt
+                          Die Vorhaben werden in der Karte mit einem punktförmigen 
+                          Symbol und bei größerer räumlicher Ausdehnung zusätzlich 
+                          mit einer transparenten, farbigen Fläche dargestellt. 
+                          Ein Klick auf ein Symbol oder in eine Fläche setzt 
+                          den Fokus auf dieses Vorhaben. Es wird dann blau 
+                          hinterlegt und die zugehörigen Informationen werden 
+                          unten rechts in der Info-Box angezeigt. Außerdem werden 
+                          Ihnen in der Info-Box weiterführende Funktionen und
+                          ggf. Kommunikationslinks (
+                          <Icon name="envelope-square" />{" "}E-Mail,{" "} 
+                          <Icon name="phone" />{" "}Telefon) zu diesem Vorhaben 
+                          angeboten. Mit der Lupenfunktion <Icon name="search" />{" "} 
+                          wird die Karte auf das aktuelle Vorhaben zentriert und
+                          gleichzeitig ein großer Betrachtungsmaßstab eingestellt. 
+                          Falls es mehr Informationen zu den
+                          Vorhaben gibt, als in der Info-Box dargestellt
                           werden können, können Sie sich diese über die
-                          Datenblattfunktion <Icon name="info" /> anzeigen
-                          lassen. Die Kommunikationslinks umfassen{" "}
-                          <Icon name="envelope-square" /> E-Mail.
+                          Datenblattfunktion{" "}<Icon name="info" />{" "}anzeigen
+                          lassen.
                         </p>
                         <p>
-                          Wenn Sie noch kein Fachobjekt im aktuellen
-                          Kartenausschnitt selektiert haben, wird der Fokus
-                          automatisch auf das nördlichste Objekt gesetzt. Mit
-                          den Funktionen{" "}
-                          <a className="renderAsLink">&lt;&lt;</a> vorheriger
-                          Treffer und <a className="renderAsLink">&gt;&gt;</a>{" "}
-                          nächster Treffer können Sie ausgehend von dem Objekt,
-                          auf dem gerade der Fokus liegt, in nördlicher bzw.
-                          südlicher Richtung alle aktuell im Kartenfenster
-                          angezeigten Objekte durchmustern. Sofern die
-                          Kartenanwendung nur ein einziges Fachobjekt umfasst,
-                          bleibt der Fokus auf diesem Objekt, auch wenn sich
-                          dieses nicht im aktuell eingestellten Kartenausschnitt
-                          befindet. Die Funktionen{" "}
-                          <a className="renderAsLink">&lt;&lt;</a> vorheriger
-                          Treffer und <a className="renderAsLink">&gt;&gt;</a>{" "}
-                          nächster Treffer werden Ihnen in diesem Fall nicht
-                          angeboten. Mit der Funktion <Icon name="search" /> in
+                          Ein von Ihnen ausgewähltes Vorhaben behält den Fokus,
+                          auch wenn Sie die Karte so verschieben, dass es nicht
+                          mehr im aktuellen Kartenausschnitt enthalten ist. 
+                          Mit der Funktion{" "}<Icon name="search" />{" "}in
                           der Info-Box können Sie jederzeit wieder zu diesem
-                          Fachobjekt zurückkehren.
+                          Vorhaben zurückkehren.
                         </p>
                         <p>
                           Mit der Schaltfläche{" "}
                           <Icon name="chevron-circle-down" /> im dunkelgrau
                           abgesetzten rechten Rand der Info-Box lässt sich diese
                           so verkleinern, dass nur noch die thematische
-                          Zuordnung und der Name des Fachobjektes sowie die
-                          Link-Symbole angezeigt werden - nützlich für Endgeräte
+                          Zuordnung und der Name des Vorhabens sowie die
+                          Funktions- und Kommunikationssymbole angezeigt 
+                          werden - nützlich für Endgeräte
                           mit kleinem Display. Mit der Schaltfläche{" "}
                           <Icon name="chevron-circle-up" /> an derselben Stelle
                           können Sie die Info-Box dann wieder vollständig
                           einblenden.
                         </p>
                         <p>
-                          In vielen unserer Kartenanwendungen bieten wir Ihnen
-                          zumindest zu einigen Fachobjekten Fotos oder
-                          Fotoserien an. Sie finden dann ein Vorschaubild direkt
-                          über der Info-Box. Klicken Sie auf das Vorschaubild,
-                          um einen Bildbetrachter (&quot;Leuchtkasten&quot;) mit
-                          dem Foto / der Fotoserie zu öffnen. Wenn wir hier auf
-                          Bildmaterial zugreifen, das der Urheber auch selbst im
-                          Internet publiziert, finden Sie im Fußbereich des
-                          Bildbetrachters einen Link auf dieses Angebot.
+                          Zu einigen Vorhaben bieten wir Ihnen Fotos oder 
+                          Planungsdokumente an, die das jeweilige Projekt 
+                          anschaulich machen. Bei diesen Vorhaben finden Sie 
+                          ein Vorschaubild direkt über der Info-Box. Klicken Sie 
+                          auf das Vorschaubild, um einen Bildbetrachter 
+                          (&quot;Leuchtkasten&quot;) mit den zugehörigen 
+                          Dokumenten zu öffnen.
                         </p>
                       </div>
                     ),
                   },
                 },
                 {
-                  title: "Kartendarstellung der Fachobjekte",
+                  title: "Kartendarstellung der Vorhaben",
                   bsStyle: "success",
                   contentBlockConf: {
                     type: "REACTCOMP",
                     content: (
                       <div>
                         <p>
-                          Zur Darstellung der Fachobjekte des Kartenthemas in
-                          der Karte werden weiße Symbole mit farbigem
-                          Hintergrund verwendet. Die dabei verwendeten Farben
-                          werden in der Titelzeile der Info-Box aufgegriffen.
-                          Zusätzlich werden dort die Informationen textlich
-                          zusammengefasst, die für die Kartendarstellung (Symbol
-                          und Hintergrundfarbe) relevant sind. Dort finden Sie
-                          also die Bedeutung des Symbols. Die verwendete
-                          Symbolik erklärt sich auf diese Weise selbst, sodass
-                          die Kartenanwendung keine klassische Legendengrafik
-                          benötigt.
+                          Die Vorhaben sind nach übergeordneten Themen geordnet, denen jeweils 
+                          eine Farbe zugeordnet ist, z. B. Grün für „Natur, Klima & Energie“. 
+                          Diese Farbe wird sowohl für die Flächendarstellung als auch als 
+                          Hintergrund der weißen Piktogramme in den Punktsymbolen verwendet.
                         </p>
+                        <p>
+                          Die Farbe erscheint auch in der Titelzeile der Info-Box, in der das 
+                          jeweilige Thema zusätzlich namentlich genannt wird. Damit erklärt 
+                          sich die Bedeutung der Kartensymbole unmittelbar aus der Info-Box. 
+                          Eine gesonderte Kartenlegende ist nicht erforderlich.
+                        </p>   
                       </div>
                     ),
                   },
                 },
                 {
                   title: "In Karte positionieren",
-                  bsStyle: "warning",
+                  bsStyle: "secondary",
                   contentBlockConf: {
                     type: "REACTCOMP",
                     content: (
                       <div>
-                        <p>
-                          Um in der Karte direkt zu einer bestimmten Adresse zu
-                          gelangen, geben Sie den Anfang des betreffenden
-                          Straßennamens im Eingabefeld links unten ein
-                          (mindestens 2 Zeichen). In der inkrementellen
-                          Auswahlliste werden Ihnen passende Treffer angeboten.
-                          (Wenn Sie weitere Zeichen eingeben, wird der Inhalt
-                          der Auswahlliste angepasst.) Sie können auch andere
-                          Suchbegriffe eingeben, nämlich Vorhabenname,
-                          Straßenname (bei Straßen ohne zugeordnete Hausnummern)
-                          oder "Point of Interest" (interessanter Ort, kurz als
-                          POI bezeichnet).
-                        </p>
-                        <p>
-                          Durch das in der Auswahlliste vorangestellte Symbol
-                          erkennen Sie, ob es sich bei einem Treffer um ein{" "}
-                          <Icon name="bookmark" /> Vorhaben, eine{" "}
-                          <Icon name="home" /> Adresse, eine{" "}
-                          <Icon name="road" /> Straße ohne Hausnummern, einen{" "}
-                          <Icon name="tag" /> POI oder die <Icon name="tags" />{" "}
-                          alternative Bezeichnung eines POI.
-                        </p>
-                        <FuzzySearchParagraph />
-                        <p>
-                          Nach der Auswahl eines Treffers aus der Liste wird die
-                          Karte auf die zugehörige Position zentriert. Bei
-                          Suchbegriffen mit Punktgeometrie (Adresse, POI) wird
-                          außerdem ein großer Maßstab (Zoomstufe 14) eingestellt
-                          und ein Marker <Icon name="map-marker" /> auf der
-                          Zielposition platziert. Bei Suchbegriffen mit
-                          Flächengeometrie oder Liniengeometrie wird der Maßstab
-                          so eingestellt, dass die Fläche bzw. Linie vollständig
-                          dargestellt werden kann.
-                        </p>
-                        <p>
-                          Durch Anklicken des Werkzeugs <Icon name="times" />{" "}
-                          links neben dem Eingabefeld können Sie die Suche
-                          zurücksetzen (Entfernung von Marker bzw. Abdunklung,
-                          Löschen des Textes im Eingabefeld).
-                        </p>
+                        <InKartePositionierenText
+                          zoomstufe={18}
+                          pretext={
+                            <>
+                              <p>
+                                Um die Vorhaben an einer bestimmten Stelle des 
+                                Stadtgebietes zu erkunden, geben Sie die Bezeichnung 
+                                eines Vorhabens, den Namen eines Stadtteils (Stadtbezirk 
+                                oder Quartier), eine Adresse, einen Straßennamen oder 
+                                den Namen eines "Point of Interest" (interessanter Ort, 
+                                kurz als POI bezeichnet) im Eingabefeld "Wohin?" links 
+                                unten ein. In der inkrementellen Auswahlliste werden Ihnen 
+                                schon nach der Eingabe des ersten Buchstabens passende 
+                                Treffer angeboten. (Wenn Sie weitere Zeichen eingeben, 
+                                wird der Inhalt der Auswahlliste angepasst.) Durch das
+                                vorangestellte Symbol erkennen Sie, ob es sich dabei um ein{" "}
+                                <Icon name="bookmark" />{" "}Vorhaben, einen{" "}
+                                <Icon name="circle" />{" "}Stadtbezirk, ein{" "}
+                                <Icon name="pie-chart" />{" "}Quartier, eine{" "}
+                                <Icon name="home" />{" "}Adresse, eine{" "}
+                                <Icon name="road" />{" "}Straße ohne zugeordnete Hausnummern, einen{" "}
+                                <Icon name="tag" />{" "}POI, die{" "}
+                                <Icon name="tags" />{" "}alternative Bezeichnung eines POI oder eine{" "}
+                                <Icon name="graduation-cap" />{" "}Schule handelt.
+                              </p>
+                              <FuzzySearchParagraph />
+                            </>
+                          }
+                        />
                       </div>
                     ),
                   },
                 },
                 {
                   title: "Mein Standort",
-                  bsStyle: "warning",
+                  bsStyle: "secondary",
                   contentBlockConf: {
                     type: "REACTCOMP",
-                    content: <MeinStandortText />,
+                    content: (
+                      <p>
+                        Auf mobilen Endgeräten wird ihnen auf der linken Seite der zusätzliche 
+                        Wechselschalter "Mein Standort"{" "}<FontAwesomeIcon icon={faLocationArrow} />{" "}
+                        zur Aktivierung bzw. Deaktivierung der Standort- und Blickrichtungsanzeige angeboten. 
+                        Mit dem ersten Antippen dieses Werkzeugs aktivieren Sie den "Follow me"-Modus 
+                        (orangefarbiges Werkzeug-Symbol). Ggf. werden Sie zunächst zur Freigabe der Lokalisierung 
+                        aufgefordert. Die Karte wird auf Ihren aktuellen Standort zentriert, der mit einem 
+                        blauen Kreissymbol{" "}
+                        <img
+                          alt="MeinStandpunktMarker"
+                          src={meinStandpunktMarkerMitKompass}
+                        />{" "}
+                        markiert wird. Das kleine blaue Dreieck am Rand dieses Standortsymbols zeigt ihre 
+                        Blickrichtung an. Wenn Sie sich mit Ihrem Endgerät bewegen, wird Ihre aktuelle Position 
+                        in schneller Folge neu bestimmt und stets in der Mitte der Karte angezeigt. Die Karte 
+                        wird dazu automatisiert nachgeführt. Das Standortsymbol ist umgeben von einem zweiten 
+                        Kreis mit transparenter, blauer Füllung, dessen Radius die Unsicherheit der 
+                        Positionsbestimmung angibt{" "}
+                        <img
+                          alt="MeinStandpunktMarkerDoppel"
+                          src={meinStandpunktMarkerDoppel}
+                        />. 
+                        Durch Antippen des inneren Kreises können Sie einen Texthinweis mit einer konkreten 
+                        Angabe der aktuellen Positionsgenauigkeit einblenden. Dieser Hinweis kann durch das 
+                        Antippen einer beliebigen Stelle außerhalb seines Textfeldes geschlossen werden. 
+                        Sie können den "Follow me"-Modus verlassen, indem Sie die Karte manuell verschieben 
+                        (blaues Werkzeug-Symbol). Ihr aktueller Standort wird dann weiterhin angezeigt, der 
+                        Kartenausschnitt aber festgehalten. Bei fortgesetzter Bewegung in eine Richtung wandert 
+                        das Standortsymbol daher vom Zentrum zum Rand des Kartenfensters und verschwindet schließlich.
+                        Das Nachführen der Karte müssen Sie in diesem Modus per Hand erledigen. Ein weiteres Antippen 
+                       von "Mein Standort" schaltet die Anzeige Ihrer Position wieder ab (schwarzes Werkzeug-Symbol). 
+                    </p>
+                    ),
                   },
                 },
                 {
@@ -249,8 +259,7 @@ export const KompaktanleitungSection = ({
                         <p>
                           Unter "<strong>Einstellungen</strong>" können Sie im
                           Anwendungsmenü festlegen, wie die Hintergrundkarte und
-                          die Fachobjekte des Kartenthemas angezeigt werden
-                          sollen.
+                          die Vorhaben angezeigt werden sollen.
                         </p>
                         <p>
                           Unter "
@@ -272,10 +281,17 @@ export const KompaktanleitungSection = ({
                           für die Fachobjekte des Kartenthemas, die
                           unterschiedlichen Flächennutzungen in der
                           Hintergrundkarte lassen sich aber nicht mehr so gut
-                          unterscheiden wie in der Tag-Karte. Als dritte
-                          Möglichkeit steht eine Luftbildkarte zur Verfügung,
-                          die die Anschaulichkeit des Luftbildes mit der
-                          Eindeutigkeit des Stadtplans (Kartenschrift,
+                          unterscheiden wie in der Tag-Karte. Als Alternative zum 
+                          Stadtplan steht Ihnen mit "<em>OpenStreetMap</em>" eine Karte   
+                          auf der Grundlage einer von Freiwilligen gepflegten Datenbank 
+                          zur Verfügung. Als unbürokratisches Community-Projekt 
+                          wird die OpenStreetMap (OSM) oftmals schneller aktualisiert 
+                          als die amtlichen Geobasisdaten, auf denen unser Stadtplan 
+                          basiert. Aktualität und Vollständigkeit sind jedoch 
+                          tendenziell unzuverlässig, sie hängen von der Aktivität der 
+                          OSM-Community vor Ort ab. Als vierte Möglichkeit steht eine 
+                          Luftbildkarte zur Verfügung, die die Anschaulichkeit des 
+                          Luftbildes mit der Eindeutigkeit des Stadtplans (Kartenschrift,
                           durchscheinende Linien) verbindet.
                         </p>
                         <p>

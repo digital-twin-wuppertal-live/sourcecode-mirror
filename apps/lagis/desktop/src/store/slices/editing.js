@@ -1,0 +1,80 @@
+import { createSelector, createSlice } from "@reduxjs/toolkit";
+
+// parcel: { schluesselId, label, key, urlParams }; draft/original: { admin, usage, mipa, rebe, vertrag, kassenzeichen, dms }
+const initialState = {
+  active: false,
+  parcel: undefined,
+  lock: undefined,
+  mipaLocks: undefined,
+  rebeLocks: undefined,
+  original: undefined,
+  draft: undefined,
+  status: "idle",
+  // { lock, schluesselId, keyString, urlParams } while the take-over dialog is open
+  takeOver: undefined,
+};
+
+const slice = createSlice({
+  name: "editing",
+  initialState,
+  reducers: {
+    setEditStatus(state, action) {
+      state.status = action.payload;
+    },
+    editStarted(state, action) {
+      const { parcel, lock, mipaLocks, rebeLocks, sections, draft } =
+        action.payload;
+      state.active = true;
+      state.parcel = parcel;
+      state.lock = lock;
+      state.mipaLocks = mipaLocks;
+      state.rebeLocks = rebeLocks;
+      state.original = sections;
+      state.draft = draft ?? sections;
+      state.takeOver = undefined;
+    },
+    takeOverOffered(state, action) {
+      state.takeOver = action.payload;
+    },
+    takeOverClosed(state) {
+      state.takeOver = undefined;
+    },
+    patchDraftSection(state, action) {
+      const { section, changes } = action.payload;
+      state.draft[section] = { ...state.draft[section], ...changes };
+    },
+    editResumed(_state, action) {
+      return { ...action.payload, status: "idle" };
+    },
+    editEnded() {
+      return initialState;
+    },
+  },
+});
+
+export default slice;
+
+export const {
+  setEditStatus,
+  editStarted,
+  patchDraftSection,
+  editResumed,
+  editEnded,
+  takeOverOffered,
+  takeOverClosed,
+} = slice.actions;
+
+export const getEditActive = (state) => state.editing.active;
+export const getEditStatus = (state) => state.editing.status;
+export const getEditParcel = (state) => state.editing.parcel;
+export const getEditing = (state) => state.editing;
+export const getTakeOver = (state) => state.editing.takeOver;
+export const getDraftSection = (section) => (state) =>
+  state.editing.draft?.[section];
+export const getOriginalSection = (section) => (state) =>
+  state.editing.original?.[section];
+
+export const getEditDirty = createSelector(
+  [(state) => state.editing.original, (state) => state.editing.draft],
+  (original, draft) => JSON.stringify(original) !== JSON.stringify(draft)
+);

@@ -21,8 +21,9 @@ import WizardFooter from "./WizardFooter";
 
 import { STEP, getSteps } from "../../core/wizard/flow";
 import { ACTION_TITLES, WIZARD_ACTIONS } from "../../core/wizard/constants";
-import { findLock } from "../../core/wizard/locks";
-import { ADMIN_SECTION } from "../../core/wizard/adminData";
+import { findLock, parcelLockedError } from "../../core/editing/locks";
+import { notifyStartFailed } from "../editing/lockNotices";
+import { ADMIN_SECTION, showsAdminSteps } from "../../core/wizard/adminData";
 import { explain } from "../../core/wizard/errors";
 import { findRebeAndMipa } from "../../core/wizard/areaCheck";
 import {
@@ -33,6 +34,8 @@ import { formatKey } from "../../core/wizard/keys";
 import { runWizardAction } from "../../core/wizard/operations";
 import useStammdaten from "../../core/wizard/useStammdaten";
 import { setLoggingEnabled } from "../../core/wizard/gqlLog";
+import { isWizardTestMode } from "../../core/wizard/devMode";
+import { TEST_WIZARD_DATA } from "../../core/wizard/testFixture";
 
 import { getLogin } from "../../store/slices/auth";
 import { getflurstuecke } from "../../store/slices/landParcels";
@@ -67,8 +70,11 @@ const LandParcelWizard = ({
   open,
   onClose,
   showLogs = false,
-  skipValidation = false,
+  skipValidation: skipValidationProp = false,
 }) => {
+  const testMode = useMemo(isWizardTestMode, []);
+  const skipValidation = skipValidationProp || testMode;
+
   const dispatch = useDispatch();
   const navigate = useNavigate();
   const [, setUrlParams] = useSearchParams();
@@ -107,7 +113,12 @@ const LandParcelWizard = ({
 
   const handleActionChange = ({ action }) => {
     if (action !== data.action) {
-      setData({ action });
+      // the test fixture is a split, so only that action starts preloaded
+      setData(
+        testMode && action === TEST_WIZARD_DATA.action
+          ? TEST_WIZARD_DATA
+          : { action }
+      );
     }
     setProblem(null);
     setStepIndex(1);
@@ -128,9 +139,7 @@ const LandParcelWizard = ({
       }
       const lock = await findLock(key.id, jwt);
       if (lock) {
-        setProblem(
-          `Ausgewähltes Flurstück ist gesperrt von Benutzer: ${lock.userString}`
-        );
+        notifyStartFailed(parcelLockedError(lock, formatKey(key), accountName));
         return false;
       }
     }
@@ -193,6 +202,10 @@ const LandParcelWizard = ({
   };
 
   const execute = async (rebeMipa) => {
+    if (testMode) {
+      setError("Testmodus: Es wurde nichts gespeichert.");
+      return;
+    }
     setBusy(true);
     setError(undefined);
     try {
@@ -203,8 +216,9 @@ const LandParcelWizard = ({
         data.action,
         {
           ...buildPayload(rebeMipa),
-          admin: data.admin,
-          usage: data.usage,
+          ...(showsAdminSteps(data)
+            ? { admin: data.admin, usage: data.usage }
+            : {}),
         },
         {
           jwt,
@@ -234,6 +248,7 @@ const LandParcelWizard = ({
 
   const handleFinish = async () => {
     if (
+      !testMode &&
       data.action === WIZARD_ACTIONS.HISTORIC &&
       data.historicKey?.warStaedtisch
     ) {
@@ -291,6 +306,7 @@ const LandParcelWizard = ({
       onChange: patch,
       onProblem: setProblem,
       onHideProblem: setHideProblem,
+      testMode,
     };
     switch (currentStep.id) {
       case STEP.CHOOSE_ACTION:
@@ -317,8 +333,6 @@ const LandParcelWizard = ({
         return <AdminStep section={ADMIN_SECTION.DIENSTSTELLEN} {...props} />;
       case STEP.ADMIN_ROLLEN:
         return <AdminStep section={ADMIN_SECTION.ROLLEN} {...props} />;
-      case STEP.ADMIN_STRASSENFRONTEN:
-        return <AdminStep section={ADMIN_SECTION.STRASSENFRONTEN} {...props} />;
       case STEP.ADMIN_BEMERKUNGEN:
         return <AdminStep section={ADMIN_SECTION.BEMERKUNGEN} {...props} />;
       case STEP.USAGE:

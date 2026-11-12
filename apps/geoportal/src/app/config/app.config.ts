@@ -14,6 +14,7 @@ import {
   filterAddonsByAvailability,
   getAddonKind,
   type AddonEntry,
+  type AddonKind,
 } from "@carma-mapping/addons";
 import {
   ANNOTATION_SELECT_TOOL_ID,
@@ -33,6 +34,7 @@ import { Rectangle } from "cesium";
 
 import { availabilityContext } from "./availability";
 import { defaultWorkflowAddons } from "../constants/default-workflows";
+import { MODEL_BOUNDS_3857, RELAY_BASE_URL } from "../constants/relay";
 
 export const APP_BASE_PATH = import.meta.env.BASE_URL;
 export const ICON_PREFIX =
@@ -96,6 +98,29 @@ export const DEFAULT_ADDONS: AddonEntry[] = [
 ];
 
 /**
+ * The plain geoportal's own addons, which no Fachzwilling gets: following a
+ * show with `?relay=<CODE>` (pm-show's link "Geoportal folgt der Show"). Both
+ * idle without a code. The page takes the presenter's layers for the
+ * `geoportal` target and writes its view and selection as the `geoportal`
+ * writer, which the outlet reads.
+ */
+const PLAIN_GEOPORTAL_ADDONS: AddonEntry[] = [
+  {
+    addon: "mapRelay",
+    config: { relayBaseUrl: RELAY_BASE_URL, writeAs: "geoportal" },
+    availability: { deployments: ["localDev", "dev", "pr"] },
+  },
+  {
+    addon: "relayFollower",
+    config: { modelBounds3857: MODEL_BOUNDS_3857 },
+    availability: { deployments: ["localDev", "dev", "pr"] },
+  },
+];
+
+export const plainGeoportalAddons = (): AddonEntry[] =>
+  filterAddonsByAvailability(PLAIN_GEOPORTAL_ADDONS, availabilityContext);
+
+/**
  * The app's defaults, with the route's own declarations taking precedence.
  * A default addon may carry an `availability` like a route addon; a feature
  * flag used there must be in the base feature flag config (featureFlags.ts).
@@ -105,14 +130,21 @@ export const DEFAULT_ADDONS: AddonEntry[] = [
  * carrying the definition it launches at mount, see constants/default-workflows.
  * They follow the same precedence rule, so a route that declares the same kind
  * takes the engine over and the default workflow does not run there.
+ * Kinds in `excluded` are left out without a replacement.
  */
-export const withDefaultAddons = (addons?: AddonEntry[]): AddonEntry[] => {
-  const declared = new Set((addons ?? []).map(getAddonKind));
+export const withDefaultAddons = (
+  addons?: AddonEntry[],
+  excluded: AddonKind[] = []
+): AddonEntry[] => {
+  const skipped = new Set<AddonKind>([
+    ...(addons ?? []).map(getAddonKind),
+    ...excluded,
+  ]);
   return [
     ...[
       ...filterAddonsByAvailability(DEFAULT_ADDONS, availabilityContext),
       ...defaultWorkflowAddons(),
-    ].filter((addon) => !declared.has(getAddonKind(addon))),
+    ].filter((addon) => !skipped.has(getAddonKind(addon))),
     ...(addons ?? []),
   ];
 };

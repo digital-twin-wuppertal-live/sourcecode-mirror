@@ -1,11 +1,18 @@
 import { createSlice } from "@reduxjs/toolkit";
 import { fetchGraphQL, fetchGraphQLFromWuNDa } from "../../core/graphql";
 import queries from "../../core/queries/online";
-import { getBuffer25832 } from "../../core/tools/mappingTools";
+import { isCurrentBuchung } from "../../core/extractors/usageHistory";
+import { getParcelSearchGeom25832 } from "../../core/tools/mappingTools";
 import {
   getGemarkunFlurFstckFromAlkisId,
   getLandparcelStringFromAlkisLandparcel,
 } from "../../core/tools/helper";
+import {
+  LOAD_ERROR,
+  LandparcelLoadError,
+  assertGraphQLResult,
+  getLoadErrorKind,
+} from "../../core/tools/loadErrors";
 const initialState = {
   lagisLandparcel: undefined,
   alkisLandparcel: undefined,
@@ -99,20 +106,26 @@ export const fetchFlurstueck = (
         if (result.status === 401) {
           return navigate("/login");
         }
+        assertGraphQLResult(result);
 
-        const f = result?.data.flurstueck[0];
-        f.alkisLandparcel = result?.data.extended_alkis_flurstueck[0];
+        const f = result.data?.flurstueck?.[0];
+        if (!f) {
+          throw new LandparcelLoadError(LOAD_ERROR.NOT_FOUND);
+        }
+        f.alkisLandparcel = result.data.extended_alkis_flurstueck?.[0];
 
-        let geo =
-          result?.data.flurstueck[0].extended_geom?.geo_field ||
-          result?.data.flurstueck[0].alkisLandparcel?.geometrie;
+        let geo = f.extended_geom?.geo_field || f.alkisLandparcel?.geometrie;
 
         if (!geo) {
           const resultGeo = await getGeomFromWuNDa(alkis_id, jwt, navigate);
-          const wundaGeom = resultGeo.data.flurstueck[0].extended_geom;
-          geo = wundaGeom.geo_field;
+          if (resultGeo?.status === 401) {
+            return;
+          }
+          assertGraphQLResult(resultGeo);
+          const wundaGeom = resultGeo.data?.flurstueck?.[0]?.extended_geom;
+          geo = wundaGeom?.geo_field;
           // parcels unknown to ALKIS (e.g. renamed ones) get their area from this geometry, as Java does
-          f.geometryArea = wundaGeom.area;
+          f.geometryArea = wundaGeom?.area;
         }
 
         dispatch(storeLagisLandparcel(f));
@@ -120,17 +133,19 @@ export const fetchFlurstueck = (
         dispatch(storeGeometry(geo));
 
         if (geo) {
-          await fetchRebe(getBuffer25832(geo, -1), jwt, dispatch);
-          await fetchMipa(getBuffer25832(geo, -1), jwt, dispatch);
+          await fetchRebe(getParcelSearchGeom25832(geo), jwt, dispatch);
+          await fetchMipa(getParcelSearchGeom25832(geo), jwt, dispatch);
         } else {
           dispatch(storeRebe());
           dispatch(storeMipa());
+          // the parcel data itself loaded, only the map can't show it
+          setError(LOAD_ERROR.NO_GEOMETRY);
         }
 
         await fetchHistory(schluessel_id, jwt, dispatch);
       } catch (error) {
         console.error("error in fetchFlurstueck", error);
-        setError(true);
+        setError(getLoadErrorKind(error));
       }
     }
   };
@@ -145,9 +160,42 @@ export const getGeomFromWuNDa = async (alkis_id, jwt, navigate) => {
     jwt
   );
   if (result.status === 401) {
-    return navigate("/login");
+    navigate("/login");
   }
   return result;
+};
+
+// non-city parcels have no LagIS record, only the WuNDa geometry
+export const fetchGeometryOnly = (
+  { gemarkung, flur, label },
+  navigate,
+  onError
+) => {
+  return async (dispatch, getState) => {
+    const structure = getState().lagis.landparcelInternaDataStructure;
+    const gemId = Object.keys(structure).find(
+      (key) => structure[key].gemarkung === gemarkung
+    );
+    try {
+      const result = await getGeomFromWuNDa(
+        `05${gemId}-${flur}-${label}`,
+        getState().auth.jwt,
+        navigate
+      );
+      if (result?.status === 401) {
+        return;
+      }
+      assertGraphQLResult(result);
+      const geo = result.data?.flurstueck?.[0]?.extended_geom?.geo_field;
+      if (!geo) {
+        throw new LandparcelLoadError(LOAD_ERROR.NO_GEOMETRY);
+      }
+      dispatch(storeGeometry(geo));
+    } catch (e) {
+      console.log("error in fetchGeometryOnly", e);
+      onError?.(getLoadErrorKind(e));
+    }
+  };
 };
 
 export const fetchHistory = async (sid, jwt, dispatch, navigate) => {
@@ -163,9 +211,7 @@ export const fetchHistory = async (sid, jwt, dispatch, navigate) => {
       return navigate("/login");
     }
     dispatch(storeHistory(result?.data?.cs_calc_history));
-  } catch (e) {
-    console.log("xxx error in getHistory", e);
-  }
+  } catch {}
 };
 
 const fetchRebe = async (geo, jwt, dispatch, navigate) => {
@@ -208,7 +254,7 @@ export const fetchContractById = async (vertag_id, jwt, landparcel) => {
     const currentLandparcel =
       getLandparcelStringFromAlkisLandparcel(landparcel);
     const landparcelsArr = [];
-    const data = result.data?.flurstueck.forEach((f) => {
+    result.data.flurstueck.forEach((f) => {
       const flur = f.flurstueck_schluessel.flur;
       const zaehler = f.flurstueck_schluessel.flurstueck_zaehler;
       const nenner = f.flurstueck_schluessel.flurstueck_nenner;
@@ -221,7 +267,7 @@ export const fetchContractById = async (vertag_id, jwt, landparcel) => {
 
     return landparcelsArr;
   } else {
-    [];
+    return [];
   }
 };
 
@@ -297,33 +343,21 @@ export const getAdditionalRollen = (state) => {
   return state.lagis?.lagisLandparcel?.zusatz_rolleArrayRelationShip || [];
 };
 
-export const getStreetFronts = (state) => {
-  return state.lagis?.lagisLandparcel?.strassenfrontArrayRelationShip || [];
-};
-
 export const getUsage = (state) => {
   return state.lagis.lagisLandparcel?.nutzungArrayRelationShip || undefined;
 };
 export const getCountOfUsage = (state) => {
-  const allUsages =
-    state.lagis.lagisLandparcel?.nutzungArrayRelationShip || undefined;
-  if (allUsages) {
-    const numberOfUsages = allUsages.length || 0;
-    let counter = 0;
-    if (numberOfUsages !== 0) {
-      allUsages?.forEach((u, idx) => {
-        u.nutzung_buchungArrayRelationShip.forEach((item, idx) => {
-          if (item.gueltig_bis === null) {
-            counter++;
-          }
-        });
-      });
-
-      return counter;
-    }
-  } else {
+  const landparcel = state.lagis.lagisLandparcel;
+  const allUsages = landparcel?.nutzungArrayRelationShip;
+  if (!allUsages) {
     return undefined;
   }
+  if (allUsages.length === 0) {
+    return undefined;
+  }
+  return allUsages
+    .flatMap((u) => u.nutzung_buchungArrayRelationShip)
+    .filter((item) => isCurrentBuchung(item, landparcel)).length;
 };
 export const getContract = (state) => {
   return state.lagis.lagisLandparcel?.ar_vertraegeArray || undefined;
@@ -362,11 +396,9 @@ export const getAgenciesRoll = (state) => {
 
 export const getUrlLandparcelParams = (state) => {
   const alkisId = state.lagis?.alkisLandparcel?.alkis_id;
-  // const schluesselId = state.lagis.lagisLandparcel.id;
   if (alkisId) {
     return {
       alkisId: alkisId,
-      // schluesselId: schluesselId,
     };
   }
   return state.lagis.alkisLandparcel;
@@ -415,13 +447,11 @@ export const switchToLandparcel = ({
       //check whether fstck is conatining a dash
       const splitted = fstck.split("-");
       let fstckLabel;
-      let pureLabel;
       if (splitted.length === 2 && splitted[1] !== "0") {
         fstckLabel =
           padWithZeros(splitted[0], 5) + "/" + padWithZeros(splitted[1], 4);
       } else {
         fstckLabel = padWithZeros(splitted[0], 5);
-        // pureLabel = fstck;
       }
       const x = {
         gemarkung: fullGemarkung.gemarkung,
@@ -430,12 +460,6 @@ export const switchToLandparcel = ({
         ...fullFlur.flurstuecke[fstckLabel],
       };
 
-      // if (fullGemarkung && fullFlur && fullFlur.flurstuecke[fstckLabel]) {
-      //dispatch(storeSelectedFlurstueckLabel(fstckLabel));
-      // flurstueckChoosen(x);
-      // } else {
-      //dispatch(storeSelectedFlurstueckLabel());
-      // }
       flurstueckChoosen(x);
       dispatch(storeSelectedFlurstueckLabel(fstckLabel));
     } else if (_gem && flur) {
@@ -446,7 +470,6 @@ export const switchToLandparcel = ({
       dispatch(storeSelectedGemarkung(fullGemarkung));
       const fullFlur = fullGemarkung.flure[padWithZeros(flur, 3)];
       dispatch(storeSelectedFlur(fullFlur));
-      fullFlur;
       dispatch(storeSelectedFlurstueckLabel());
       dispatch(storeAlkisLandparcel(undefined));
       dispatch(storeLagisLandparcel(undefined));
@@ -487,10 +510,6 @@ const buildData = (xx, gemarkungen) => {
     const gemarkung = gff.gemId;
     const flur = gff.flur;
     const flurstueck = gff.fstck;
-    // const splitted = f.alkis_id.split("-");
-    // const gemarkung = splitted[0].substring(2);
-    // const flur = splitted[1];
-    // const flurstueck = splitted[2];
     if (result[gemarkung]) {
       if (result[gemarkung].flure[flur]) {
         result[gemarkung].flure[flur].flurstuecke[flurstueck] = {

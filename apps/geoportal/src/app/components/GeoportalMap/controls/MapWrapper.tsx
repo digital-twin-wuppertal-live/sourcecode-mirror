@@ -8,8 +8,7 @@ import {
   faEyeSlash,
   faHouseChimney,
   faInfo,
-  faMinus,
-  faPlus,
+  faXmark,
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 
@@ -41,6 +40,7 @@ import {
   LibrePitchingCompass,
   RoutedMapLocateControl,
   useMapFrameworkSwitcherContext,
+  ZoomControl,
 } from "@carma-mapping/components";
 import { AddonHost, useAddonState } from "@carma-mapping/addons";
 import { LibFuzzySearch } from "@carma-mapping/fuzzy-search";
@@ -61,11 +61,14 @@ import { MapLoadingProgress } from "../MapLoadingProgress";
 import { ObliqueControls } from "../../../oblique/components/ObliqueControls.tsx";
 import LayerWrapper from "../../layers/LayerWrapper.tsx";
 
-import useLeafletZoomControls from "../../../hooks/leaflet/useLeafletZoomControls.ts";
 import { useDispatchSachdatenInfoText } from "../../../hooks/useDispatchSachdatenInfoText.ts";
 import { useFeatureInfoModeCursorStyle } from "../../../hooks/useFeatureInfoModeCursorStyle.ts";
 import { useHighlightModeSync } from "../../../hooks/useHighlightModeSync.ts";
 import { useAnnotationModeSync } from "../../../hooks/useAnnotationModeSync";
+import {
+  useClearFeatureSelection,
+  useClearSelectionOnEscape,
+} from "../../../hooks/useClearFeatureSelection";
 import { useMapStyleReduxSync } from "../../../hooks/useMapStyleReduxSync";
 import { useTourRefCollabLabels } from "../../../hooks/useTourRefCollabLabels.tsx";
 import { useWindowSize } from "../../../hooks/useWindowSize.ts";
@@ -185,7 +188,6 @@ const MapWrapper = () => {
   } = useZoomControlsCesium(ctx, {
     fovMode: isObliqueMode,
   });
-  const { zoomInLeaflet, zoomOutLeaflet } = useLeafletZoomControls();
   const {
     defaultHomeViewState,
     homeCenter,
@@ -265,6 +267,8 @@ const MapWrapper = () => {
   useMapStyleReduxSync();
   useHighlightModeSync();
   useAnnotationModeSync();
+  useClearSelectionOnEscape();
+  const { hasSelection, clearFeatureSelection } = useClearFeatureSelection();
 
   const tourRefLabels = useTourRefCollabLabels();
   const { gazData } = useGazData();
@@ -348,49 +352,13 @@ const MapWrapper = () => {
           {/* adds padding for topnavbar (+ banner if visible)*/}
           {visibleControls.zoom && (
             <Control position="topleft" order={10}>
-              <div ref={tourRefLabels.zoom} className="flex flex-col">
-                <Tooltip title="Maßstab vergrößern (Zoom in)" placement="right">
-                  <ControlButtonStyler
-                    onClick={(event) => {
-                      if (isLeaflet) {
-                        if (showLibreMap) {
-                          libreMap?.zoomIn();
-                        } else {
-                          zoomInLeaflet();
-                        }
-                      } else {
-                        handleZoomInCesium(event);
-                      }
-                    }}
-                    className="!border-b-0 !rounded-b-none font-bold !z-[9999999]"
-                    dataTestId="zoom-in-control"
-                  >
-                    <FontAwesomeIcon icon={faPlus} className="text-base" />
-                  </ControlButtonStyler>
-                </Tooltip>
-                <Tooltip
-                  title="Maßstab verkleinern (Zoom out)"
-                  placement="right"
-                >
-                  <ControlButtonStyler
-                    onClick={(event) => {
-                      if (isLeaflet) {
-                        if (showLibreMap) {
-                          libreMap?.zoomOut();
-                        } else {
-                          zoomOutLeaflet();
-                        }
-                      } else {
-                        handleZoomOutCesium(event);
-                      }
-                    }}
-                    className="!rounded-t-none !border-t-[1px]"
-                    dataTestId="zoom-out-control"
-                  >
-                    <FontAwesomeIcon icon={faMinus} className="text-base" />
-                  </ControlButtonStyler>
-                </Tooltip>
-              </div>
+              <ZoomControl
+                ref={tourRefLabels.zoom}
+                mapEngine={showLibreMap ? "maplibre" : "leaflet"}
+                libreMap={libreMap}
+                onZoomIn={isLeaflet ? undefined : handleZoomInCesium}
+                onZoomOut={isLeaflet ? undefined : handleZoomOutCesium}
+              />
             </Control>
           )}
           {allow3d && (
@@ -533,6 +501,20 @@ const MapWrapper = () => {
                     icon={faInfo}
                     className={isModeFeatureInfo ? "text-[#1677ff]" : ""}
                   />
+                </ControlButtonStyler>
+              </Tooltip>
+            </Control>
+          )}
+          {/* a touchscreen has no Escape key to clear the selection with */}
+          {!isObliquePreviewVisible && flags.featureFlagTouchscreen && (
+            <Control position="topleft" order={70}>
+              <Tooltip title="Auswahl aufheben" placement="right">
+                <ControlButtonStyler
+                  disabled={!hasSelection}
+                  onClick={clearFeatureSelection}
+                  dataTestId="clear-selection-control"
+                >
+                  <FontAwesomeIcon icon={faXmark} className="text-lg" />
                 </ControlButtonStyler>
               </Tooltip>
             </Control>

@@ -50,6 +50,11 @@ const DEFAULT_BASE: CameraRestrictionBase = {
   interactive: true,
 };
 
+const setMaxPitchOnAllCameras = (map: MaplibreMap, maxPitch: number) => {
+  map.setMaxPitch(maxPitch);
+  map._requestedCameraState?.setMaxPitch(maxPitch);
+};
+
 export const applyCameraRestriction = (
   map: MaplibreMap,
   restricted: boolean,
@@ -61,8 +66,12 @@ export const applyCameraRestriction = (
     map.touchPitch.disable();
     map.touchZoomRotate.disableRotation();
     map.keyboard.disableRotation();
-    map.setMaxPitch(0);
-    map.setBearing(0);
+    setMaxPitchOnAllCameras(map, 0);
+    // only when needed: setBearing always fires a whole move, which listeners
+    // take for a camera change, and it stops a running flight
+    if (map.getBearing() !== 0) {
+      map.setBearing(0);
+    }
   } else {
     if (interactive) {
       map.dragRotate.enable();
@@ -70,7 +79,7 @@ export const applyCameraRestriction = (
       map.touchZoomRotate.enableRotation();
       map.keyboard.enableRotation();
     }
-    map.setMaxPitch(maxPitch);
+    setMaxPitchOnAllCameras(map, maxPitch);
   }
 };
 

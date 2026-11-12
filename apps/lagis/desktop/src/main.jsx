@@ -24,6 +24,7 @@ import LoginPage from "./components/Login/LoginPage";
 import { Navigate } from "react-router-dom";
 import { persistStore } from "redux-persist";
 import { PersistGate } from "redux-persist/integration/react";
+import LagisLockProvider from "./components/editing/LagisLockProvider";
 import { getJWT } from "./store/slices/auth";
 import { QueryClient } from "@tanstack/react-query";
 import TopicMapContextProvider from "react-cismap/contexts/TopicMapContextProvider";
@@ -34,11 +35,13 @@ import {
 import { loadGazeteerEntries } from "./store/slices/gazData";
 import AlkisLandparcelPage from "./pages/AlkisLandparcelPage";
 import AlkisBookingSheetPage from "./pages/AlkisBookingSheetPage";
-import { AlkisNav } from "@carma-appframeworks/alkis";
+import { AlkisNav, setAlkisApi } from "@carma-appframeworks/alkis";
 import { gazDataConfig } from "./config/gazData";
 import { MapMeasurementsProvider } from "@carma-commons/measurements";
-import { APP_KEY } from "./constants/lagis";
+import { APP_KEY, REST_SERVICE_WUNDA } from "./constants/lagis";
 import DevVersionFrame from "./components/DevVersionFrame";
+
+setAlkisApi(REST_SERVICE_WUNDA);
 
 const NavBarWrapper = () => {
   const dispatch = useDispatch();
@@ -148,7 +151,9 @@ ReactDOM.createRoot(document.getElementById("root")).render(
                   loading={null}
                   persistor={persistor}
                 >
-                  <RouterProvider router={router} />
+                  <LagisLockProvider>
+                    <RouterProvider router={router} />
+                  </LagisLockProvider>
                 </PersistGate>
               </TopicMapContextProvider>
             </MapMeasurementsProvider>

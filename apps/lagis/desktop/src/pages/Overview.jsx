@@ -151,6 +151,7 @@ const Overview = ({
             dataIn={{
               landparcel,
               geometry,
+              colorByStatus: true,
               ondblclick: (event) => {
                 dispatch(setMapLoading(true));
                 const xy = convertLatLngToXY(event.latlng);
@@ -166,8 +167,8 @@ const Overview = ({
                         dispatch(setMapLoading(false));
                       }, 100);
                     },
-                    () => {
-                      dispatch(setFetchLandParcelError(true));
+                    (kind) => {
+                      dispatch(setFetchLandParcelError(kind));
                     }
                   )
                 );

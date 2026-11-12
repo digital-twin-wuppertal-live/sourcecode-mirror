@@ -10,8 +10,17 @@ import {
   type LayerCatalogConfig,
   type WorkflowPerspective,
 } from "@carma-mapping/layers";
-import { filterAddonsByAvailability, type AddonEntry } from "@carma-mapping/addons";
+import {
+  filterAddonsByAvailability,
+  type AddonEntry,
+  type AddonKind,
+} from "@carma-mapping/addons";
 import { isAvailable, type Availability } from "@carma-commons/utils";
+import {
+  geoportalBranding,
+  recolorLogo,
+  svgToDataUrl,
+} from "@carma-collab/wuppertal/fachzwilling";
 
 import type { BackgroundConfigOverride } from "../../config/geoportalBackground";
 
@@ -59,6 +68,10 @@ export const resolveFachzwillingUi = (
 type FachzwillingRouteBase = {
   /** hash-route path segment, e.g. "gesundheit" -> #/gesundheit */
   path: string;
+  accentColor?: string;
+  logoSvg?: string;
+  siteTitle?: string;
+  footerTitle?: string;
   /**
    * Where the route is reachable by its url. Perspectives, workflows and addons
    * carry the same option; theirs only counts once the route has passed.
@@ -120,6 +133,11 @@ type FachzwillingRouteBase = {
    */
   perspectives?: WorkflowPerspective<AddonEntry>[];
   addons?: AddonEntry[];
+  /**
+   * App defaults (`DEFAULT_ADDONS`, default workflows) the route does without.
+   * Declaring a kind in `addons` replaces its default; this drops it.
+   */
+  excludeDefaultAddons?: AddonKind[];
   /**
    * The route's own background: categories of the map switch, base maps and
    * their services, merged over the plain geoportal's (see
@@ -205,6 +223,24 @@ export const findFachzwillingByPathname = (
   pathname: string
 ): FachzwillingRoute | undefined =>
   fachzwillingRoutes.find((route) => pathname === `/${route.path}`);
+
+/** browser tab text of the plain geoportal, same as the title in index.html */
+const GEOPORTAL_SITE_TITLE = "DZ Geoportal";
+
+export const getSiteTitle = (route?: FachzwillingRoute): string =>
+  route?.siteTitle ??
+  (route?.title ? `DZ ${route.title}` : GEOPORTAL_SITE_TITLE);
+
+/** the route's logo in its accent color, the geoportal logo without an own one */
+export const getFachzwillingLogoUrl = (route?: FachzwillingRoute): string =>
+  route?.logoSvg
+    ? svgToDataUrl(
+        recolorLogo(
+          route.logoSvg,
+          route.accentColor ?? geoportalBranding.accentColor
+        )
+      )
+    : geoportalBranding.logoUrl;
 
 const FACHZWILLINGE_CATEGORY_ID = "fachzwillinge";
 const FACHZWILLINGE_CATEGORY_LABEL = "Fachzwillinge";

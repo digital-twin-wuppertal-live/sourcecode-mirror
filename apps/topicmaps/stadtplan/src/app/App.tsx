@@ -1,6 +1,7 @@
 import { useState, useCallback, useEffect, useMemo, useRef } from "react";
 import { ProgressIndicator, useProgress } from "@carma-appframeworks/portals";
 import { CarmaMap, LibreLayer } from "@carma-mapping/core";
+import { Attribution } from "@carma-mapping/addons/attribution";
 import type { AdvancedFilterState } from "@carma-mapping/components";
 import type maplibregl from "maplibre-gl";
 import {
@@ -31,7 +32,11 @@ import "leaflet/dist/leaflet.css";
 
 export default function App() {
   const { progress, showProgress, handleProgressUpdate } = useProgress();
-  const { map, setMapStyle } = useLibreContext();
+  const { map, setMapStyle, setSelectionOnTop } = useLibreContext();
+
+  useEffect(() => {
+    setSelectionOnTop(true);
+  }, [setSelectionOnTop]);
   // Mount the map only once the persisted background etc. is restored, so it
   // doesn't build the default background first and then switch
   const stylingReady = usePersistedStylingReady();
@@ -208,6 +213,9 @@ export default function App() {
           gazetteerInfoOnClick={false}
           gazetteerSearchPlaceholder="Wohin?"
           zoomOnSelectedFeatureClick
+          extraControls={
+            <Attribution config={{ mode: "transient" }} libreMap={map} />
+          }
           modalMenu={
             <Menu
               categories={categories}

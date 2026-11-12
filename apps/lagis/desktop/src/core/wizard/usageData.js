@@ -2,21 +2,12 @@ import { nanoid } from "@reduxjs/toolkit";
 import {
   fetchFlurstueckBySchluesselId,
   fetchNutzungenForFlurstueck,
-  fetchNutzungStammdaten,
 } from "./api";
 import { adminTargets, inheritedSourceKeys } from "./adminData";
 import { formatKey } from "./keys";
+import { WIZARD_ACTIONS } from "./constants";
 
-let stammdatenCache;
-
-export const loadUsageStammdaten = async (jwt) => {
-  if (!stammdatenCache) {
-    stammdatenCache = await fetchNutzungStammdaten(jwt);
-  }
-  return stammdatenCache;
-};
-
-// prefilled from the previous row, so similar Nutzungen need fewer edits
+// prefilled from the selected (or last) row, so similar Nutzungen need fewer edits
 export const newUsageRow = (previous) => ({
   id: nanoid(),
   anlageklasseId: previous?.anlageklasseId,
@@ -37,40 +28,57 @@ const currentBuchung = (nutzung) =>
         (buchung) => !buchung.gueltig_bis
       );
 
-const fetchSourceBuchungen = async (key, jwt) => {
+const toUsageRow = (buchung) => ({
+  id: nanoid(),
+  anlageklasseId: buchung.fk_anlageklasse ?? undefined,
+  nutzungsartId: buchung.fk_nutzungsart ?? undefined,
+  flaeche: buchung.flaeche ?? null,
+  quadratmeterpreis: buchung.quadratmeterpreis ?? null,
+});
+
+const fetchSourceRows = async (key, jwt) => {
   const flurstueck = await fetchFlurstueckBySchluesselId(key.id, jwt);
   if (!flurstueck) {
     return [];
   }
   const nutzungen = await fetchNutzungenForFlurstueck(flurstueck.id, jwt);
-  return nutzungen.map(currentBuchung).filter(Boolean);
+  return nutzungen.map(currentBuchung).filter(Boolean).map(toUsageRow);
 };
 
-// split/join: new parcels start with exact copies of the consumed parcels' current Nutzungen
-export const loadInheritedUsage = async (value, jwt) => {
+// marks which parcels value.sourceUsage was loaded for, so a changed choice reloads it
+export const sourceUsageFor = (value) =>
+  inheritedSourceKeys(value)
+    .map((key) => key.id)
+    .join(",");
+
+// the current Nutzungen of the parcels a split or join consumes
+export const loadSourceUsage = async (value, jwt) => {
+  const rows = await Promise.all(
+    inheritedSourceKeys(value).map((key) => fetchSourceRows(key, jwt))
+  );
+  return rows.flat();
+};
+
+// a split spreads the Nutzungen over several parcels, so copying all of them
+// into each one would be wrong; the user enters them, checked by the stats
+const STARTS_EMPTY = [WIZARD_ACTIONS.SPLIT, WIZARD_ACTIONS.SPLIT_JOIN];
+
+// join: the new parcel starts with exact copies of the consumed parcels' current Nutzungen
+export const inheritUsage = (value, sourceUsage) => {
+  if (STARTS_EMPTY.includes(value.action)) {
+    return {};
+  }
   const missing = adminTargets(value).filter(
     ({ key }) => !value.usage?.[formatKey(key)]
   );
-  const sourceKeys = inheritedSourceKeys(value);
-  if (!missing.length || !sourceKeys.length) {
+  if (!missing.length || !sourceUsage.length) {
     return {};
   }
-
-  const buchungen = (
-    await Promise.all(sourceKeys.map((key) => fetchSourceBuchungen(key, jwt)))
-  ).flat();
-  if (!buchungen.length) {
-    return {};
-  }
-
   const usage = {};
   for (const { key } of missing) {
-    usage[formatKey(key)] = buchungen.map((b) => ({
+    usage[formatKey(key)] = sourceUsage.map((row) => ({
+      ...row,
       id: nanoid(),
-      anlageklasseId: b.fk_anlageklasse ?? undefined,
-      nutzungsartId: b.fk_nutzungsart ?? undefined,
-      flaeche: b.flaeche ?? null,
-      quadratmeterpreis: b.quadratmeterpreis ?? null,
     }));
   }
   return usage;
