@@ -144,12 +144,12 @@
     }
   },
   "stadtplan": {
-    "version": "3.0.2",
-    "tag": "stadtplan/v3.0.2",
-    "date": "2026-11-12T15:03:17Z",
+    "version": "3.0.3",
+    "tag": "stadtplan/v3.0.3",
+    "date": "2026-11-16T10:53:36Z",
     "sources": {
-      "carma": "b49198869a4959dc78c7ddcd3c90658ea57dfca4",
-      "carma-wuppertal-collab": "d6b9ed10cfc3b5672cbc13a8792e14c76571ab15"
+      "carma": "9dd5e6171e379dd9bbc5def4d6068430a8172772",
+      "carma-wuppertal-collab": "056cb69603fcdd07277c63c763bc2e05db6d5989"
     }
   },
   "tz-leerstandsmanagement": {
