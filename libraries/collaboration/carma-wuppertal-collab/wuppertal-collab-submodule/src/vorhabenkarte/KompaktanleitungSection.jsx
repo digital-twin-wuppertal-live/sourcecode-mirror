@@ -170,7 +170,7 @@ export const KompaktanleitungSection = ({
                 },
                 {
                   title: "In Karte positionieren",
-                  bsStyle: "secondary",
+                  bsStyle: "success",
                   contentBlockConf: {
                     type: "REACTCOMP",
                     content: (
@@ -210,7 +210,7 @@ export const KompaktanleitungSection = ({
                 },
                 {
                   title: "Mein Standort",
-                  bsStyle: "secondary",
+                  bsStyle: "warning",
                   contentBlockConf: {
                     type: "REACTCOMP",
                     content: (
@@ -246,6 +246,38 @@ export const KompaktanleitungSection = ({
                         Das Nachführen der Karte müssen Sie in diesem Modus per Hand erledigen. Ein weiteres Antippen 
                        von "Mein Standort" schaltet die Anzeige Ihrer Position wieder ab (schwarzes Werkzeug-Symbol). 
                     </p>
+                    ),
+                  },
+                },
+                {
+                  title: "Filter",
+                  bsStyle: "info",
+                  contentBlockConf: {
+                    type: "REACTCOMP",
+                    content: (
+                    <div>
+                      <p>
+                        Unter "<strong>Filter</strong>" im{" "}<Icon name="bars" />{" "}
+                        Anwendungsmenü können Sie auswählen, welche Themenfelder in 
+                        der Karte berücksichtigt werden. Aktivieren oder deaktivieren 
+                        Sie dazu die Kontrollkästchen vor den Themenfeldern. Mit 
+                        "<strong>alle</strong>" oder "<strong>keine</strong>" können 
+                        Sie sämtliche Themenfelder gleichzeitig auswählen oder abwählen. 
+                        Mit dem Wechselschalter "<strong>nur Vorhaben mit Bürgerbeteiligung</strong>" 
+                        können Sie die Auswahl zusätzlich auf Vorhaben einschränken, 
+                        für die ein formales Bürgerbeteiligungsverfahren läuft. 
+                      </p>
+                      <p> 
+                        In der blauen Titelzeile wird angezeigt, wie viele Vorhaben 
+                        insgesamt den gewählten Filterbedingungen entsprechen und wie 
+                        viele davon im aktuellen Kartenausschnitt liegen. Das Donut-Diagramm 
+                        zeigt Ihnen als Vorschau, wie sich die ausgewählten Vorhaben auf die 
+                        Themenfelder verteilen. Wenn Sie den Mauszeiger über ein farbiges 
+                        Segment bewegen, wird Ihnen die Anzahl der Vorhaben im jeweiligen 
+                        Themenfeld angezeigt. Auf Geräten mit Touchscreen tippen Sie dazu 
+                        auf das entsprechende Segment.
+                      </p>
+                  </div>
                     ),
                   },
                 },

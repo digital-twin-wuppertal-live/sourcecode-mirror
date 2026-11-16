@@ -180,12 +180,12 @@
     }
   },
   "vorhabenkarte": {
-    "version": "1.0.1",
-    "tag": "vorhabenkarte/v1.0.1",
-    "date": "2026-11-12T14:12:05Z",
+    "version": "1.0.2",
+    "tag": "vorhabenkarte/v1.0.2",
+    "date": "2026-11-16T10:37:41Z",
     "sources": {
-      "carma": "6e8fc15db15618322a4bf7f8cb4aca2d797dd4d2",
-      "carma-wuppertal-collab": "d6b9ed10cfc3b5672cbc13a8792e14c76571ab15"
+      "carma": "b6e41544fd5b274a6aea5ae6d41e67bb14c4cebd",
+      "carma-wuppertal-collab": "056cb69603fcdd07277c63c763bc2e05db6d5989"
     }
   },
   "x-and-ride": {
