@@ -1,4 +1,6 @@
 /// <reference path="./global.d.ts" />
+import { annotations } from "./lib/annotations";
+import { camera } from "./lib/camera";
 import { config } from "./lib/config";
 import { gazetteer } from "./lib/gazetteer";
 import { mapping, mapping2D, mapping3D } from "./lib/mapping";
@@ -6,6 +8,8 @@ import { nuke } from "./lib/nuke";
 import { ui } from "./lib/ui";
 
 export const carma = {
+  annotations,
+  camera,
   config,
   gazetteer,
   mapping,
@@ -14,6 +18,27 @@ export const carma = {
   nuke,
   ui,
 } as const;
+
+export { registerAnnotations } from "./lib/annotations";
+export type {
+  AddMeasurementsOptions,
+  AnnotationCoordinate,
+  AnnotationsAdapter,
+  AnnotationsFacade,
+  AnnotationsState,
+  AnnotationSummary,
+  CreateMeasurementOptions,
+} from "./lib/annotations";
+
+export { registerCamera } from "./lib/camera";
+export type {
+  CameraAdapter,
+  CameraFacade,
+  CameraFlightOptions,
+  CameraLookAtOptions,
+  CameraPose,
+  EcefVector,
+} from "./lib/camera";
 
 export { registerConfig } from "./lib/config";
 export type {
@@ -24,7 +49,7 @@ export type {
   MappingConfigLayer,
 } from "./lib/config";
 
-export { registerMapping } from "./lib/mapping";
+export { registerFeatureSelector2D, registerMapping } from "./lib/mapping";
 export type {
   MapAdapter,
   MappingFacade,
@@ -35,6 +60,10 @@ export type {
   Position2D,
   CameraPosition3D,
   BackgroundLayerInfo,
+  FeatureSelection,
+  FeatureSelector2D,
+  FeatureWhere,
+  SelectFeatureRequest,
 } from "./lib/mapping";
 
 export { registerNuke } from "./lib/nuke";

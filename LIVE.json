@@ -63,12 +63,12 @@
     }
   },
   "geoportal": {
-    "version": "1.3.12",
-    "tag": "geoportal/v1.3.12",
-    "date": "2026-10-26T08:44:30Z",
+    "version": "1.3.13",
+    "tag": "geoportal/v1.3.13",
+    "date": "2026-11-23T14:40:54Z",
     "sources": {
-      "carma": "5c5d27738649f29921447de253e0c8e2ca064625",
-      "carma-wuppertal-collab": "c664386cb2442f20157413e8541e76ef3f9bf345"
+      "carma": "ac9b0dca011cb90a21f07bb61fa655198d6de2ba",
+      "carma-wuppertal-collab": "056cb69603fcdd07277c63c763bc2e05db6d5989"
     }
   },
   "hitzeinderstadt": {

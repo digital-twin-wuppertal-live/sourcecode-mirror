@@ -338,7 +338,10 @@ export {
   createSharedThreeSceneCameraPreview,
   type SharedThreeSceneCameraPreview,
 } from "./lib/runtime/integrations/shared-three-scene-camera-preview";
-export { acquireSharedThreeScene } from "./lib/runtime/integrations/shared-three-scene-registry";
+export {
+  acquireSharedThreeScene,
+  getSharedThreeSceneLayerRuntimes,
+} from "./lib/runtime/integrations/shared-three-scene-registry";
 export { createMapViewSyncGroup } from "./lib/runtime/integrations/map-view-sync";
 export {
   TERRAIN_MAP_STYLE,
@@ -409,6 +412,12 @@ export {
   registerClickHitProvider,
   type ClickHitProvider,
 } from "./utils/clickHitProviders";
+export { isSelectableHit } from "./utils/selectableHits";
+export {
+  selectRenderedFeature,
+  type RenderedFeatureClick,
+  type RenderedFeatureRequest,
+} from "./utils/selectRenderedFeature";
 export {
   loadTileDiagnostics,
   type TileDiagnostics,

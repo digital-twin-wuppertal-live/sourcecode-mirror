@@ -29,6 +29,7 @@ import { subscribeSharedThreeSceneContent } from "./shared-three-scene-content-r
 import {
   MAP_STYLE_PROJECTION_BLEND,
   type SharedThreeSceneLayer,
+  type SharedThreeSceneRuntime,
 } from "../../core/shared-three-scene-types";
 import { TILE_VOLUME_LOAD_REASON } from "../../core/tile-volume";
 import {
@@ -39,7 +40,7 @@ import {
   type RuntimeStyleLayer,
 } from "./map-style-layer-suppression";
 
-const SHARED_SCENE_LAYER_ID = "carma-shared-three-scene";
+export const SHARED_SCENE_LAYER_ID = "carma-shared-three-scene";
 const SHARED_SCENE_ENTRY_VERSION = 19;
 /** Keep a lifted place name inside the view at high zoom. */
 const MAX_LABEL_LIFT_VIEWPORT_FRACTION = 0.35;
@@ -265,6 +266,18 @@ const getMountedSharedThreeSceneLayer = (
     return undefined;
   }
 };
+
+/**
+ * Every runtime the map's shared layer draws, registered as content or not
+ * (the shadow simulation's own terrain); empty while there is no layer.
+ * Reading never acquires the layer.
+ */
+export const getSharedThreeSceneLayerRuntimes = (
+  map: MaplibreMap
+): readonly SharedThreeSceneRuntime[] =>
+  (
+    entries.get(map)?.layer ?? getMountedSharedThreeSceneLayer(map)
+  )?.getRuntimes?.() ?? [];
 
 const getCachedStyleLayers = (
   map: MaplibreMap,

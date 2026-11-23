@@ -60,6 +60,8 @@ import { useMapFrameworkSwitcherContext } from "@carma-mapping/components";
 import { EmptySearchComponent } from "@carma-mapping/fuzzy-search";
 import { useAuth } from "@carma-providers/auth";
 import { useLibreMapEnabled } from "../../hooks/useLibreMapEnabled";
+import { useFeatureSelector } from "../../hooks/useFeatureSelector";
+import { useIsMeasurement3dOn } from "../../hooks/use-measurement3d-host";
 import { useFeatureFlags } from "@carma-providers/feature-flag";
 import {
   defaultLayerConf,
@@ -125,7 +127,11 @@ import {
   getUIHashWriteEnabled,
   getUIVisibleControls,
 } from "../../store/slices/ui.ts";
-import { useHighlightOwnsMapClicks, useSwitchOn } from "@carma-mapping/addons";
+import {
+  useAddonState,
+  useHighlightOwnsMapClicks,
+  useSwitchOn,
+} from "@carma-mapping/addons";
 
 import {
   findFachzwillingByPathname,
@@ -888,6 +894,8 @@ const LibreGeoportalMap = ({ allow3d }: MapProps) => {
   const geoportalLayers = useSelector(getLayers);
   // the "switchOn" tool of a layer, run when its style layers reach the map
   useSwitchOn(libreMap, geoportalLayers);
+  // carma.mapping2D.selectFeature, for callers of the api
+  useFeatureSelector();
   const uiMode = useSelector(getUIMode);
   const isModeMeasurement = uiMode === UIMode.MEASUREMENT;
   const isModePrint = uiMode === UIMode.PRINT;
@@ -963,6 +971,9 @@ const LibreGeoportalMap = ({ allow3d }: MapProps) => {
     onOrbitToggle: toggleOrbit,
     onZoomToFeature: handleZoomToFeature,
   });
+  // the 3D measurement addon owns measurements while a mesh is drawn; the 2D
+  // draw tools and the app's info box step aside for it
+  const isMeasurement3dOn = useIsMeasurement3dOn();
 
   const show2dContainer = !(isCesium && !initialViewApplied);
 
@@ -1014,14 +1025,16 @@ const LibreGeoportalMap = ({ allow3d }: MapProps) => {
           modalMenu={<GeoportalModalMenu />}
         />
         {/* the 2D draw host and its info box stay out of the way in 3D, where
-            the cesium annotation runtime owns measurements */}
-        {isModeMeasurement && !isCesium && (
+            the annotation runtime owns measurements (cesium, or maplibre with
+            three.js surfaces) */}
+        {isModeMeasurement && !isCesium && !isMeasurement3dOn && (
           <MeasurementHost mode={libreDrawMode} snapping styleVariant="carma" />
         )}
         {visibleControls.infoBox &&
           (isCesium ? (
             cesiumInfoBox
-          ) : isModeMeasurement || selectedMeasurement ? (
+          ) : isMeasurement3dOn ? null : isModeMeasurement ||
+            selectedMeasurement ? (
             <MeasurementInfoBox selectionPadding={selectionPadding} />
           ) : (
             <FeatureInfoBox
